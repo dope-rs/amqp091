@@ -1,7 +1,10 @@
+use std::fmt::{Display, Formatter};
+use std::io::ErrorKind;
+use std::{error, fmt, io};
 #[derive(Debug, Clone)]
 pub enum Error {
     Io {
-        kind: std::io::ErrorKind,
+        kind: ErrorKind,
         message: String,
     },
     Closed,
@@ -19,6 +22,12 @@ pub enum Error {
         size: u32,
         max: u32,
     },
+    MessageTooLarge {
+        size: u64,
+        max: usize,
+    },
+    InvalidConfig(&'static str),
+    CapacityOverflow(&'static str),
     UnknownClass(u16),
     UnknownMethod {
         class_id: u16,
@@ -26,11 +35,13 @@ pub enum Error {
     },
     ConnectionBlocked(String),
     ChannelFlowPaused,
+    ChannelInUse(u16),
+    WaiterCapacity,
     Other(String),
 }
 
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for Error {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io { kind, message } => write!(f, "io error: {kind}: {message}"),
             Self::Closed => f.write_str("connection closed"),
@@ -50,6 +61,11 @@ impl std::fmt::Display for Error {
             Self::FrameTooLarge { size, max } => {
                 write!(f, "frame {size} exceeds negotiated max {max}")
             }
+            Self::MessageTooLarge { size, max } => {
+                write!(f, "message {size} exceeds max {max}")
+            }
+            Self::InvalidConfig(message) => write!(f, "invalid configuration: {message}"),
+            Self::CapacityOverflow(resource) => write!(f, "{resource} capacity exceeded"),
             Self::UnknownClass(c) => write!(f, "unknown class id {c}"),
             Self::UnknownMethod {
                 class_id,
@@ -59,12 +75,14 @@ impl std::fmt::Display for Error {
             }
             Self::ConnectionBlocked(reason) => write!(f, "connection blocked: {reason}"),
             Self::ChannelFlowPaused => f.write_str("channel paused by server (flow=false)"),
+            Self::ChannelInUse(channel) => write!(f, "channel {channel} is already in use"),
+            Self::WaiterCapacity => f.write_str("waiter capacity exhausted"),
             Self::Other(s) => f.write_str(s),
         }
     }
 }
 
-impl std::error::Error for Error {}
+impl error::Error for Error {}
 
 pub struct ReplyCode;
 
@@ -151,8 +169,8 @@ impl Error {
     }
 }
 
-impl From<std::io::Error> for Error {
-    fn from(e: std::io::Error) -> Self {
+impl From<io::Error> for Error {
+    fn from(e: io::Error) -> Self {
         Self::Io {
             kind: e.kind(),
             message: e.to_string(),

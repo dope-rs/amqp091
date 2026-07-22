@@ -2,17 +2,24 @@ pub mod basic;
 pub mod channel;
 pub mod confirm;
 pub mod connection;
-mod encode;
+pub mod core;
 pub mod exchange;
 pub mod queue;
-mod spec;
 pub mod tx;
+use o3::buffer::Shared;
 
-pub use encode::ClientMethod;
-pub use spec::{Basic, Channel, ClassId, Confirm, Connection, Exchange, Method, Queue, Tx};
-
-use crate::Error;
-use crate::wire::Reader;
+use crate::error::Error;
+use crate::method::basic::{
+    Ack, Cancel, CancelOk, ConsumeOk, Deliver, GetEmpty, GetOk, Nack, QosOk, RecoverOk, Return,
+};
+use crate::method::channel::{Flow, FlowOk};
+use crate::method::confirm::SelectOk;
+use crate::method::connection::{Blocked, Close, CloseOk, OpenOk, Secure, Start, Tune, Unblocked};
+use crate::method::core::{Basic, Channel, ClassId, Confirm, Connection, Exchange, Queue, Tx};
+use crate::method::exchange::{BindOk, DeclareOk, DeleteOk, UnbindOk};
+use crate::method::queue::PurgeOk;
+use crate::method::tx::{CommitOk, RollbackOk};
+use crate::wire::reader::Reader;
 
 #[derive(Debug)]
 pub enum Server {
@@ -56,8 +63,8 @@ pub enum Server {
 }
 
 impl Server {
-    pub fn parse(payload: &[u8]) -> Result<Self, Error> {
-        let mut r = Reader::new(payload);
+    pub fn parse(payload: Shared) -> Result<Self, Error> {
+        let mut r = Reader::new(&payload);
         let class_id = r.take_u16()?;
         let method_id = r.take_u16()?;
         match class_id {
@@ -65,7 +72,7 @@ impl Server {
             ClassId::CHANNEL => Self::parse_channel(method_id, &mut r),
             ClassId::EXCHANGE => Self::parse_exchange(method_id, &mut r),
             ClassId::QUEUE => Self::parse_queue(method_id, &mut r),
-            ClassId::BASIC => Self::parse_basic(method_id, &mut r),
+            ClassId::BASIC => Self::parse_basic(method_id, &mut r, &payload),
             ClassId::CONFIRM => Self::parse_confirm(method_id, &mut r),
             ClassId::TX => Self::parse_tx(method_id, &mut r),
             other => Err(Error::UnknownClass(other)),
@@ -74,14 +81,14 @@ impl Server {
 
     fn parse_connection(method_id: u16, r: &mut Reader<'_>) -> Result<Self, Error> {
         Ok(match method_id {
-            Connection::START => Self::ConnectionStart(connection::Start::read(r)?),
-            Connection::SECURE => Self::ConnectionSecure(connection::Secure::read(r)?),
-            Connection::TUNE => Self::ConnectionTune(connection::Tune::read(r)?),
-            Connection::OPEN_OK => Self::ConnectionOpenOk(connection::OpenOk::read(r)?),
-            Connection::CLOSE => Self::ConnectionClose(connection::Close::read(r)?),
-            Connection::CLOSE_OK => Self::ConnectionCloseOk(connection::CloseOk::read(r)?),
-            Connection::BLOCKED => Self::ConnectionBlocked(connection::Blocked::read(r)?),
-            Connection::UNBLOCKED => Self::ConnectionUnblocked(connection::Unblocked::read(r)?),
+            Connection::START => Self::ConnectionStart(Start::read(r)?),
+            Connection::SECURE => Self::ConnectionSecure(Secure::read(r)?),
+            Connection::TUNE => Self::ConnectionTune(Tune::read(r)?),
+            Connection::OPEN_OK => Self::ConnectionOpenOk(OpenOk::read(r)?),
+            Connection::CLOSE => Self::ConnectionClose(Close::read(r)?),
+            Connection::CLOSE_OK => Self::ConnectionCloseOk(CloseOk::read(r)?),
+            Connection::BLOCKED => Self::ConnectionBlocked(Blocked::read(r)?),
+            Connection::UNBLOCKED => Self::ConnectionUnblocked(Unblocked::read(r)?),
             id => {
                 return Err(Error::UnknownMethod {
                     class_id: ClassId::CONNECTION,
@@ -92,12 +99,14 @@ impl Server {
     }
 
     fn parse_channel(method_id: u16, r: &mut Reader<'_>) -> Result<Self, Error> {
+        use channel::{Close, CloseOk, OpenOk};
+
         Ok(match method_id {
-            Channel::OPEN_OK => Self::ChannelOpenOk(channel::OpenOk::read(r)?),
-            Channel::FLOW => Self::ChannelFlow(channel::Flow::read(r)?),
-            Channel::FLOW_OK => Self::ChannelFlowOk(channel::FlowOk::read(r)?),
-            Channel::CLOSE => Self::ChannelClose(channel::Close::read(r)?),
-            Channel::CLOSE_OK => Self::ChannelCloseOk(channel::CloseOk::read(r)?),
+            Channel::OPEN_OK => Self::ChannelOpenOk(OpenOk::read(r)?),
+            Channel::FLOW => Self::ChannelFlow(Flow::read(r)?),
+            Channel::FLOW_OK => Self::ChannelFlowOk(FlowOk::read(r)?),
+            Channel::CLOSE => Self::ChannelClose(Close::read(r)?),
+            Channel::CLOSE_OK => Self::ChannelCloseOk(CloseOk::read(r)?),
             id => {
                 return Err(Error::UnknownMethod {
                     class_id: ClassId::CHANNEL,
@@ -109,10 +118,10 @@ impl Server {
 
     fn parse_exchange(method_id: u16, r: &mut Reader<'_>) -> Result<Self, Error> {
         Ok(match method_id {
-            Exchange::DECLARE_OK => Self::ExchangeDeclareOk(exchange::DeclareOk::read(r)?),
-            Exchange::DELETE_OK => Self::ExchangeDeleteOk(exchange::DeleteOk::read(r)?),
-            Exchange::BIND_OK => Self::ExchangeBindOk(exchange::BindOk::read(r)?),
-            Exchange::UNBIND_OK => Self::ExchangeUnbindOk(exchange::UnbindOk::read(r)?),
+            Exchange::DECLARE_OK => Self::ExchangeDeclareOk(DeclareOk::read(r)?),
+            Exchange::DELETE_OK => Self::ExchangeDeleteOk(DeleteOk::read(r)?),
+            Exchange::BIND_OK => Self::ExchangeBindOk(BindOk::read(r)?),
+            Exchange::UNBIND_OK => Self::ExchangeUnbindOk(UnbindOk::read(r)?),
             id => {
                 return Err(Error::UnknownMethod {
                     class_id: ClassId::EXCHANGE,
@@ -123,12 +132,14 @@ impl Server {
     }
 
     fn parse_queue(method_id: u16, r: &mut Reader<'_>) -> Result<Self, Error> {
+        use queue::{BindOk, DeclareOk, DeleteOk, UnbindOk};
+
         Ok(match method_id {
-            Queue::DECLARE_OK => Self::QueueDeclareOk(queue::DeclareOk::read(r)?),
-            Queue::BIND_OK => Self::QueueBindOk(queue::BindOk::read(r)?),
-            Queue::UNBIND_OK => Self::QueueUnbindOk(queue::UnbindOk::read(r)?),
-            Queue::PURGE_OK => Self::QueuePurgeOk(queue::PurgeOk::read(r)?),
-            Queue::DELETE_OK => Self::QueueDeleteOk(queue::DeleteOk::read(r)?),
+            Queue::DECLARE_OK => Self::QueueDeclareOk(DeclareOk::read(r)?),
+            Queue::BIND_OK => Self::QueueBindOk(BindOk::read(r)?),
+            Queue::UNBIND_OK => Self::QueueUnbindOk(UnbindOk::read(r)?),
+            Queue::PURGE_OK => Self::QueuePurgeOk(PurgeOk::read(r)?),
+            Queue::DELETE_OK => Self::QueueDeleteOk(DeleteOk::read(r)?),
             id => {
                 return Err(Error::UnknownMethod {
                     class_id: ClassId::QUEUE,
@@ -138,19 +149,19 @@ impl Server {
         })
     }
 
-    fn parse_basic(method_id: u16, r: &mut Reader<'_>) -> Result<Self, Error> {
+    fn parse_basic(method_id: u16, r: &mut Reader<'_>, payload: &Shared) -> Result<Self, Error> {
         Ok(match method_id {
-            Basic::QOS_OK => Self::BasicQosOk(basic::QosOk::read(r)?),
-            Basic::CONSUME_OK => Self::BasicConsumeOk(basic::ConsumeOk::read(r)?),
-            Basic::CANCEL => Self::BasicCancel(basic::Cancel::read(r)?),
-            Basic::CANCEL_OK => Self::BasicCancelOk(basic::CancelOk::read(r)?),
-            Basic::RETURN => Self::BasicReturn(basic::Return::read(r)?),
-            Basic::DELIVER => Self::BasicDeliver(basic::Deliver::read(r)?),
-            Basic::GET_OK => Self::BasicGetOk(basic::GetOk::read(r)?),
-            Basic::GET_EMPTY => Self::BasicGetEmpty(basic::GetEmpty::read(r)?),
-            Basic::ACK => Self::BasicAck(basic::Ack::read(r)?),
-            Basic::NACK => Self::BasicNack(basic::Nack::read(r)?),
-            Basic::RECOVER_OK => Self::BasicRecoverOk(basic::RecoverOk::read(r)?),
+            Basic::QOS_OK => Self::BasicQosOk(QosOk::read(r)?),
+            Basic::CONSUME_OK => Self::BasicConsumeOk(ConsumeOk::read(r)?),
+            Basic::CANCEL => Self::BasicCancel(Cancel::read(r)?),
+            Basic::CANCEL_OK => Self::BasicCancelOk(CancelOk::read(r)?),
+            Basic::RETURN => Self::BasicReturn(Return::read(r, payload)?),
+            Basic::DELIVER => Self::BasicDeliver(Deliver::read(r, payload)?),
+            Basic::GET_OK => Self::BasicGetOk(GetOk::read(r, payload)?),
+            Basic::GET_EMPTY => Self::BasicGetEmpty(GetEmpty::read(r)?),
+            Basic::ACK => Self::BasicAck(Ack::read(r)?),
+            Basic::NACK => Self::BasicNack(Nack::read(r)?),
+            Basic::RECOVER_OK => Self::BasicRecoverOk(RecoverOk::read(r)?),
             id => {
                 return Err(Error::UnknownMethod {
                     class_id: ClassId::BASIC,
@@ -162,7 +173,7 @@ impl Server {
 
     fn parse_confirm(method_id: u16, r: &mut Reader<'_>) -> Result<Self, Error> {
         Ok(match method_id {
-            Confirm::SELECT_OK => Self::ConfirmSelectOk(confirm::SelectOk::read(r)?),
+            Confirm::SELECT_OK => Self::ConfirmSelectOk(SelectOk::read(r)?),
             id => {
                 return Err(Error::UnknownMethod {
                     class_id: ClassId::CONFIRM,
@@ -173,10 +184,12 @@ impl Server {
     }
 
     fn parse_tx(method_id: u16, r: &mut Reader<'_>) -> Result<Self, Error> {
+        use tx::SelectOk;
+
         Ok(match method_id {
-            Tx::SELECT_OK => Self::TxSelectOk(tx::SelectOk::read(r)?),
-            Tx::COMMIT_OK => Self::TxCommitOk(tx::CommitOk::read(r)?),
-            Tx::ROLLBACK_OK => Self::TxRollbackOk(tx::RollbackOk::read(r)?),
+            Tx::SELECT_OK => Self::TxSelectOk(SelectOk::read(r)?),
+            Tx::COMMIT_OK => Self::TxCommitOk(CommitOk::read(r)?),
+            Tx::ROLLBACK_OK => Self::TxRollbackOk(RollbackOk::read(r)?),
             id => {
                 return Err(Error::UnknownMethod {
                     class_id: ClassId::TX,

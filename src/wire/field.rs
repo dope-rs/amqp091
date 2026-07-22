@@ -1,5 +1,7 @@
-use crate::Error;
-use crate::wire::{Put, Reader, Sink};
+use super::put::Put;
+use super::reader::Reader;
+use super::sink::Sink;
+use crate::error::Error;
 
 #[derive(Clone, Debug)]
 pub enum FieldValue {

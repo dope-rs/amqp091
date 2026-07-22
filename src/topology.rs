@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::wire::FieldTable;
+use crate::wire::field::FieldTable;
 
 #[derive(Default, Clone)]
 pub struct Topology {
@@ -82,6 +82,10 @@ impl Topology {
 
     pub(super) fn channel_topo(&self, id: u16) -> Option<&ChannelTopology> {
         self.channels.get(&id)
+    }
+
+    pub(super) fn remove_channel(&mut self, id: u16) {
+        self.channels.remove(&id);
     }
 
     pub(super) fn resolve_server_queue_view(

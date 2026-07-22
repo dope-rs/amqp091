@@ -1,7 +1,9 @@
+use std::cell::Cell;
+
 use dope::manifold::connector;
 use o3::buffer::Shared;
 
-use crate::wire::Sink;
+use super::sink::Sink;
 
 pub struct FrameType;
 
@@ -29,20 +31,47 @@ pub struct Frame {
     pub raw_payload_len: u32,
 }
 
-pub struct Codec;
+pub struct Codec {
+    max_frame: Cell<u32>,
+}
+
+impl Codec {
+    pub fn new(max_frame: u32) -> Self {
+        Self {
+            max_frame: Cell::new(Self::clamp(max_frame)),
+        }
+    }
+
+    pub fn max_frame(&self) -> u32 {
+        self.max_frame.get()
+    }
+
+    pub fn set_max_frame(&self, max_frame: u32) {
+        self.max_frame.set(Self::clamp(max_frame));
+    }
+
+    fn clamp(max_frame: u32) -> u32 {
+        if max_frame == 0 {
+            MAX_FRAME_HARD_CAP
+        } else {
+            max_frame.min(MAX_FRAME_HARD_CAP)
+        }
+    }
+}
 
 impl connector::Codec for Codec {
     type Head = Frame;
     type ParseState = ();
 
     fn parse(&self, _state: &mut (), buf: &Shared) -> Option<(Frame, usize)> {
-        if buf.len() < HEADER_LEN + END_LEN {
+        if buf.len() < HEADER_LEN {
             return None;
         }
         let frame_type = buf[0];
         let channel = u16::from_be_bytes([buf[1], buf[2]]);
         let payload_len_raw = u32::from_be_bytes([buf[3], buf[4], buf[5], buf[6]]);
-        if payload_len_raw > MAX_FRAME_HARD_CAP {
+        let total = payload_len_raw.saturating_add(OVERHEAD as u32);
+        if total > self.max_frame.get() {
             return Some((
                 Frame {
                     frame_type,
@@ -76,10 +105,17 @@ impl connector::Codec for Codec {
     }
 }
 
-pub struct FrameEncoder;
+pub struct FrameEncoder<'a, S: ?Sized> {
+    out: &'a mut S,
+}
 
-impl FrameEncoder {
-    pub fn write<S: Sink, F: FnOnce(&mut S)>(out: &mut S, frame_type: u8, channel: u16, body: F) {
+impl<'a, S: Sink + ?Sized> FrameEncoder<'a, S> {
+    pub fn new(out: &'a mut S) -> Self {
+        Self { out }
+    }
+
+    pub fn write<F: FnOnce(&mut S)>(self, frame_type: u8, channel: u16, body: F) {
+        let out = self.out;
         let header_pos = out.len();
         for _ in 0..HEADER_LEN {
             out.push(0);
@@ -94,7 +130,8 @@ impl FrameEncoder {
         out.push(FrameType::END);
     }
 
-    pub fn write_raw_body<S: Sink>(out: &mut S, channel: u16, body: &[u8]) {
+    pub fn write_raw_body(self, channel: u16, body: &[u8]) {
+        let out = self.out;
         out.push(FrameType::BODY);
         out.extend_from_slice(&channel.to_be_bytes());
         out.extend_from_slice(&(body.len() as u32).to_be_bytes());
@@ -102,11 +139,12 @@ impl FrameEncoder {
         out.push(FrameType::END);
     }
 
-    pub fn write_heartbeat<S: Sink>(out: &mut S) {
-        out.extend_from_slice(&[FrameType::HEARTBEAT, 0, 0, 0, 0, 0, 0, FrameType::END]);
+    pub fn write_heartbeat(self) {
+        self.out
+            .extend_from_slice(&[FrameType::HEARTBEAT, 0, 0, 0, 0, 0, 0, FrameType::END]);
     }
 
-    pub fn write_protocol_header<S: Sink>(out: &mut S) {
-        out.extend_from_slice(&PROTOCOL_HEADER);
+    pub fn write_protocol_header(self) {
+        self.out.extend_from_slice(&PROTOCOL_HEADER);
     }
 }
