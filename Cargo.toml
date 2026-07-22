@@ -1,6 +1,6 @@
 [package]
 name = "dope-amqp091"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 authors = ["inq <gofiri@gmail.com>"]
 description = "AMQP 0-9-1 client on dope runtime"

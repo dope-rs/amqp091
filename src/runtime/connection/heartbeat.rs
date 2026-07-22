@@ -70,10 +70,9 @@ where
                         .is_some_and(|last| now.duration_since(last) > dead_threshold)
                 });
                 if timed_out {
-                    let error = Error::Other("heartbeat timeout — peer silent".into());
                     conn.session()
-                        .with_shared(|shared| shared.record_failure(error.clone()));
-                    return Err(error);
+                        .with_shared(|shared| shared.record_recoverable_disconnect());
+                    return Err(Error::Other("heartbeat timeout — peer silent".into()));
                 }
 
                 let frame = handle.encode(|out| FrameEncoder::new(out).write_heartbeat())?;
