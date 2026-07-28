@@ -1,33 +1,39 @@
-use std::cell::Cell;
+use std::pin::Pin;
 
-use dope_fiber::Waker;
+use dope::driver::ready::{CompletionKey, CompletionSlot, CompletionWaker};
+use dope_fiber::raw::task::Context;
+use dope_fiber::raw::wait::{WaitQueue, Waiter};
 
 /// Allocation-free task notification slot whose `'d` brand keeps the
 /// notification inside the owning executor domain.
-pub(crate) struct WakeSlot<'d>(Cell<Option<Waker<'d>>>);
+pub(crate) struct WakeSlot<'d>(CompletionSlot<'d>);
 
 impl<'d> WakeSlot<'d> {
     pub(crate) const fn new() -> Self {
-        Self(Cell::new(None))
+        Self(CompletionSlot::empty())
     }
 
     #[must_use]
-    pub(crate) fn register(&self, waker: Waker<'d>) -> bool {
-        if self.0.get().is_some_and(|current| current != waker) {
+    pub(crate) fn register(&self, wake: CompletionWaker<'d>) -> bool {
+        if !self.0.is_empty() && !self.0.matches(&wake) {
             return false;
         }
-        self.0.set(Some(waker));
+        self.0.set(wake);
         true
     }
 
     pub(crate) fn wake(&self) {
-        if let Some(waker) = self.0.take() {
-            waker.wake();
+        if let Some(wake) = self.0.take() {
+            wake.wake();
         }
     }
 
     pub(crate) fn clear(&self) {
-        self.0.set(None);
+        self.0.clear();
+    }
+
+    pub(crate) fn clear_if(&self, key: CompletionKey<'d>) {
+        self.0.clear_if(key);
     }
 }
 
@@ -37,47 +43,46 @@ impl Default for WakeSlot<'_> {
     }
 }
 
-/// Fixed-capacity registry for cold connection-wide events. Its compact linear
-/// storage keeps registration and wake allocation-free and idempotent.
-pub(crate) struct WakeRegistry<'d> {
-    slots: Box<[Cell<Option<Waker<'d>>>]>,
+/// Fixed-capacity intrusive registry for cold connection-wide events.
+/// Registration, refresh, and cancellation are allocation-free and O(1).
+pub(crate) struct WakeRegistry {
+    queue: Pin<Box<WaitQueue>>,
 }
 
-impl<'d> WakeRegistry<'d> {
+impl WakeRegistry {
     pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
-            slots: (0..capacity).map(|_| Cell::new(None)).collect(),
+            queue: Box::pin(WaitQueue::with_capacity(capacity)),
         }
     }
 
-    pub(crate) fn can_register(&self, waker: Waker<'d>) -> bool {
-        self.slots
-            .iter()
-            .any(|slot| slot.get().is_none_or(|current| current == waker))
+    pub(crate) fn can_register<'d>(&self, waiter: Pin<&Waiter<'d>>) -> bool {
+        self.queue.as_ref().can_register(waiter)
     }
 
     #[must_use]
-    pub(crate) fn register(&self, waker: Waker<'d>) -> bool {
-        let mut vacant = None;
-        for slot in &self.slots {
-            match slot.get() {
-                Some(current) if current == waker => return true,
-                None if vacant.is_none() => vacant = Some(slot),
-                Some(_) | None => {}
-            }
-        }
-        let Some(slot) = vacant else {
-            return false;
-        };
-        slot.set(Some(waker));
-        true
+    pub(crate) fn register<'d>(
+        &self,
+        waiter: Pin<&Waiter<'d>>,
+        context: Pin<&Context<'_, 'd>>,
+    ) -> bool {
+        self.queue.as_ref().try_register(waiter, context)
     }
 
     pub(crate) fn wake(&self) {
-        for slot in &self.slots {
-            if let Some(waker) = slot.take() {
-                waker.wake();
-            }
-        }
+        self.queue.as_ref().wake();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::mem::size_of;
+
+    use super::{WakeRegistry, WakeSlot};
+
+    #[test]
+    fn wake_owners_keep_compact_layouts() {
+        assert_eq!(size_of::<WakeSlot<'static>>(), 3 * size_of::<usize>());
+        assert_eq!(size_of::<WakeRegistry>(), size_of::<usize>());
     }
 }

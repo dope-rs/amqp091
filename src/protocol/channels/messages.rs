@@ -4,7 +4,7 @@ pub(crate) trait ChannelMessages<'d> {
     fn consumer_next(
         &mut self,
         key: SlabKey,
-        waker: Waker<'d>,
+        wake: CompletionWaker<'d>,
     ) -> Result<Poll<Option<Delivery<'static>>>, Error>;
     fn pop_delivery(&mut self, consumer_key: SlabKey) -> Option<Delivery<'static>>;
     fn complete_head_with(
@@ -14,7 +14,10 @@ pub(crate) trait ChannelMessages<'d> {
     ) -> Result<Option<Outbound>, Error>;
     fn route_delivery(&mut self, delivery: Delivery<'static>) -> Result<(), Error>;
     fn route_return(&mut self, returned: Returned<'static>) -> Result<(), Error>;
-    fn next_return(&mut self, waker: Waker<'d>) -> Result<Option<Returned<'static>>, Error>;
+    fn next_return(
+        &mut self,
+        wake: CompletionWaker<'d>,
+    ) -> Result<Option<Returned<'static>>, Error>;
     fn cancel_consumer(&mut self, tag: &str) -> Result<(), Error>;
     fn detach_consumer(&mut self, key: SlabKey);
     fn fail_all(&mut self, error: &Error);
@@ -24,7 +27,7 @@ impl<'d> ChannelMessages<'d> for ChannelState<'d> {
     fn consumer_next(
         &mut self,
         key: SlabKey,
-        waker: Waker<'d>,
+        wake: CompletionWaker<'d>,
     ) -> Result<Poll<Option<Delivery<'static>>>, Error> {
         if let Some(delivery) = self.pop_delivery(key) {
             return Ok(Poll::Ready(Some(delivery)));
@@ -35,7 +38,7 @@ impl<'d> ChannelMessages<'d> for ChannelState<'d> {
         if consumer.canceled {
             return Ok(Poll::Ready(None));
         }
-        if consumer.waker.register(waker) {
+        if consumer.waker.register(wake) {
             Ok(Poll::Pending)
         } else {
             Err(Error::WaiterCapacity)
@@ -136,14 +139,17 @@ impl<'d> ChannelMessages<'d> for ChannelState<'d> {
         Ok(())
     }
 
-    fn next_return(&mut self, waker: Waker<'d>) -> Result<Option<Returned<'static>>, Error> {
+    fn next_return(
+        &mut self,
+        wake: CompletionWaker<'d>,
+    ) -> Result<Option<Returned<'static>>, Error> {
         if self.phase != ChannelPhase::Open {
             return Err(Error::Closed);
         }
         if let Some(r) = self.returns.pop_front() {
             return Ok(Some(r));
         }
-        if self.return_waker.register(waker) {
+        if self.return_waker.register(wake) {
             Ok(None)
         } else {
             Err(Error::WaiterCapacity)

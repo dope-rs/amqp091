@@ -2,10 +2,10 @@ use super::super::*;
 
 pub(crate) struct Shared<'d> {
     pub(crate) ready_conn: Option<Token>,
-    pub(crate) handshake_wakers: WakeRegistry<'d>,
+    pub(crate) handshake_wakers: WakeRegistry,
     pub(crate) fatal: Option<Error>,
-    pub(crate) closed_wakers: WakeRegistry<'d>,
-    pub(crate) progress_wakers: WakeRegistry<'d>,
+    pub(crate) closed_wakers: WakeRegistry,
+    pub(crate) progress_wakers: WakeRegistry,
     pub(crate) last_recv_at: Option<Instant>,
     pub(crate) topology: Topology,
     pub(crate) auto_recovery_enabled: bool,
@@ -72,23 +72,43 @@ impl<'d> Shared<'d> {
         &self.blocked_reason
     }
 
-    pub(crate) fn try_register_handshake_waker(&mut self, waker: Waker<'d>) -> bool {
-        self.handshake_wakers.register(waker)
+    pub(crate) fn try_register_handshake_waker(
+        &mut self,
+        waiter: Pin<&Waiter<'d>>,
+        context: Pin<&Context<'_, 'd>>,
+    ) -> bool {
+        self.handshake_wakers.register(waiter, context)
     }
 
-    pub(crate) fn try_register_closed_waker(&mut self, waker: Waker<'d>) -> bool {
-        self.closed_wakers.register(waker)
+    pub(crate) fn try_register_closed_waker(
+        &mut self,
+        waiter: Pin<&Waiter<'d>>,
+        context: Pin<&Context<'_, 'd>>,
+    ) -> bool {
+        self.closed_wakers.register(waiter, context)
     }
 
-    pub(crate) fn try_register_progress_waker(&mut self, waker: Waker<'d>) -> bool {
-        self.progress_wakers.register(waker)
+    pub(crate) fn try_register_progress_waker(
+        &mut self,
+        waiter: Pin<&Waiter<'d>>,
+        context: Pin<&Context<'_, 'd>>,
+    ) -> bool {
+        self.progress_wakers.register(waiter, context)
     }
 
-    pub(crate) fn try_register_recovery_waker(&mut self, waker: Waker<'d>) -> bool {
-        if !self.progress_wakers.can_register(waker) || !self.handshake_wakers.can_register(waker) {
+    pub(crate) fn try_register_recovery_waker(
+        &mut self,
+        progress: Pin<&Waiter<'d>>,
+        handshake: Pin<&Waiter<'d>>,
+        context: Pin<&Context<'_, 'd>>,
+    ) -> bool {
+        if !self.progress_wakers.can_register(progress)
+            || !self.handshake_wakers.can_register(handshake)
+        {
             return false;
         }
-        self.progress_wakers.register(waker) && self.handshake_wakers.register(waker)
+        self.progress_wakers.register(progress, context)
+            && self.handshake_wakers.register(handshake, context)
     }
 
     pub(crate) fn ready_generation(&self) -> u64 {

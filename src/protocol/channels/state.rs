@@ -158,16 +158,17 @@ impl<'d> ChannelState<'d> {
     pub(crate) fn poll_op(
         &mut self,
         key: SlabKey,
-        waker: Waker<'d>,
+        wake: CompletionWaker<'d>,
     ) -> Option<Result<PendingResponse, Error>> {
         let op = self.pending_ops.get_mut(key)?;
         if let Some(outcome) = op.outcome.take() {
             self.pending_ops.remove(key);
             return Some(outcome);
         }
-        if op.waker.register(waker) {
+        if op.waker.register(wake) {
             None
         } else {
+            self.detach_op(key);
             Some(Err(Error::WaiterCapacity))
         }
     }
@@ -191,11 +192,9 @@ impl<'d> ChannelState<'d> {
             self.pending_ops.remove(key);
             return;
         }
-        if op.expect == ExpectMethod::ChannelCloseOk {
+        if op.expect == ExpectMethod::ChannelCloseOk || op.sent {
             op.detached = true;
             op.waker.clear();
-        } else if op.sent {
-            op.detached = true;
         } else {
             self.pending_ops.remove(key);
             self.op_order.remove(key.index() as usize);
@@ -218,6 +217,16 @@ impl<'d> ChannelState<'d> {
             waker: WakeSlot::default(),
             canceled: false,
         })
+    }
+
+    pub(crate) fn clear_consumer_waker(&mut self, key: SlabKey) {
+        if let Some(consumer) = self.consumers.get_mut(key) {
+            consumer.waker.clear();
+        }
+    }
+
+    pub(crate) fn clear_return_waker(&mut self, key: CompletionKey<'d>) {
+        self.return_waker.clear_if(key);
     }
 
     pub(crate) fn reset_for_reopen(&mut self) {
@@ -301,7 +310,7 @@ impl<'d> ChannelState<'d> {
     pub(crate) fn poll_publish(
         &mut self,
         tag: u64,
-        waker: Waker<'d>,
+        wake: CompletionWaker<'d>,
     ) -> Result<Option<PublishConfirm>, Error> {
         if !self.confirm_enabled {
             return Err(Error::Protocol("publisher confirms not enabled"));
@@ -316,7 +325,7 @@ impl<'d> ChannelState<'d> {
                 .ok_or(Error::Protocol("publisher confirm tracker is inconsistent"))?;
             return outcome.map(Some);
         }
-        if pending.waker.register(waker) {
+        if pending.waker.register(wake) {
             Ok(None)
         } else {
             Err(Error::WaiterCapacity)

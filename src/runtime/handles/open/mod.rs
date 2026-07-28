@@ -1,6 +1,8 @@
 use super::*;
 use crate::method::channel::Open;
+use pin_project::{pin_project, pinned_drop};
 
+#[pin_project(PinnedDrop)]
 pub struct OpenChannel<'a, 'd, S, E>
 where
     S: Dialer<E::Transport>,
@@ -9,6 +11,7 @@ where
 {
     handle: AmqpHandle<'a, 'd, S, E>,
     channel: u16,
+    #[pin]
     future: MethodFuture<'a, 'd, S, E, ()>,
     error: Option<Error>,
     reserved: bool,
@@ -50,20 +53,21 @@ where
 {
     type Output = Result<Channel<'a, 'd, S, E>, Error>;
 
-    fn poll(mut self: Pin<&mut Self>, cx: Pin<&mut Context<'_, 'd>>) -> Poll<Self::Output> {
-        if let Some(error) = self.error.take() {
+    fn poll(self: Pin<&mut Self>, cx: Pin<&mut Context<'_, 'd>>) -> Poll<Self::Output> {
+        let this = self.project();
+        if let Some(error) = this.error.take() {
             return Poll::Ready(Err(error));
         }
-        match Pin::new(&mut self.future).poll(cx) {
+        match this.future.poll(cx) {
             Poll::Ready(Ok(())) => {
-                self.reserved = false;
+                *this.reserved = false;
                 Poll::Ready(Ok(Channel {
-                    handle: self.handle,
-                    channel: self.channel,
+                    handle: *this.handle,
+                    channel: *this.channel,
                 }))
             }
             Poll::Ready(Err(error)) => {
-                self.release();
+                release_reservation(*this.handle, *this.channel, this.reserved);
                 Poll::Ready(Err(error))
             }
             Poll::Pending => Poll::Pending,
@@ -71,30 +75,30 @@ where
     }
 }
 
-impl<S, E> OpenChannel<'_, '_, S, E>
+fn release_reservation<S, E>(handle: AmqpHandle<'_, '_, S, E>, channel: u16, reserved: &mut bool)
 where
     S: Dialer<E::Transport>,
     E: Env,
     E::Transport: Transport<Addr: Clone>,
 {
-    fn release(&mut self) {
-        if self.reserved {
-            self.handle
-                .connector()
-                .session()
-                .with_shared(|shared| shared.release_channel(self.channel));
-            self.reserved = false;
-        }
+    if *reserved {
+        handle
+            .connector()
+            .session()
+            .with_shared(|shared| shared.release_channel(channel));
+        *reserved = false;
     }
 }
 
-impl<S, E> Drop for OpenChannel<'_, '_, S, E>
+#[pinned_drop]
+impl<S, E> PinnedDrop for OpenChannel<'_, '_, S, E>
 where
     S: Dialer<E::Transport>,
     E: Env,
     E::Transport: Transport<Addr: Clone>,
 {
-    fn drop(&mut self) {
-        self.release();
+    fn drop(self: Pin<&mut Self>) {
+        let this = self.project();
+        release_reservation(*this.handle, *this.channel, this.reserved);
     }
 }

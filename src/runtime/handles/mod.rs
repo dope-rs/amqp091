@@ -3,11 +3,14 @@ use std::pin::Pin;
 use std::task::Poll;
 
 use dope::driver::token::Token;
+use dope::manifold::connector::port::Sender;
+use dope::manifold::connector::session::Connector;
 use dope::manifold::connector::source::Dialer;
-use dope::manifold::connector::{Connector, Sender};
 use dope::manifold::env::Env;
 use dope::manifold::timer::Timer;
-use dope_fiber::{Context, Fiber, Waker, poll_fn};
+use dope_fiber::abi::Fiber;
+use dope_fiber::raw::task::Context;
+use dope_fiber::raw::wait::Waiter;
 use dope_net::Transport;
 
 use crate::content::properties::BasicProperties;
@@ -152,7 +155,8 @@ impl<'d> ConnectorRef<'d> {
 
     pub(super) fn poll_target(
         &self,
-        waker: Waker<'d>,
+        waiter: Pin<&Waiter<'d>>,
+        context: Pin<&Context<'_, 'd>>,
         missing: Missing,
     ) -> Poll<Result<Option<Token>, Error>> {
         let state = self.session().with_shared(|shared| {
@@ -174,7 +178,7 @@ impl<'d> ConnectorRef<'d> {
             matches!(missing, Missing::Wait) || matches!(missing, Missing::Recover) && state.1;
         let registered = self.session().with_shared(|shared| {
             shared.clear_dead_ready_conn();
-            !wait || shared.try_register_handshake_waker(waker)
+            !wait || shared.try_register_handshake_waker(waiter, context)
         });
         if !registered {
             Poll::Ready(Err(Error::WaiterCapacity))

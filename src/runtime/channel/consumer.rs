@@ -1,11 +1,16 @@
 use std::pin::Pin;
 use std::task::{Poll, ready};
 
+use dope::driver::ready::CompletionWaker;
+use dope::driver::token::Token;
 use dope::manifold::connector::source::Dialer;
 use dope::manifold::env::Env;
-use dope_fiber::{Context, Fiber, Waker};
+use dope_fiber::abi::Fiber;
+use dope_fiber::raw::task::{CompletionRegistrar, Context};
+use dope_fiber::raw::wait::Waiter;
 use dope_net::Transport;
 use o3::collections::SlabKey;
+use pin_project::{pin_project, pinned_drop};
 
 use crate::content::properties::Delivery;
 use crate::error::Error;
@@ -17,7 +22,9 @@ use crate::runtime::handles::{AmqpHandle, Missing};
 
 fn retry_or_close<'d>(
     conn: handles::ConnectorRef<'d>,
-    waker: Waker<'d>,
+    progress: Pin<&Waiter<'d>>,
+    handshake: Pin<&Waiter<'d>>,
+    context: Pin<&Context<'_, 'd>>,
     auto_recovery: bool,
     clear_target: bool,
 ) -> Poll<Result<Option<Delivery<'d>>, Error>> {
@@ -28,7 +35,7 @@ fn retry_or_close<'d>(
         if clear_target {
             shared.clear_dead_ready_conn();
         }
-        shared.try_register_recovery_waker(waker)
+        shared.try_register_recovery_waker(progress, handshake, context)
     });
     if registered {
         Poll::Pending
@@ -78,7 +85,11 @@ where
     }
 
     pub fn recv(&mut self) -> Recv<'_, 'a, 'd, S, E> {
-        Recv { consumer: self }
+        Recv {
+            consumer: self,
+            handshake: Waiter::new(),
+            progress: Waiter::new(),
+        }
     }
 }
 
@@ -122,6 +133,7 @@ where
     }
 }
 
+#[pin_project(PinnedDrop)]
 pub struct Recv<'r, 'a, 'd, S, E>
 where
     S: Dialer<E::Transport>,
@@ -129,6 +141,46 @@ where
     E::Transport: Transport<Addr: Clone>,
 {
     consumer: &'r mut Consumer<'a, 'd, S, E>,
+    #[pin]
+    handshake: Waiter<'d>,
+    #[pin]
+    progress: Waiter<'d>,
+}
+
+struct PollConsumer<'poll, 'r, 'a, 'd, S, E>
+where
+    S: Dialer<E::Transport>,
+    E: Env,
+    E::Transport: Transport<Addr: Clone>,
+{
+    owner: Pin<&'poll mut Recv<'r, 'a, 'd, S, E>>,
+    target: Token,
+}
+
+// SAFETY: pinned Recv exclusively owns this consumer registration. Its pinned
+// Drop clears the exact slot before the task context can be unbound.
+unsafe impl<'poll, 'r, 'a, 'd, S, E> CompletionRegistrar<'d>
+    for PollConsumer<'poll, 'r, 'a, 'd, S, E>
+where
+    S: Dialer<E::Transport>,
+    E: Env,
+    E::Transport: Transport<Addr: Clone>,
+{
+    type Output = Option<Option<Result<Poll<Option<Delivery<'static>>>, Error>>>;
+
+    #[inline(always)]
+    fn register(self, wake: CompletionWaker<'d>) -> Self::Output {
+        let this = self.owner.project();
+        let consumer = &mut **this.consumer;
+        consumer
+            .handle
+            .connector()
+            .with_state(self.target, |state| {
+                state.with_channel(consumer.channel, |channel| {
+                    channel.consumer_next(consumer.key, wake)
+                })
+            })
+    }
 }
 
 impl<'r, 'a, 'd, S, E> Fiber<'d> for Recv<'r, 'a, 'd, S, E>
@@ -139,33 +191,80 @@ where
 {
     type Output = Result<Option<Delivery<'d>>, Error>;
 
-    fn poll(self: Pin<&mut Self>, cx: Pin<&mut Context<'_, 'd>>) -> Poll<Self::Output> {
-        let me = self.get_mut();
-        let conn = me.consumer.handle.connector();
-        let waker = unsafe { cx.waker_unchecked() };
-        let auto_recovery = conn
-            .session()
-            .with_shared(|shared| shared.auto_recovery_enabled());
-        let Some(target) = ready!(conn.poll_target(waker, Missing::Recover))? else {
-            return Poll::Ready(Ok(None));
+    fn poll(mut self: Pin<&mut Self>, cx: Pin<&mut Context<'_, 'd>>) -> Poll<Self::Output> {
+        let (conn, auto_recovery, target) = {
+            let this = self.as_mut().project();
+            let consumer = &mut **this.consumer;
+            let conn = consumer.handle.connector();
+            let auto_recovery = conn
+                .session()
+                .with_shared(|shared| shared.auto_recovery_enabled());
+            let Some(target) =
+                ready!(conn.poll_target(this.handshake.as_ref(), cx.as_ref(), Missing::Recover,))?
+            else {
+                return Poll::Ready(Ok(None));
+            };
+            (conn, auto_recovery, target)
         };
 
-        let polled = match conn.with_state(target, |state| {
-            state.with_channel(me.consumer.channel, |channel| {
-                channel.consumer_next(me.consumer.key, waker)
-            })
+        let polled = match cx.as_ref().register_completion(PollConsumer {
+            owner: self.as_mut(),
+            target,
         }) {
             Some(polled) => polled,
-            None => return retry_or_close(conn, waker, auto_recovery, true),
+            None => {
+                let this = self.as_ref().project_ref();
+                return retry_or_close(
+                    conn,
+                    this.progress.as_ref(),
+                    this.handshake.as_ref(),
+                    cx.as_ref(),
+                    auto_recovery,
+                    true,
+                );
+            }
         };
+        let this = self.as_ref().project_ref();
         match polled {
             Some(Ok(Poll::Ready(Some(delivery)))) => {
                 Poll::Ready(Ok(Some(unsafe { delivery.assume_lifetime() })))
             }
-            Some(Ok(Poll::Ready(None))) => retry_or_close(conn, waker, auto_recovery, false),
+            Some(Ok(Poll::Ready(None))) => retry_or_close(
+                conn,
+                this.progress.as_ref(),
+                this.handshake.as_ref(),
+                cx.as_ref(),
+                auto_recovery,
+                false,
+            ),
             Some(Ok(Poll::Pending)) => Poll::Pending,
             Some(Err(error)) => Poll::Ready(Err(error)),
-            None => retry_or_close(conn, waker, auto_recovery, false),
+            None => retry_or_close(
+                conn,
+                this.progress.as_ref(),
+                this.handshake.as_ref(),
+                cx.as_ref(),
+                auto_recovery,
+                false,
+            ),
         }
+    }
+}
+
+#[pinned_drop]
+impl<S, E> PinnedDrop for Recv<'_, '_, '_, S, E>
+where
+    S: Dialer<E::Transport>,
+    E: Env,
+    E::Transport: Transport<Addr: Clone>,
+{
+    fn drop(self: Pin<&mut Self>) {
+        let this = self.project();
+        let consumer = &mut **this.consumer;
+        consumer.handle.connector().session().with_shared(|shared| {
+            shared.with_channel_mut(consumer.channel, |channel| {
+                channel.clear_consumer_waker(consumer.key);
+            });
+        });
     }
 }

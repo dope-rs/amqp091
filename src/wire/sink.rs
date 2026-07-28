@@ -1,4 +1,4 @@
-use dope::manifold::connector::state::Stage;
+use dope_net::link::egress::stage::Stage;
 use o3::buffer::Block;
 
 pub trait Sink {

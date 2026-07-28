@@ -7,11 +7,11 @@ use std::time::Duration;
 mod support;
 
 use dope::driver;
-use dope::manifold::connector::Connector;
-use dope::manifold::connector::source::Static;
+use dope::manifold::connector::session::Connector;
+use dope::manifold::connector::source::health::Static;
 use dope::manifold::env::Bundle;
+use dope::runtime::executor::{Executor, Session as RuntimeSession};
 use dope::runtime::profile::Throughput;
-use dope::runtime::{Executor, Session as RuntimeSession};
 use dope_amqp091::config::Config;
 use dope_amqp091::content::properties::BasicProperties;
 use dope_amqp091::protocol::PublishConfirm;
@@ -25,11 +25,14 @@ use dope_amqp091::runtime::handles::channel::publish::PublishOperations;
 use dope_amqp091::runtime::handles::channel::queues::{QueueDeclareOpts, QueueOperations};
 use dope_amqp091::runtime::handles::connection::Connection;
 use dope_amqp091::wire::field::FieldTable;
-use dope_fiber::{Fiber, SessionExt as _, TimerExt as _};
+use dope_fiber::abi::Fiber;
+use dope_fiber::abi::pollfn::PollFn;
+use dope_fiber::extensions::SessionExt as _;
+use dope_fiber::sleep::TimerExt as _;
 use dope_net::tcp::Tcp;
 use dope_net::wire::identity::Identity;
 use o3::cell::BrandCell;
-use support::{TcpScript, expect_pending, within};
+use support::{PinnedFiber, TcpScript, expect_pending, within};
 
 type AmqpEnv = Bundle<Tcp, Identity, Throughput>;
 type AmqpConn<'d> = Connector<'d, 0, Session<'d>, Static<Tcp>, AmqpEnv>;
@@ -513,8 +516,8 @@ fn auto_channel_reuses_released_id() {
             let first = conn.open_auto_channel().await.expect("first auto channel");
             assert_eq!(first.id(), 1);
             let late = first.queue_purge("late");
-            let mut close = first.close(200, "OK");
-            expect_pending(&mut close).await;
+            let mut close = PinnedFiber::new(first.close(200, "OK"));
+            expect_pending(close.as_pin()).await;
             let late = late.await;
             assert!(matches!(late, Err(dope_amqp091::error::Error::Closed)));
             close.await.expect("close channel");
@@ -550,14 +553,14 @@ fn failed_close_allocation_preserves_channel_state() {
                 }
                 let mut purges = channels[..256]
                     .iter()
-                    .map(|channel| channel.queue_purge("fill"))
+                    .map(|channel| PinnedFiber::new(channel.queue_purge("fill")))
                     .collect::<Vec<_>>();
-                let mut close = channels[256].close(200, "OK");
-                dope_fiber::poll_fn(|mut cx| {
+                let mut close = PinnedFiber::new(channels[256].close(200, "OK"));
+                PollFn::new(|mut cx| {
                     for purge in &mut purges {
-                        assert!(Fiber::poll(Pin::new(purge), cx.as_mut()).is_pending());
+                        assert!(Fiber::poll(purge.as_pin(), cx.as_mut()).is_pending());
                     }
-                    let error = match Fiber::poll(Pin::new(&mut close), cx) {
+                    let error = match Fiber::poll(close.as_pin(), cx) {
                         Poll::Ready(Err(error)) => error,
                         Poll::Ready(Ok(())) => panic!("close unexpectedly allocated"),
                         Poll::Pending => panic!("close ignored exhausted outbound pool"),
@@ -621,11 +624,11 @@ fn dropped_queued_method_releases_capacity_without_sending() {
                 wait_ready(conn).await;
                 let channel = conn.open(1).await.expect("open channel");
 
-                let mut first = channel.queue_purge("first");
-                expect_pending(&mut first).await;
+                let mut first = PinnedFiber::new(channel.queue_purge("first"));
+                expect_pending(first.as_pin()).await;
 
-                let mut second = channel.queue_purge("second");
-                expect_pending(&mut second).await;
+                let mut second = PinnedFiber::new(channel.queue_purge("second"));
+                expect_pending(second.as_pin()).await;
 
                 let overflow = channel.queue_purge("overflow").await.unwrap_err();
                 assert!(matches!(
@@ -634,8 +637,8 @@ fn dropped_queued_method_releases_capacity_without_sending() {
                 ));
                 drop(second);
 
-                let mut third = channel.queue_purge("third");
-                expect_pending(&mut third).await;
+                let mut third = PinnedFiber::new(channel.queue_purge("third"));
+                expect_pending(third.as_pin()).await;
 
                 first.await.expect("first purge");
                 third.await.expect("third purge");
@@ -677,11 +680,11 @@ fn declared_body_size_is_rejected_before_allocation() {
         rt.block_on(dope_fiber::fiber!('_ => async move {
             wait_ready(conn).await;
             let channel = conn.open(1).await.expect("open channel");
-            let mut returned = channel.next_return();
-            expect_pending(&mut returned).await;
+            let mut returned = PinnedFiber::new(channel.next_return());
+            expect_pending(returned.as_pin()).await;
             channel.queue_purge("ready").await.expect("ready purge");
-            let mut trigger = channel.queue_purge("trigger");
-            expect_pending(&mut trigger).await;
+            let mut trigger = PinnedFiber::new(channel.queue_purge("trigger"));
+            expect_pending(trigger.as_pin()).await;
             let error = returned.await.unwrap_err();
             assert!(matches!(
                 error,
@@ -706,11 +709,11 @@ fn aggregate_body_capacity_is_shared_across_channels() {
                 wait_ready(conn).await;
                 let first = conn.open(1).await.expect("first channel");
                 conn.open(2).await.expect("second channel");
-                let mut returned = first.next_return();
-                expect_pending(&mut returned).await;
+                let mut returned = PinnedFiber::new(first.next_return());
+                expect_pending(returned.as_pin()).await;
                 first.queue_purge("ready").await.expect("ready purge");
-                let mut trigger = first.queue_purge("trigger");
-                expect_pending(&mut trigger).await;
+                let mut trigger = PinnedFiber::new(first.queue_purge("trigger"));
+                expect_pending(trigger.as_pin()).await;
                 let error = returned.await.unwrap_err();
                 assert!(matches!(
                     error,
@@ -733,14 +736,14 @@ fn body_fragment_pool_is_reused_after_delivery_drop() {
             rt.block_on(dope_fiber::fiber!('_ => async move {
                 wait_ready(conn).await;
                 let channel = conn.open(1).await.expect("open channel");
-                let mut first = channel.next_return();
-                expect_pending(&mut first).await;
+                let mut first = PinnedFiber::new(channel.next_return());
+                expect_pending(first.as_pin()).await;
                 channel.queue_purge("first-ready").await.unwrap();
                 let first = first.await.unwrap().unwrap();
                 assert!(first.body == b"ab"[..]);
                 drop(first);
-                let mut second = channel.next_return();
-                expect_pending(&mut second).await;
+                let mut second = PinnedFiber::new(channel.next_return());
+                expect_pending(second.as_pin()).await;
                 channel.queue_purge("barrier").await.unwrap();
                 let second = second.await.unwrap().unwrap();
                 assert!(second.body == b"cd"[..]);
@@ -928,7 +931,7 @@ fn with_deadline<'d, F: Fiber<'d>>(
     dope_fiber::fiber!('d => async move {
         let mut budget = rounds * 2_000_000;
         let mut fut = Box::pin(fut);
-        dope_fiber::poll_fn(move |mut cx| {
+        PollFn::new(move |mut cx| {
             if let Poll::Ready(value) = Fiber::poll(fut.as_mut(), cx.as_mut()) {
                 return Poll::Ready(Some(value));
             }
@@ -1037,7 +1040,7 @@ fn reconnect_resumes_delivery() {
                     let recover = &mut recover;
                     let conn_fatal = &mut conn_fatal;
                     let conn_ref = &conn;
-                    dope_fiber::poll_fn(move |mut cx| {
+                    PollFn::new(move |mut cx| {
                         if let Some(fut) = recover.as_mut()
                             && let Poll::Ready(r) = Fiber::poll(fut.as_mut(), cx.as_mut())
                         {

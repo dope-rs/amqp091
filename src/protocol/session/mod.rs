@@ -1,4 +1,5 @@
 use super::*;
+use dope::manifold::connector::session;
 
 mod content;
 pub mod factory;
@@ -55,7 +56,7 @@ impl<'d> Session<'d> {
 }
 
 #[dope_gen::connector_session(codec = codec, io = port.io)]
-impl<'d> connector::Session<'d> for Session<'d> {
+impl<'d> session::Session<'d> for Session<'d> {
     type Codec = Codec;
     type ConnState = ConnState<'d>;
     type Send = Outbound;

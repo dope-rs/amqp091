@@ -1,6 +1,6 @@
 use std::cell::Cell;
 
-use dope::manifold::connector;
+use dope::manifold::connector::codec;
 use o3::buffer::Shared;
 
 use super::sink::Sink;
@@ -59,7 +59,7 @@ impl Codec {
     }
 }
 
-impl connector::Codec for Codec {
+impl codec::Codec for Codec {
     type Head = Frame;
     type ParseState = ();
 

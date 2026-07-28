@@ -3,7 +3,8 @@ use std::task::Poll;
 
 use dope::manifold::connector::source::Dialer;
 use dope::manifold::env::Env;
-use dope_fiber::{Fiber, poll_fn};
+use dope_fiber::abi::Fiber;
+use dope_fiber::wait::WaitFn;
 use dope_net::Transport;
 
 use crate::error::Error;
@@ -80,7 +81,7 @@ where
     E: Env,
     E::Transport: Transport<Addr: Clone>,
 {
-    poll_fn(move |cx| {
+    WaitFn::new(move |cx, waiter| {
         let conn = handle.connector();
         let Some(target) = conn.session().with_shared(|shared| shared.ready_conn) else {
             return Poll::Ready(Ok(()));
@@ -92,7 +93,7 @@ where
         }
         let target = conn.session().with_shared(|shared| {
             (
-                shared.try_register_closed_waker(unsafe { cx.as_ref().waker_unchecked() }),
+                shared.try_register_closed_waker(waiter, cx.as_ref()),
                 shared.ready_conn,
             )
         });

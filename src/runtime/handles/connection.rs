@@ -1,4 +1,5 @@
 use super::*;
+use dope_fiber::wait::WaitFn;
 
 pub struct Connection<'a, 'd, S, E>
 where
@@ -138,7 +139,7 @@ where
         dope_fiber::fiber!('d => async move {
             let handle = self.handle;
             self.close_now(reply_code, reply_text);
-            poll_fn(move |cx| {
+            WaitFn::new(move |cx, waiter| {
                 handle.connector().session().with_shared(|shared| {
                     if shared.ready_conn.is_none() {
                         return Poll::Ready(Ok(()));
@@ -146,7 +147,7 @@ where
                     if let Some(err) = shared.fatal.as_ref() {
                         return Poll::Ready(Err(err.clone()));
                     }
-                    if shared.try_register_closed_waker(unsafe { cx.as_ref().waker_unchecked() }) {
+                    if shared.try_register_closed_waker(waiter, cx.as_ref()) {
                         Poll::Pending
                     } else {
                         Poll::Ready(Err(Error::WaiterCapacity))

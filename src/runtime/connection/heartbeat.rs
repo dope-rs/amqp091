@@ -2,7 +2,8 @@ use std::time::{Duration, Instant};
 
 use dope::manifold::connector::source::Dialer;
 use dope::manifold::env::Env;
-use dope_fiber::{Fiber, TimerExt as _};
+use dope_fiber::abi::Fiber;
+use dope_fiber::sleep::TimerExt as _;
 use dope_net::Transport;
 
 use crate::error::Error;

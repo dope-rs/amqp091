@@ -48,7 +48,7 @@ impl<'d> ConnState<'d> {
     }
 }
 
-impl connector::Lifecycle for ConnState<'_> {
+impl lifecycle::Lifecycle for ConnState<'_> {
     fn wants_close(&self) -> Close {
         if !self.pending_close {
             Close::Keep

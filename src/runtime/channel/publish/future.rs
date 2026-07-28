@@ -1,9 +1,11 @@
 use std::pin::Pin;
 use std::task::Poll;
 
+use dope::driver::ready::CompletionWaker;
 use dope::manifold::connector::source::Dialer;
 use dope::manifold::env::Env;
-use dope_fiber::{Context, Fiber};
+use dope_fiber::abi::Fiber;
+use dope_fiber::raw::task::{CompletionRegistrar, Context};
 use dope_net::Transport;
 
 use crate::error::Error;
@@ -20,6 +22,47 @@ where
     channel: u16,
     delivery_tag: u64,
     early: Option<Error>,
+}
+
+// SAFETY: a live delivery tag owns the confirm slot. Every ready/error path
+// retires or detaches that slot, and Drop detaches it on cancellation.
+unsafe impl<'a, 'd, S, E> CompletionRegistrar<'d> for &mut PublishConfirmFuture<'a, 'd, S, E>
+where
+    S: Dialer<E::Transport>,
+    E: Env,
+    E::Transport: Transport<Addr: Clone>,
+{
+    type Output = Poll<Result<PublishConfirm, Error>>;
+
+    #[inline(always)]
+    fn register(self, wake: CompletionWaker<'d>) -> Self::Output {
+        let conn = self.handle.connector();
+        let outcome = match conn.session().with_channel(self.channel, |channel| {
+            channel.poll_publish(self.delivery_tag, wake)
+        }) {
+            None => return Poll::Ready(Err(Error::Closed)),
+            Some(outcome) => outcome,
+        };
+        match outcome {
+            Ok(Some(outcome)) => {
+                self.delivery_tag = 0;
+                conn.session()
+                    .with_shared(|shared| shared.collect_channel(self.channel));
+                Poll::Ready(Ok(outcome))
+            }
+            Ok(None) => Poll::Pending,
+            Err(error) => {
+                conn.session().with_shared(|shared| {
+                    shared.with_channel_mut(self.channel, |channel| {
+                        channel.detach_publish(self.delivery_tag);
+                    });
+                    shared.collect_channel(self.channel);
+                });
+                self.delivery_tag = 0;
+                Poll::Ready(Err(error))
+            }
+        }
+    }
 }
 
 impl<'a, 'd, S, E> PublishConfirmFuture<'a, 'd, S, E>
@@ -68,29 +111,7 @@ where
         if let Some(err) = me.early.take() {
             return Poll::Ready(Err(err));
         }
-        let conn = me.handle.connector();
-        let waker = unsafe { cx.waker_unchecked() };
-        let outcome = match conn.session().with_channel(me.channel, |channel| {
-            channel.poll_publish(me.delivery_tag, waker)
-        }) {
-            None => return Poll::Ready(Err(Error::Closed)),
-            Some(outcome) => outcome,
-        };
-        match outcome {
-            Ok(Some(outcome)) => {
-                me.delivery_tag = 0;
-                conn.session()
-                    .with_shared(|shared| shared.collect_channel(me.channel));
-                Poll::Ready(Ok(outcome))
-            }
-            Ok(None) => Poll::Pending,
-            Err(error) => {
-                me.delivery_tag = 0;
-                conn.session()
-                    .with_shared(|shared| shared.collect_channel(me.channel));
-                Poll::Ready(Err(error))
-            }
-        }
+        cx.as_ref().register_completion(me)
     }
 }
 
