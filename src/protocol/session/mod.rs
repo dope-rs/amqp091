@@ -94,7 +94,7 @@ impl<'d> session::Session<'d> for Session<'d> {
             return;
         }
         let result = match head.frame_type {
-            FrameType::METHOD => self.handle_method(head, ctx.conn_id, ctx.state, ctx.sink),
+            FrameType::METHOD => self.handle_method(head, ctx.conn_id, ctx.state, &mut ctx.sink),
             FrameType::HEADER => self.handle_header(head, ctx.state),
             FrameType::BODY => self.handle_body(head, ctx.state),
             FrameType::HEARTBEAT => Ok(()),
