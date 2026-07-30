@@ -1,4 +1,5 @@
 use o3::buffer::Shared;
+use std::ops::Range;
 
 use super::core::{Basic, ClassId, ClientMethod, Method};
 use crate::error::Error;
@@ -199,9 +200,9 @@ impl Return {
         let routing_key = r.take_short_str_range(payload)?;
         Ok(Self {
             reply_code,
-            reply_text: SharedStr::new(payload.slice(reply_text)),
-            exchange: SharedStr::new(payload.slice(exchange)),
-            routing_key: SharedStr::new(payload.slice(routing_key)),
+            reply_text: shared_str(payload, reply_text)?,
+            exchange: shared_str(payload, exchange)?,
+            routing_key: shared_str(payload, routing_key)?,
         })
     }
 }
@@ -228,11 +229,11 @@ impl Deliver {
         let exchange = r.take_short_str_range(payload)?;
         let routing_key = r.take_short_str_range(payload)?;
         Ok(Self {
-            consumer_tag: SharedStr::new(payload.slice(consumer_tag)),
+            consumer_tag: shared_str(payload, consumer_tag)?,
             delivery_tag,
             redelivered,
-            exchange: SharedStr::new(payload.slice(exchange)),
-            routing_key: SharedStr::new(payload.slice(routing_key)),
+            exchange: shared_str(payload, exchange)?,
+            routing_key: shared_str(payload, routing_key)?,
         })
     }
 }
@@ -279,8 +280,8 @@ impl GetOk {
         Ok(Self {
             delivery_tag,
             redelivered,
-            exchange: SharedStr::new(payload.slice(exchange)),
-            routing_key: SharedStr::new(payload.slice(routing_key)),
+            exchange: shared_str(payload, exchange)?,
+            routing_key: shared_str(payload, routing_key)?,
             message_count,
         })
     }
@@ -404,4 +405,10 @@ impl RecoverOk {
     pub fn read(_reader: &mut Reader<'_>) -> Result<Self, Error> {
         Ok(Self)
     }
+}
+fn shared_str(payload: &Shared, range: Range<usize>) -> Result<SharedStr, Error> {
+    payload
+        .get(range)
+        .map(SharedStr::new)
+        .ok_or(Error::Protocol("short string range is out of bounds"))
 }

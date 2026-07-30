@@ -1,11 +1,12 @@
 use std::str::from_utf8_unchecked;
 
-use o3::buffer::{Block, Shared};
+use o3::buffer::Shared;
 
 use super::Body;
 use crate::error::Error;
 use crate::method::basic::{Deliver, GetOk, Return};
 use crate::method::core::ClassId;
+use crate::wire::FrameBuffer;
 use crate::wire::field::FieldTable;
 use crate::wire::put::Put;
 use crate::wire::reader::Reader;
@@ -235,7 +236,7 @@ impl BasicProperties {
 }
 
 pub struct BasicPropertiesBuilder {
-    text: Block,
+    text: FrameBuffer,
     text_keys: [TextKey; TEXT_FIELDS],
     headers: Option<FieldTable>,
     delivery_mode: Option<u8>,
@@ -246,7 +247,7 @@ pub struct BasicPropertiesBuilder {
 impl Default for BasicPropertiesBuilder {
     fn default() -> Self {
         Self {
-            text: Block::new(),
+            text: FrameBuffer::new(),
             text_keys: [TextKey::NONE; TEXT_FIELDS],
             headers: None,
             delivery_mode: None,
@@ -262,9 +263,13 @@ impl BasicPropertiesBuilder {
             u8::try_from(value.len()).is_ok(),
             "AMQP short string too long"
         );
-        self.text.push(value.len() as u8);
+        self.text
+            .try_push(value.len() as u8)
+            .unwrap_or_else(|_| std::process::abort());
         self.text_keys[field] = TextKey::from_start(self.text.len());
-        self.text.extend_from_slice(value.as_bytes());
+        self.text
+            .try_extend_from_slice(value.as_bytes())
+            .unwrap_or_else(|_| std::process::abort());
     }
 
     pub fn content_type(mut self, value: impl AsRef<str>) -> Self {

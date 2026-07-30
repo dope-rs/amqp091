@@ -1,5 +1,6 @@
 use dope_net::link::egress::stage::Stage;
-use o3::buffer::Block;
+
+use super::FrameBuffer;
 
 pub trait Sink {
     fn push(&mut self, byte: u8);
@@ -11,18 +12,20 @@ pub trait Sink {
     fn as_mut_slice(&mut self) -> &mut [u8];
 }
 
-impl Sink for Block {
+impl Sink for FrameBuffer {
     fn push(&mut self, byte: u8) {
-        Block::push(self, byte);
+        self.try_push(byte)
+            .unwrap_or_else(|_| std::process::abort());
     }
     fn extend_from_slice(&mut self, src: &[u8]) {
-        Block::extend_from_slice(self, src);
+        self.try_extend_from_slice(src)
+            .unwrap_or_else(|_| std::process::abort());
     }
     fn len(&self) -> usize {
-        Block::len(self)
+        FrameBuffer::len(self)
     }
     fn as_mut_slice(&mut self) -> &mut [u8] {
-        Block::as_mut_slice(self)
+        FrameBuffer::as_mut_slice(self)
     }
 }
 

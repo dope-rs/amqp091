@@ -1,5 +1,5 @@
 use dope_amqp091::content::properties::{BasicProperties, ContentHeader};
-use o3::buffer::Block;
+use o3::buffer::{BLOCK_CAPACITY, Owned};
 
 #[test]
 fn compact_properties_round_trip() {
@@ -20,7 +20,7 @@ fn compact_properties_round_trip() {
         .priority(7)
         .timestamp(42)
         .build();
-    let mut payload = Block::new();
+    let mut payload = Owned::<BLOCK_CAPACITY>::new();
     properties.encode_header_frame(&mut payload, 123);
 
     let header = ContentHeader::read(payload.freeze()).unwrap();

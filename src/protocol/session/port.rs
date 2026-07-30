@@ -52,7 +52,7 @@ impl<'d> AmqpPort<'d> {
             io: Port::with_capacity(capacity, driver),
             shared: UnsafeCell::new(shared),
             timer: Timer::with_capacity(timer_capacity, driver),
-            outbound: Pool::new(outbound_layout),
+            outbound: Pool::from_layout(outbound_layout),
             egress: dope_net::link::egress::storage::Storage::default(),
             config,
             _bodies: bodies,

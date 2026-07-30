@@ -76,7 +76,7 @@ impl codec::Codec for Codec {
                 Frame {
                     frame_type,
                     channel,
-                    payload: buf.slice(0..0),
+                    payload: buf.get(0..0)?,
                     end_byte: 0,
                     oversize: true,
                     raw_payload_len: payload_len_raw,
@@ -89,7 +89,7 @@ impl codec::Codec for Codec {
         if buf.len() < total {
             return None;
         }
-        let payload = buf.slice(HEADER_LEN..HEADER_LEN + payload_len);
+        let payload = buf.get(HEADER_LEN..HEADER_LEN + payload_len)?;
         let end_byte = buf[HEADER_LEN + payload_len];
         Some((
             Frame {
