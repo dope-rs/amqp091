@@ -118,8 +118,8 @@ impl<'d> ChannelState<'d> {
     pub(crate) fn enqueue_op(
         &mut self,
         expect: ExpectMethod,
-        frame: Outbound,
-    ) -> Result<(SlabKey, Option<Outbound>), Error> {
+        frame: Outbound<'d>,
+    ) -> Result<(SlabKey, Option<Outbound<'d>>), Error> {
         let next_phase = match (self.phase, expect) {
             (ChannelPhase::Closed, ExpectMethod::ChannelOpenOk) => Some(ChannelPhase::Opening),
             (ChannelPhase::Open, ExpectMethod::ChannelCloseOk) => Some(ChannelPhase::Closing),

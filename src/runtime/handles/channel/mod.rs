@@ -73,7 +73,7 @@ where
         properties: &BasicProperties,
         body: &[u8],
         frame_max: u32,
-    ) -> Result<Outbound, Error> {
+    ) -> Result<Outbound<'d>, Error> {
         let max_body = Self::body_payload_max(frame_max);
         self.handle.port.encode(|out| {
             basic::Publish {

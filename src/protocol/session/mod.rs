@@ -41,7 +41,7 @@ impl<'d> Session<'d> {
     }
 
     pub(in crate::protocol) fn send_method<S: ClientMethod>(
-        out: &mut Queue<{ IOV_CAP }, Outbound>,
+        out: &mut Queue<{ IOV_CAP }, Outbound<'d>>,
         channel: u16,
         m: &S,
     ) -> Result<(), Error> {
@@ -59,9 +59,9 @@ impl<'d> Session<'d> {
 impl<'d> session::Session<'d> for Session<'d> {
     type Codec = Codec;
     type ConnState = ConnState<'d>;
-    type Send = Outbound;
+    type Send = Outbound<'d>;
 
-    fn connect(&mut self, ctx: &mut Ctx<'_, 'd, Self>) {
+    fn connect(&mut self, ctx: &mut Ctx<'_, '_, 'd, Self>) {
         let mut stage = ctx.sink.wire_stage();
         FrameEncoder::new(&mut stage).write_protocol_header();
         assert!(stage.commit() != 0);
@@ -76,7 +76,7 @@ impl<'d> session::Session<'d> for Session<'d> {
         ctx.state.channels.set(channels);
     }
 
-    fn response(&mut self, head: Frame, ctx: &mut Ctx<'_, 'd, Self>) {
+    fn response(&mut self, head: Frame, ctx: &mut Ctx<'_, '_, 'd, Self>) {
         self.with_shared(|shared| shared.last_recv_at = Some(Instant::now()));
         if head.oversize {
             self.fail_session(
@@ -116,7 +116,7 @@ impl<'d> session::Session<'d> for Session<'d> {
         }
     }
 
-    fn disconnect(&mut self, ctx: &mut Ctx<'_, 'd, Self>) {
+    fn disconnect(&mut self, ctx: &mut Ctx<'_, '_, 'd, Self>) {
         self.port.io.deactivate(ctx.conn_id);
         let err = self.with_shared(|shared| shared.fatal.clone().unwrap_or(Error::Closed));
         ctx.state.phase = ConnPhase::Closed;

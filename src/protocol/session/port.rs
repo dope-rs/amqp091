@@ -1,11 +1,12 @@
 use super::super::*;
 
 pub struct AmqpPort<'d> {
-    pub(crate) io: Port<'d, Outbound>,
+    pub(crate) io: Port<'d, Outbound<'d>>,
     shared: UnsafeCell<Shared<'d>>,
     timer: Timer<'d>,
     config: Config,
-    outbound: Pin<Box<Pool>>,
+    outbound: Pool,
+    egress: dope_net::link::egress::storage::Storage,
     _bodies: Box<BodyPool>,
 }
 
@@ -51,7 +52,8 @@ impl<'d> AmqpPort<'d> {
             io: Port::with_capacity(capacity, driver),
             shared: UnsafeCell::new(shared),
             timer: Timer::with_capacity(timer_capacity, driver),
-            outbound: Box::pin(Pool::new(outbound_layout)),
+            outbound: Pool::new(outbound_layout),
+            egress: dope_net::link::egress::storage::Storage::default(),
             config,
             _bodies: bodies,
         }
@@ -61,10 +63,12 @@ impl<'d> AmqpPort<'d> {
         self.io.capacity()
     }
 
-    pub(crate) fn encode(&self, f: impl FnOnce(&mut Outbound)) -> Result<Outbound, Error> {
+    pub(crate) fn encode(
+        &'d self,
+        f: impl FnOnce(&mut Outbound<'d>),
+    ) -> Result<Outbound<'d>, Error> {
         let mut outbound = self
             .outbound
-            .as_ref()
             .try_acquire()
             .map(Outbound::new)
             .ok_or(Error::CapacityOverflow("outbound buffer"))?;
@@ -85,6 +89,10 @@ impl<'d> AmqpPort<'d> {
 
     pub fn config(&self) -> &Config {
         &self.config
+    }
+
+    pub fn egress(&self) -> &dope_net::link::egress::storage::Storage {
+        &self.egress
     }
 
     pub fn factory(

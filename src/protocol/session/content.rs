@@ -6,21 +6,21 @@ pub(in crate::protocol) trait SessionContent<'d> {
         channel: u16,
         expect: ExpectMethod,
         response: PendingResponse,
-        out: &mut Queue<{ IOV_CAP }, Outbound>,
+        out: &mut Queue<{ IOV_CAP }, Outbound<'d>>,
     ) -> Result<(), Error>;
 
     fn connection_start(
         &mut self,
         start: &connection::Start,
         state: &mut ConnState<'d>,
-        out: &mut Queue<{ IOV_CAP }, Outbound>,
+        out: &mut Queue<{ IOV_CAP }, Outbound<'d>>,
     ) -> Result<(), Error>;
 
     fn connection_tune(
         &mut self,
         tune: &connection::Tune,
         state: &mut ConnState<'d>,
-        out: &mut Queue<{ IOV_CAP }, Outbound>,
+        out: &mut Queue<{ IOV_CAP }, Outbound<'d>>,
     ) -> Result<(), Error>;
 
     fn pick(client: u16, server: u16) -> u16;
@@ -42,7 +42,7 @@ impl<'d> SessionContent<'d> for Session<'d> {
         channel: u16,
         expect: ExpectMethod,
         response: PendingResponse,
-        out: &mut Queue<{ IOV_CAP }, Outbound>,
+        out: &mut Queue<{ IOV_CAP }, Outbound<'d>>,
     ) -> Result<(), Error> {
         let Some(next_frame) =
             state.with_channel_mut(channel, |c| c.complete_head_with(expect, response))
@@ -60,7 +60,7 @@ impl<'d> SessionContent<'d> for Session<'d> {
         &mut self,
         start: &connection::Start,
         state: &mut ConnState<'d>,
-        out: &mut Queue<{ IOV_CAP }, Outbound>,
+        out: &mut Queue<{ IOV_CAP }, Outbound<'d>>,
     ) -> Result<(), Error> {
         let mech_name = self.config.mechanism.name();
         if !start
@@ -101,7 +101,7 @@ impl<'d> SessionContent<'d> for Session<'d> {
         &mut self,
         tune: &connection::Tune,
         state: &mut ConnState<'d>,
-        out: &mut Queue<{ IOV_CAP }, Outbound>,
+        out: &mut Queue<{ IOV_CAP }, Outbound<'d>>,
     ) -> Result<(), Error> {
         let channel_max = Self::pick(self.config.channel_max, tune.channel_max);
         let frame_max = Self::pick_u32(self.config.frame_max, tune.frame_max);

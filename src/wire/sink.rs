@@ -26,7 +26,7 @@ impl Sink for Block {
     }
 }
 
-impl<B> Sink for Stage<'_, B> {
+impl<B> Sink for Stage<'_, '_, B> {
     fn push(&mut self, byte: u8) {
         Stage::push(self, byte);
     }

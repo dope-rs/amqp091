@@ -7,7 +7,7 @@ pub(in crate::protocol) trait SessionMethod<'d> {
         head: Frame,
         conn_id: Token,
         state: &mut ConnState<'d>,
-        out: &mut Queue<{ IOV_CAP }, Outbound>,
+        out: &mut Queue<{ IOV_CAP }, Outbound<'d>>,
     ) -> Result<(), Error>;
 }
 
@@ -17,7 +17,7 @@ impl<'d> SessionMethod<'d> for Session<'d> {
         head: Frame,
         conn_id: Token,
         state: &mut ConnState<'d>,
-        out: &mut Queue<{ IOV_CAP }, Outbound>,
+        out: &mut Queue<{ IOV_CAP }, Outbound<'d>>,
     ) -> Result<(), Error> {
         let channel = head.channel;
         let server = Server::parse(head.payload)?;

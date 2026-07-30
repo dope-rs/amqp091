@@ -11,7 +11,7 @@ pub(crate) trait ChannelMessages<'d> {
         &mut self,
         expect: ExpectMethod,
         response: PendingResponse,
-    ) -> Result<Option<Outbound>, Error>;
+    ) -> Result<Option<Outbound<'d>>, Error>;
     fn route_delivery(&mut self, delivery: Delivery<'static>) -> Result<(), Error>;
     fn route_return(&mut self, returned: Returned<'static>) -> Result<(), Error>;
     fn next_return(
@@ -60,7 +60,7 @@ impl<'d> ChannelMessages<'d> for ChannelState<'d> {
         &mut self,
         expect: ExpectMethod,
         response: PendingResponse,
-    ) -> Result<Option<Outbound>, Error> {
+    ) -> Result<Option<Outbound<'d>>, Error> {
         let Some(&key) = self.op_order.front() else {
             return Ok(None);
         };

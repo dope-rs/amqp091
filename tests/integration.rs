@@ -79,12 +79,12 @@ fn with_rt(
         .with_storage_factory(AmqpPort::factory(cfg, 1, 4, 16).expect("valid AMQP port config"));
     exec.enter(|mut sess| {
         let backoff = sess.seed().derive(dope::hash::domain::BACKOFF).state();
-        let port = sess.storage() as *const AmqpPort<'_>;
-        let port = unsafe { &*port };
+        let port = sess.storage();
         let upstreams = Static::<Tcp>::new(vec![addr], Duration::from_millis(500), backoff);
         let amqp = {
             let mut driver = sess.driver_access();
-            AmqpConn::new(Session::new(port), upstreams, 1, &mut driver).expect("AMQP connector")
+            AmqpConn::new(Session::new(port), upstreams, 1, port.egress(), &mut driver)
+                .expect("AMQP connector")
         };
         let app = pin!(BrandCell::new(AmqpDispatcher { amqp }));
         let mut rt = Rt {

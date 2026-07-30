@@ -108,7 +108,7 @@ impl<'d> SessionRef<'d> {
 }
 
 pub(super) struct StateRef<'a, 'd> {
-    sender: Sender<'a, 'd, Outbound>,
+    sender: Sender<'a, 'd, Outbound<'d>>,
     port: &'d AmqpPort<'d>,
 }
 
@@ -126,7 +126,7 @@ impl<'a, 'd> StateRef<'a, 'd> {
             .with_shared(|shared| shared.with_channel_mut(channel, f))
     }
 
-    pub(super) fn try_enqueue(&self, bytes: Outbound) -> Result<(), Outbound> {
+    pub(super) fn try_enqueue(&self, bytes: Outbound<'d>) -> Result<(), Outbound<'d>> {
         self.sender.try_enqueue(bytes)
     }
 }
@@ -206,8 +206,8 @@ where
 
     pub(in crate::runtime) fn encode(
         self,
-        f: impl FnOnce(&mut Outbound),
-    ) -> Result<Outbound, Error> {
+        f: impl FnOnce(&mut Outbound<'d>),
+    ) -> Result<Outbound<'d>, Error> {
         self.port.encode(f)
     }
 }

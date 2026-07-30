@@ -30,7 +30,7 @@ where
     handle: AmqpHandle<'a, 'd, S, E>,
     channel: u16,
     expect: ExpectMethod,
-    frame: Option<Outbound>,
+    frame: Option<Outbound<'d>>,
     op_id: Option<SlabKey>,
     error: Option<Error>,
     #[pin]
@@ -91,7 +91,7 @@ where
 {
     owner: Pin<&'poll mut MethodFuture<'a, 'd, S, E, R>>,
     target: Token,
-    frame: Outbound,
+    frame: Outbound<'d>,
 }
 
 // SAFETY: op_id is recorded in the pinned owner before the handle is retained.
@@ -147,7 +147,7 @@ where
         handle: AmqpHandle<'a, 'd, S, E>,
         channel: u16,
         expect: ExpectMethod,
-        frame: Result<Outbound, Error>,
+        frame: Result<Outbound<'d>, Error>,
     ) -> Self {
         let (frame, error) = match frame {
             Ok(frame) => (Some(frame), None),

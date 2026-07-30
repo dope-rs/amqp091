@@ -56,7 +56,7 @@ use self::session::port::AmqpPort;
 
 pub(crate) struct PendingMethodOp<'d> {
     pub(crate) expect: ExpectMethod,
-    pub(crate) frame: Option<Outbound>,
+    pub(crate) frame: Option<Outbound<'d>>,
     pub(crate) waker: WakeSlot<'d>,
     pub(crate) detached: bool,
     pub(crate) sent: bool,
