@@ -122,11 +122,20 @@ impl<'a, S: Sink + ?Sized> FrameEncoder<'a, S> {
         }
         let payload_start = out.len();
         body(out);
-        let payload_len = (out.len() - payload_start) as u32;
+        let Some(payload_len) = out
+            .len()
+            .checked_sub(payload_start)
+            .and_then(|len| u32::try_from(len).ok())
+        else {
+            return;
+        };
         let slice = out.as_mut_slice();
-        slice[header_pos] = frame_type;
-        slice[header_pos + 1..header_pos + 3].copy_from_slice(&channel.to_be_bytes());
-        slice[header_pos + 3..header_pos + 7].copy_from_slice(&payload_len.to_be_bytes());
+        let Some(header) = slice.get_mut(header_pos..header_pos + HEADER_LEN) else {
+            return;
+        };
+        header[0] = frame_type;
+        header[1..3].copy_from_slice(&channel.to_be_bytes());
+        header[3..7].copy_from_slice(&payload_len.to_be_bytes());
         out.push(FrameType::END);
     }
 

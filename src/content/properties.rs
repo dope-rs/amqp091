@@ -1,6 +1,8 @@
+use std::error::Error as StdError;
+use std::fmt;
 use std::str::from_utf8_unchecked;
 
-use o3::buffer::Shared;
+use o3::buffer::{CapacityError, Shared};
 
 use super::Body;
 use crate::error::Error;
@@ -244,6 +246,29 @@ pub struct BasicPropertiesBuilder {
     timestamp: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PropertyBuildError {
+    ShortString(usize),
+    Capacity(CapacityError),
+}
+
+impl From<CapacityError> for PropertyBuildError {
+    fn from(error: CapacityError) -> Self {
+        Self::Capacity(error)
+    }
+}
+
+impl fmt::Display for PropertyBuildError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ShortString(len) => write!(formatter, "AMQP short string is {len} bytes"),
+            Self::Capacity(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl StdError for PropertyBuildError {}
+
 impl Default for BasicPropertiesBuilder {
     fn default() -> Self {
         Self {
@@ -258,68 +283,65 @@ impl Default for BasicPropertiesBuilder {
 }
 
 impl BasicPropertiesBuilder {
-    fn set_text(&mut self, field: usize, value: &str) {
-        assert!(
-            u8::try_from(value.len()).is_ok(),
-            "AMQP short string too long"
-        );
+    fn set_text(&mut self, field: usize, value: &str) -> Result<(), PropertyBuildError> {
+        let len =
+            u8::try_from(value.len()).map_err(|_| PropertyBuildError::ShortString(value.len()))?;
+        let start = self.text.len() + 1;
+        let prefix = [len];
         self.text
-            .try_push(value.len() as u8)
-            .unwrap_or_else(|_| std::process::abort());
-        self.text_keys[field] = TextKey::from_start(self.text.len());
-        self.text
-            .try_extend_from_slice(value.as_bytes())
-            .unwrap_or_else(|_| std::process::abort());
+            .try_extend_from_slices([prefix.as_slice(), value.as_bytes()])?;
+        self.text_keys[field] = TextKey::from_start(start);
+        Ok(())
     }
 
-    pub fn content_type(mut self, value: impl AsRef<str>) -> Self {
-        self.set_text(CONTENT_TYPE, value.as_ref());
-        self
+    pub fn content_type(mut self, value: impl AsRef<str>) -> Result<Self, PropertyBuildError> {
+        self.set_text(CONTENT_TYPE, value.as_ref())?;
+        Ok(self)
     }
 
-    pub fn content_encoding(mut self, value: impl AsRef<str>) -> Self {
-        self.set_text(CONTENT_ENCODING, value.as_ref());
-        self
+    pub fn content_encoding(mut self, value: impl AsRef<str>) -> Result<Self, PropertyBuildError> {
+        self.set_text(CONTENT_ENCODING, value.as_ref())?;
+        Ok(self)
     }
 
-    pub fn correlation_id(mut self, value: impl AsRef<str>) -> Self {
-        self.set_text(CORRELATION_ID, value.as_ref());
-        self
+    pub fn correlation_id(mut self, value: impl AsRef<str>) -> Result<Self, PropertyBuildError> {
+        self.set_text(CORRELATION_ID, value.as_ref())?;
+        Ok(self)
     }
 
-    pub fn reply_to(mut self, value: impl AsRef<str>) -> Self {
-        self.set_text(REPLY_TO, value.as_ref());
-        self
+    pub fn reply_to(mut self, value: impl AsRef<str>) -> Result<Self, PropertyBuildError> {
+        self.set_text(REPLY_TO, value.as_ref())?;
+        Ok(self)
     }
 
-    pub fn expiration(mut self, value: impl AsRef<str>) -> Self {
-        self.set_text(EXPIRATION, value.as_ref());
-        self
+    pub fn expiration(mut self, value: impl AsRef<str>) -> Result<Self, PropertyBuildError> {
+        self.set_text(EXPIRATION, value.as_ref())?;
+        Ok(self)
     }
 
-    pub fn message_id(mut self, value: impl AsRef<str>) -> Self {
-        self.set_text(MESSAGE_ID, value.as_ref());
-        self
+    pub fn message_id(mut self, value: impl AsRef<str>) -> Result<Self, PropertyBuildError> {
+        self.set_text(MESSAGE_ID, value.as_ref())?;
+        Ok(self)
     }
 
-    pub fn kind(mut self, value: impl AsRef<str>) -> Self {
-        self.set_text(KIND, value.as_ref());
-        self
+    pub fn kind(mut self, value: impl AsRef<str>) -> Result<Self, PropertyBuildError> {
+        self.set_text(KIND, value.as_ref())?;
+        Ok(self)
     }
 
-    pub fn user_id(mut self, value: impl AsRef<str>) -> Self {
-        self.set_text(USER_ID, value.as_ref());
-        self
+    pub fn user_id(mut self, value: impl AsRef<str>) -> Result<Self, PropertyBuildError> {
+        self.set_text(USER_ID, value.as_ref())?;
+        Ok(self)
     }
 
-    pub fn app_id(mut self, value: impl AsRef<str>) -> Self {
-        self.set_text(APP_ID, value.as_ref());
-        self
+    pub fn app_id(mut self, value: impl AsRef<str>) -> Result<Self, PropertyBuildError> {
+        self.set_text(APP_ID, value.as_ref())?;
+        Ok(self)
     }
 
-    pub fn reserved(mut self, value: impl AsRef<str>) -> Self {
-        self.set_text(RESERVED, value.as_ref());
-        self
+    pub fn reserved(mut self, value: impl AsRef<str>) -> Result<Self, PropertyBuildError> {
+        self.set_text(RESERVED, value.as_ref())?;
+        Ok(self)
     }
 
     pub fn headers(mut self, headers: FieldTable) -> Self {

@@ -837,6 +837,7 @@ fn declare_bind_consume_publish_roundtrip() {
             let body = b"hello-from-test";
             let props = BasicProperties::builder()
                 .content_type("text/plain")
+                .expect("content type")
                 .build();
             assert!(chan.basic_publish("amq.direct", &q.queue, false, &props, body));
 
