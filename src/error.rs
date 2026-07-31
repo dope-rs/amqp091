@@ -84,6 +84,19 @@ impl Display for Error {
 
 impl error::Error for Error {}
 
+impl From<crate::content::properties::PropertyBuildError> for Error {
+    fn from(error: crate::content::properties::PropertyBuildError) -> Self {
+        Self::InvalidConfig(match error {
+            crate::content::properties::PropertyBuildError::ShortString(_) => {
+                "AMQP property exceeds short-string capacity"
+            }
+            crate::content::properties::PropertyBuildError::Capacity(_) => {
+                "AMQP property storage capacity exceeded"
+            }
+        })
+    }
+}
+
 pub struct ReplyCode;
 
 impl ReplyCode {
