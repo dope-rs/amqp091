@@ -4,12 +4,12 @@ use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
 
-use dope::manifold::timer::Timer;
+use dope::driver::timer::Timer;
 use dope_fiber::abi::Fiber;
 use dope_fiber::abi::pollfn::PollFn;
 use dope_fiber::abi::race::{Either, Race};
 use dope_fiber::raw::task::Context;
-use dope_fiber::sleep::TimerExt as _;
+use dope_fiber::sleep::TimerExt;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Elapsed;
@@ -50,8 +50,8 @@ where
 /// Dropping the losing side of the race cancels its timer ticket or pending
 /// operation through the ordinary [`Fiber`] drop path.
 #[dope_fiber::fiber_fn('d)]
-pub async fn within<'a, 'd, F, const ID: u8>(
-    timer: &'a Timer<'d, ID>,
+pub async fn within<'a, 'd, F>(
+    timer: &'a Timer<'d>,
     duration: Duration,
     fiber: F,
 ) -> Result<F::Output, Elapsed>

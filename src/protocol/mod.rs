@@ -6,19 +6,19 @@ use std::task::Poll;
 use std::time::Instant;
 
 use dope::driver::ready::{CompletionKey, CompletionWaker};
+use dope::driver::timer::Timer;
 use dope::driver::token::Token;
 use dope::manifold::connector::lifecycle;
 use dope::manifold::connector::lifecycle::Close;
 use dope::manifold::connector::port::Port;
 use dope::manifold::connector::session::Ctx;
 use dope::manifold::connector::state::IOV_CAP;
-use dope::manifold::timer::Timer;
-use dope::runtime::dispatcher::Idle;
 use dope::runtime::executor::StorageFactory;
 use dope_fiber::raw::task::Context;
 use dope_fiber::raw::wait::Waiter;
 use dope_net::link::egress::queue::Queue;
-use o3::buffer::{Lease, Pool, PoolLayout};
+use o3::buffer::{Pool, PoolLayout};
+use o3::cell::RegionToken;
 use o3::collections::{FixedHashTable, FixedQueue, Slab, SlabKey, SlotQueue};
 use o3::mem::{ByteBudget, ByteBudgetHandle};
 

@@ -65,7 +65,7 @@ impl<const CAP: u32> Sink for BoundedSink<CAP> {
     }
 }
 
-impl<B> Sink for Stage<'_, '_, B> {
+impl<B> Sink for Stage<'_, '_, '_, B> {
     fn push(&mut self, byte: u8) {
         Stage::push(self, byte);
     }

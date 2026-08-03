@@ -6,21 +6,24 @@ pub(in crate::protocol) trait SessionContent<'d> {
         channel: u16,
         expect: ExpectMethod,
         response: PendingResponse,
-        out: &mut Queue<{ IOV_CAP }, Outbound<'d>>,
+        out: &mut Queue<'_, 'd, '_, { IOV_CAP }, Outbound<'d>>,
+        region: &mut RegionToken<'d>,
     ) -> Result<(), Error>;
 
     fn connection_start(
         &mut self,
         start: &connection::Start,
         state: &mut ConnState<'d>,
-        out: &mut Queue<{ IOV_CAP }, Outbound<'d>>,
+        out: &mut Queue<'_, 'd, '_, { IOV_CAP }, Outbound<'d>>,
+        region: &mut RegionToken<'d>,
     ) -> Result<(), Error>;
 
     fn connection_tune(
         &mut self,
         tune: &connection::Tune,
         state: &mut ConnState<'d>,
-        out: &mut Queue<{ IOV_CAP }, Outbound<'d>>,
+        out: &mut Queue<'_, 'd, '_, { IOV_CAP }, Outbound<'d>>,
+        region: &mut RegionToken<'d>,
     ) -> Result<(), Error>;
 
     fn pick(client: u16, server: u16) -> u16;
@@ -42,7 +45,8 @@ impl<'d> SessionContent<'d> for Session<'d> {
         channel: u16,
         expect: ExpectMethod,
         response: PendingResponse,
-        out: &mut Queue<{ IOV_CAP }, Outbound<'d>>,
+        out: &mut Queue<'_, 'd, '_, { IOV_CAP }, Outbound<'d>>,
+        region: &mut RegionToken<'d>,
     ) -> Result<(), Error> {
         let Some(next_frame) =
             state.with_channel_mut(channel, |c| c.complete_head_with(expect, response))
@@ -50,7 +54,7 @@ impl<'d> SessionContent<'d> for Session<'d> {
             return Ok(());
         };
         if let Some(next_frame) = next_frame? {
-            out.try_enqueue(next_frame)
+            out.try_enqueue(region, next_frame)
                 .map_err(|_| Error::Other("egress queue full".into()))?;
         }
         Ok(())
@@ -60,7 +64,8 @@ impl<'d> SessionContent<'d> for Session<'d> {
         &mut self,
         start: &connection::Start,
         state: &mut ConnState<'d>,
-        out: &mut Queue<{ IOV_CAP }, Outbound<'d>>,
+        out: &mut Queue<'_, 'd, '_, { IOV_CAP }, Outbound<'d>>,
+        region: &mut RegionToken<'d>,
     ) -> Result<(), Error> {
         let mech_name = self.config.mechanism.name();
         if !start
@@ -85,6 +90,7 @@ impl<'d> SessionContent<'d> for Session<'d> {
         };
         Self::send_method(
             out,
+            region,
             0,
             &StartOk {
                 client_properties: &self.config.client_properties,
@@ -101,7 +107,8 @@ impl<'d> SessionContent<'d> for Session<'d> {
         &mut self,
         tune: &connection::Tune,
         state: &mut ConnState<'d>,
-        out: &mut Queue<{ IOV_CAP }, Outbound<'d>>,
+        out: &mut Queue<'_, 'd, '_, { IOV_CAP }, Outbound<'d>>,
+        region: &mut RegionToken<'d>,
     ) -> Result<(), Error> {
         let channel_max = Self::pick(self.config.channel_max, tune.channel_max);
         let frame_max = Self::pick_u32(self.config.frame_max, tune.frame_max);
@@ -115,6 +122,7 @@ impl<'d> SessionContent<'d> for Session<'d> {
         self.with_shared(|shared| shared.negotiated = state.negotiated);
         Self::send_method(
             out,
+            region,
             0,
             &TuneOk {
                 channel_max,
@@ -124,6 +132,7 @@ impl<'d> SessionContent<'d> for Session<'d> {
         )?;
         Self::send_method(
             out,
+            region,
             0,
             &Open {
                 virtual_host: &self.config.virtual_host,

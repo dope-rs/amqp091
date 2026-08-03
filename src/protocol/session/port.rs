@@ -3,7 +3,7 @@ use super::super::*;
 pub struct AmqpPort<'d> {
     pub(crate) io: Port<'d, Outbound<'d>>,
     shared: UnsafeCell<Shared<'d>>,
-    timer: Timer<'d>,
+    timer: &'d Timer<'d>,
     config: Config,
     outbound: Pool,
     egress: dope_net::link::egress::storage::Storage,
@@ -14,16 +14,14 @@ impl<'d> AmqpPort<'d> {
     pub fn new(
         config: Config,
         capacity: usize,
-        timer_capacity: usize,
         waiter_capacity: usize,
-        driver: dope::DriverRef<'d>,
+        driver: &mut dope::DriverContext<'_, 'd>,
     ) -> Result<Self, Error> {
         let outbound_layout = Self::outbound_layout(&config)?;
         Ok(Self::with_layout(
             config,
             outbound_layout,
             capacity,
-            timer_capacity,
             waiter_capacity,
             driver,
         ))
@@ -42,16 +40,16 @@ impl<'d> AmqpPort<'d> {
         config: Config,
         outbound_layout: PoolLayout,
         capacity: usize,
-        timer_capacity: usize,
         waiter_capacity: usize,
-        driver: dope::DriverRef<'d>,
+        driver: &mut dope::DriverContext<'_, 'd>,
     ) -> Self {
         let mut bodies = Box::new(BodyPool::with_capacity(config.body_fragment_capacity));
         let shared = Shared::new(&config, waiter_capacity, NonNull::from(bodies.as_mut()));
+        let driver_ref = driver.driver_ref();
         Self {
-            io: Port::with_capacity(capacity, driver),
+            io: Port::with_capacity(capacity, driver.region_token_ref(), driver_ref),
             shared: UnsafeCell::new(shared),
-            timer: Timer::with_capacity(timer_capacity, driver),
+            timer: driver.timer(),
             outbound: Pool::from_layout(outbound_layout),
             egress: dope_net::link::egress::storage::Storage::default(),
             config,
@@ -84,7 +82,7 @@ impl<'d> AmqpPort<'d> {
     }
 
     pub fn timer(&'d self) -> &'d Timer<'d> {
-        &self.timer
+        self.timer
     }
 
     pub fn config(&self) -> &Config {
@@ -98,7 +96,6 @@ impl<'d> AmqpPort<'d> {
     pub fn factory(
         config: Config,
         capacity: usize,
-        timer_capacity: usize,
         waiter_capacity: usize,
     ) -> Result<AmqpPortFactory, Error> {
         let outbound_layout = Self::outbound_layout(&config)?;
@@ -106,7 +103,6 @@ impl<'d> AmqpPort<'d> {
             config,
             outbound_layout,
             capacity,
-            timer_capacity,
             waiter_capacity,
         })
     }

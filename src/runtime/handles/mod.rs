@@ -2,12 +2,11 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::Poll;
 
+use dope::driver::timer::Timer;
 use dope::driver::token::Token;
-use dope::manifold::connector::port::Sender;
 use dope::manifold::connector::session::Connector;
 use dope::manifold::connector::source::Dialer;
 use dope::manifold::env::Env;
-use dope::manifold::timer::Timer;
 use dope_fiber::abi::Fiber;
 use dope_fiber::raw::task::Context;
 use dope_fiber::raw::wait::Waiter;
@@ -108,8 +107,9 @@ impl<'d> SessionRef<'d> {
 }
 
 pub(super) struct StateRef<'a, 'd> {
-    sender: Sender<'a, 'd, Outbound<'d>>,
+    target: Token,
     port: &'d AmqpPort<'d>,
+    marker: PhantomData<&'a ()>,
 }
 
 impl<'a, 'd> StateRef<'a, 'd> {
@@ -127,7 +127,9 @@ impl<'a, 'd> StateRef<'a, 'd> {
     }
 
     pub(super) fn try_enqueue(&self, bytes: Outbound<'d>) -> Result<(), Outbound<'d>> {
-        self.sender.try_enqueue(bytes)
+        self.port
+            .with_shared(|shared| shared.pending_egress.push_back((self.target, bytes)))
+            .map_err(|(_, bytes)| bytes)
     }
 }
 
@@ -145,10 +147,11 @@ impl<'d> ConnectorRef<'d> {
         target: Token,
         f: impl for<'s> FnOnce(StateRef<'s, 'd>) -> R,
     ) -> Option<R> {
-        self.port.io.with_sender(target, |sender| {
+        self.port.io.with_sender(target, |_| {
             f(StateRef {
-                sender,
+                target,
                 port: self.port,
+                marker: PhantomData,
             })
         })
     }
@@ -200,7 +203,7 @@ where
         ConnectorRef { port: self.port }
     }
 
-    pub(in crate::runtime) fn timer(self) -> &'d Timer<'d, 0> {
+    pub(in crate::runtime) fn timer(self) -> &'d Timer<'d> {
         self.port.timer()
     }
 

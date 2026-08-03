@@ -41,11 +41,12 @@ impl<'d> Session<'d> {
     }
 
     pub(in crate::protocol) fn send_method<S: ClientMethod>(
-        out: &mut Queue<{ IOV_CAP }, Outbound<'d>>,
+        out: &mut Queue<'_, 'd, '_, { IOV_CAP }, Outbound<'d>>,
+        region: &mut RegionToken<'d>,
         channel: u16,
         m: &S,
     ) -> Result<(), Error> {
-        let mut stage = out.wire_stage();
+        let mut stage = out.wire_stage(region);
         m.write_frame(&mut stage, channel);
         if stage.overflowed() {
             return Err(Error::CapacityOverflow("wire buffer"));
@@ -62,7 +63,7 @@ impl<'d> session::Session<'d> for Session<'d> {
     type Send = Outbound<'d>;
 
     fn connect(&mut self, ctx: &mut Ctx<'_, '_, 'd, Self>) {
-        let mut stage = ctx.sink.wire_stage();
+        let mut stage = ctx.sink.wire_stage(ctx.region);
         FrameEncoder::new(&mut stage).write_protocol_header();
         assert!(stage.commit() != 0);
         ctx.state.phase = ConnPhase::AwaitingStart;
@@ -94,7 +95,9 @@ impl<'d> session::Session<'d> for Session<'d> {
             return;
         }
         let result = match head.frame_type {
-            FrameType::METHOD => self.handle_method(head, ctx.conn_id, ctx.state, &mut ctx.sink),
+            FrameType::METHOD => {
+                self.handle_method(head, ctx.conn_id, ctx.state, &mut ctx.sink, ctx.region)
+            }
             FrameType::HEADER => self.handle_header(head, ctx.state),
             FrameType::BODY => self.handle_body(head, ctx.state),
             FrameType::HEARTBEAT => Ok(()),
@@ -117,7 +120,7 @@ impl<'d> session::Session<'d> for Session<'d> {
     }
 
     fn disconnect(&mut self, ctx: &mut Ctx<'_, '_, 'd, Self>) {
-        self.port.io.deactivate(ctx.conn_id);
+        self.port.io.deactivate(ctx.region, ctx.conn_id);
         let err = self.with_shared(|shared| shared.fatal.clone().unwrap_or(Error::Closed));
         ctx.state.phase = ConnPhase::Closed;
         ctx.state.pending_close = false;
@@ -133,11 +136,22 @@ impl<'d> session::Session<'d> for Session<'d> {
         });
     }
 
-    fn pre_park(&mut self) {
-        self.port.timer().expire(Instant::now());
-    }
-
-    fn idle(&self) -> Idle {
-        Idle::Park(self.port.timer().earliest())
+    fn pre_park(&mut self, region: &mut RegionToken<'d>) {
+        loop {
+            let Some((target, frame)) =
+                self.with_shared(|shared| shared.pending_egress.pop_front())
+            else {
+                break;
+            };
+            if let Err(frame) = self.port.io.try_enqueue(region, target, frame)
+                && self.port.io.is_active(target)
+            {
+                let restored = self.with_shared(|shared| {
+                    shared.pending_egress.push_front((target, frame)).is_ok()
+                });
+                debug_assert!(restored, "popped handoff slot must remain available");
+                break;
+            }
+        }
     }
 }

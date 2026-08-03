@@ -1,6 +1,6 @@
 [package]
 name = "dope-amqp091"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 authors = ["inq <gofiri@gmail.com>"]
 description = "AMQP 0-9-1 client on dope runtime"
@@ -9,9 +9,9 @@ repository = "https://github.com/dope-rs/amqp091"
 readme = "README.md"
 
 [dependencies]
-dope = "0.13"
-dope-net = "0.13"
-dope-fiber = "0.13"
-dope-gen = "0.13"
-o3 = "0.9"
+dope = "0.14"
+dope-net = "0.14"
+dope-fiber = "0.14"
+dope-gen = "0.14"
+o3 = "0.9.2"
 pin-project = "1"

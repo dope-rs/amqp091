@@ -7,7 +7,8 @@ pub(in crate::protocol) trait SessionMethod<'d> {
         head: Frame,
         conn_id: Token,
         state: &mut ConnState<'d>,
-        out: &mut Queue<{ IOV_CAP }, Outbound<'d>>,
+        out: &mut Queue<'_, 'd, '_, { IOV_CAP }, Outbound<'d>>,
+        region: &mut RegionToken<'d>,
     ) -> Result<(), Error>;
 }
 
@@ -17,7 +18,8 @@ impl<'d> SessionMethod<'d> for Session<'d> {
         head: Frame,
         conn_id: Token,
         state: &mut ConnState<'d>,
-        out: &mut Queue<{ IOV_CAP }, Outbound<'d>>,
+        out: &mut Queue<'_, 'd, '_, { IOV_CAP }, Outbound<'d>>,
+        region: &mut RegionToken<'d>,
     ) -> Result<(), Error> {
         let channel = head.channel;
         let server = Server::parse(head.payload)?;
@@ -25,12 +27,12 @@ impl<'d> SessionMethod<'d> for Session<'d> {
         if matches!(state.phase, ConnPhase::AwaitingStart)
             && let Server::ConnectionStart(start) = &server
         {
-            return self.connection_start(start, state, out);
+            return self.connection_start(start, state, out, region);
         }
         if matches!(state.phase, ConnPhase::AwaitingTune)
             && let Server::ConnectionTune(tune) = &server
         {
-            return self.connection_tune(tune, state, out);
+            return self.connection_tune(tune, state, out, region);
         }
         if matches!(state.phase, ConnPhase::AwaitingOpenOk)
             && let Server::ConnectionOpenOk(_) = &server
@@ -55,7 +57,7 @@ impl<'d> SessionMethod<'d> for Session<'d> {
                 "SASL challenge mid-conversation not supported".into(),
             )),
             Server::ConnectionClose(close) => {
-                Self::send_method(out, 0, &connection::CloseOk)?;
+                Self::send_method(out, region, 0, &connection::CloseOk)?;
                 state.phase = ConnPhase::Closed;
                 state.pending_close = true;
                 let recoverable = Error::connection_close_is_recoverable(close.reply_code);
@@ -114,11 +116,12 @@ impl<'d> SessionMethod<'d> for Session<'d> {
                     ExpectMethod::ChannelOpenOk,
                     PendingResponse::Empty,
                     out,
+                    region,
                 )?;
                 Ok(())
             }
             Server::ChannelFlow(f) => {
-                Self::send_method(out, channel, &channel::FlowOk { active: f.active })?;
+                Self::send_method(out, region, channel, &channel::FlowOk { active: f.active })?;
                 state.with_channel_mut(channel, |c| {
                     c.set_flow_active(f.active);
                 });
@@ -129,7 +132,7 @@ impl<'d> SessionMethod<'d> for Session<'d> {
             }
             Server::ChannelFlowOk(_) => Ok(()),
             Server::ChannelClose(close) => {
-                Self::send_method(out, channel, &channel::CloseOk)?;
+                Self::send_method(out, region, channel, &channel::CloseOk)?;
                 let err = Error::Server {
                     reply_code: close.reply_code,
                     reply_text: close.reply_text.clone(),
@@ -157,7 +160,7 @@ impl<'d> SessionMethod<'d> for Session<'d> {
                     .transpose()?
                     .flatten();
                 if let Some(next_frame) = next_frame {
-                    out.try_enqueue(next_frame)
+                    out.try_enqueue(region, next_frame)
                         .map_err(|_| Error::Other("egress queue full".into()))?;
                 }
                 self.with_shared(|shared| {
@@ -172,6 +175,7 @@ impl<'d> SessionMethod<'d> for Session<'d> {
                 ExpectMethod::ExchangeDeclareOk,
                 PendingResponse::Empty,
                 out,
+                region,
             ),
             Server::ExchangeDeleteOk(_) => Self::complete(
                 state,
@@ -179,6 +183,7 @@ impl<'d> SessionMethod<'d> for Session<'d> {
                 ExpectMethod::ExchangeDeleteOk,
                 PendingResponse::Empty,
                 out,
+                region,
             ),
             Server::ExchangeBindOk(_) => Self::complete(
                 state,
@@ -186,6 +191,7 @@ impl<'d> SessionMethod<'d> for Session<'d> {
                 ExpectMethod::ExchangeBindOk,
                 PendingResponse::Empty,
                 out,
+                region,
             ),
             Server::ExchangeUnbindOk(_) => Self::complete(
                 state,
@@ -193,6 +199,7 @@ impl<'d> SessionMethod<'d> for Session<'d> {
                 ExpectMethod::ExchangeUnbindOk,
                 PendingResponse::Empty,
                 out,
+                region,
             ),
             Server::QueueDeclareOk(ok) => Self::complete(
                 state,
@@ -200,6 +207,7 @@ impl<'d> SessionMethod<'d> for Session<'d> {
                 ExpectMethod::QueueDeclareOk,
                 PendingResponse::QueueDeclareOk(ok),
                 out,
+                region,
             ),
             Server::QueueBindOk(_) => Self::complete(
                 state,
@@ -207,6 +215,7 @@ impl<'d> SessionMethod<'d> for Session<'d> {
                 ExpectMethod::QueueBindOk,
                 PendingResponse::Empty,
                 out,
+                region,
             ),
             Server::QueueUnbindOk(_) => Self::complete(
                 state,
@@ -214,6 +223,7 @@ impl<'d> SessionMethod<'d> for Session<'d> {
                 ExpectMethod::QueueUnbindOk,
                 PendingResponse::Empty,
                 out,
+                region,
             ),
             Server::QueuePurgeOk(ok) => Self::complete(
                 state,
@@ -221,6 +231,7 @@ impl<'d> SessionMethod<'d> for Session<'d> {
                 ExpectMethod::QueuePurgeOk,
                 PendingResponse::QueuePurgeOk(ok),
                 out,
+                region,
             ),
             Server::QueueDeleteOk(ok) => Self::complete(
                 state,
@@ -228,6 +239,7 @@ impl<'d> SessionMethod<'d> for Session<'d> {
                 ExpectMethod::QueueDeleteOk,
                 PendingResponse::QueueDeleteOk(ok),
                 out,
+                region,
             ),
             Server::BasicQosOk(_) => Self::complete(
                 state,
@@ -235,6 +247,7 @@ impl<'d> SessionMethod<'d> for Session<'d> {
                 ExpectMethod::BasicQosOk,
                 PendingResponse::Empty,
                 out,
+                region,
             ),
             Server::BasicConsumeOk(ok) => {
                 let tag = ok.consumer_tag.clone();
@@ -247,6 +260,7 @@ impl<'d> SessionMethod<'d> for Session<'d> {
                     ExpectMethod::BasicConsumeOk,
                     PendingResponse::BasicConsumeOk(ok, key),
                     out,
+                    region,
                 )?;
                 self.with_shared(|shared| shared.progress_wakers.wake());
                 Ok(())
@@ -259,6 +273,7 @@ impl<'d> SessionMethod<'d> for Session<'d> {
                     ExpectMethod::BasicCancelOk,
                     PendingResponse::BasicCancelOk(ok),
                     out,
+                    region,
                 );
                 state
                     .with_channel_mut(channel, |c| c.cancel_consumer(&tag))
@@ -274,6 +289,7 @@ impl<'d> SessionMethod<'d> for Session<'d> {
                 ExpectMethod::BasicRecoverOk,
                 PendingResponse::Empty,
                 out,
+                region,
             ),
             Server::BasicAck(a) => state
                 .with_channel_mut(channel, |c| {
@@ -309,6 +325,7 @@ impl<'d> SessionMethod<'d> for Session<'d> {
                     ExpectMethod::ConfirmSelectOk,
                     PendingResponse::Empty,
                     out,
+                    region,
                 )
             }
             Server::TxSelectOk(_) => Self::complete(
@@ -317,6 +334,7 @@ impl<'d> SessionMethod<'d> for Session<'d> {
                 ExpectMethod::TxSelectOk,
                 PendingResponse::Empty,
                 out,
+                region,
             ),
             Server::TxCommitOk(_) => Self::complete(
                 state,
@@ -324,6 +342,7 @@ impl<'d> SessionMethod<'d> for Session<'d> {
                 ExpectMethod::TxCommitOk,
                 PendingResponse::Empty,
                 out,
+                region,
             ),
             Server::TxRollbackOk(_) => Self::complete(
                 state,
@@ -331,6 +350,7 @@ impl<'d> SessionMethod<'d> for Session<'d> {
                 ExpectMethod::TxRollbackOk,
                 PendingResponse::Empty,
                 out,
+                region,
             ),
         }
     }

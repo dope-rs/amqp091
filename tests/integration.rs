@@ -10,7 +10,7 @@ use dope::driver;
 use dope::manifold::connector::session::Connector;
 use dope::manifold::connector::source::health::Static;
 use dope::manifold::env::Bundle;
-use dope::runtime::executor::{Executor, Session as RuntimeSession};
+use dope::runtime::executor::{self, Executor};
 use dope::runtime::profile::Throughput;
 use dope_amqp091::config::Config;
 use dope_amqp091::content::properties::BasicProperties;
@@ -27,8 +27,8 @@ use dope_amqp091::runtime::handles::connection::Connection;
 use dope_amqp091::wire::field::FieldTable;
 use dope_fiber::abi::Fiber;
 use dope_fiber::abi::pollfn::PollFn;
-use dope_fiber::extensions::SessionExt as _;
-use dope_fiber::sleep::TimerExt as _;
+use dope_fiber::extensions::SessionExt;
+use dope_fiber::sleep::TimerExt;
 use dope_net::tcp::Tcp;
 use dope_net::wire::identity::Identity;
 use o3::cell::BrandCell;
@@ -47,7 +47,7 @@ struct AmqpDispatcher<'d> {
 }
 
 struct Rt<'r, 'scope, 'd: 'scope> {
-    sess: &'r mut RuntimeSession<'scope, 'd, AmqpPort<'d>>,
+    sess: &'r mut executor::Session<'scope, 'd, AmqpPort<'d>>,
     app: Pin<&'r BrandCell<'d, AmqpDispatcher<'d>>>,
     port: &'d AmqpPort<'d>,
 }
@@ -76,7 +76,7 @@ fn with_rt(
 ) {
     let exec = Executor::new(driver::Config::for_tcp_profile::<Throughput>(8))
         .expect("create executor")
-        .with_storage_factory(AmqpPort::factory(cfg, 1, 4, 16).expect("valid AMQP port config"));
+        .with_storage_factory(AmqpPort::factory(cfg, 1, 16).expect("valid AMQP port config"));
     exec.enter(|mut sess| {
         let backoff = sess.seed().derive(dope::hash::domain::BACKOFF).state();
         let port = sess.storage();

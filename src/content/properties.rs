@@ -1,4 +1,4 @@
-use std::error::Error as StdError;
+use std::error;
 use std::fmt;
 use std::str::from_utf8_unchecked;
 
@@ -267,7 +267,7 @@ impl fmt::Display for PropertyBuildError {
     }
 }
 
-impl StdError for PropertyBuildError {}
+impl error::Error for PropertyBuildError {}
 
 impl Default for BasicPropertiesBuilder {
     fn default() -> Self {
