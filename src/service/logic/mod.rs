@@ -1,0 +1,438 @@
+use core::convert::Infallible;
+
+use dope::core::Errno;
+use dope::core::driver::route::KeyTag;
+use dope::core::driver::{self};
+use o3::buffer::pool;
+use o3::buffer::write::consume::scope;
+use policy::output;
+mod drain;
+mod replay;
+pub(in crate::service) mod session;
+
+use std::time;
+
+use bindings::endpoint::State;
+use dope::core::driver::schedule;
+use dope::core::driver::schedule::app::Work;
+use dope::core::driver::schedule::clock;
+use dope::core::io::socket;
+use dope::manifold::client::app::admit::Registered;
+use dope::manifold::client::app::connect::Full;
+use dope::manifold::client::app::failure::Controlled;
+use dope::manifold::client::app::{self, request};
+use dope::manifold::client::conn::{Activation, Id};
+use dope::manifold::client::session::app::drain::Ready;
+use dope::manifold::client::session::codec::mode;
+use dope::manifold::client::session::{policy, protocol, response, turns};
+use dope::manifold::client::{attempt, close, port};
+use dope::manifold::service::bindings;
+use dope::net::link::egress;
+use dope::net::link::pool::change::opening;
+use o3::base::Call;
+use o3::base::cell::{local, region};
+use o3::base::time::Positive;
+use o3::buffer::{self, hold};
+use policy::admit;
+use port::error;
+
+use crate::config;
+use crate::failure::{self, recovery};
+use crate::protocol::wire::frame;
+use crate::service::content::ops::{FailureOwner, Input, Ops as _};
+use crate::service::logic::session::SessionOps as _;
+use crate::service::{self, Port, runtime};
+use crate::state::{channel, conn, epoch};
+
+#[doc(hidden)]
+pub struct Logic<'o, 'd, const ID: u8> {
+    pub(in crate::service) codec: frame::Codec,
+    pub(in crate::service) config: &'o config::Config,
+    heartbeat: runtime::Heartbeat<'d, ID>,
+}
+
+impl<'o, 'd, const ID: u8> Logic<'o, 'd, ID> {
+    pub(in crate::service) fn new<'r, 'c, 'b>(port: &'o Port<'r, 'c, 'b, 'd, ID>) -> Self {
+        let config = port.config();
+        Self {
+            codec: frame::Codec::new(config.tune.frame.get()),
+            config,
+            heartbeat: runtime::Heartbeat::new(),
+        }
+    }
+}
+
+impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
+    protocol::Spec<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, KeyTag<ID>, 1> for Logic<'o, 'd, ID>
+{
+    type Codec = frame::Codec;
+    type Connect = Full;
+    type ConnState = conn::Transport;
+    type Failure = Controlled;
+    type Mode = mode::Discard;
+    type Requests = request::Enabled;
+    type Response = response::Immediate;
+    type Send = pool::Cursor;
+
+    fn codec<'a>(
+        owner: &'a State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+    ) -> &'a Self::Codec {
+        &owner.logic().codec
+    }
+}
+
+impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
+    protocol::Plain<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, KeyTag<ID>, 1> for Logic<'o, 'd, ID>
+{
+    fn reject<'e>(
+        owner: &mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        cause: scope::Error,
+        context: &mut turns::Context<'_, 'e, 'd, Self::ConnState, Self::Send, KeyTag<ID>>,
+    ) -> response::Direct {
+        let mut parts = context.parts();
+        let epoch = epoch::Id::new(parts.conn_id);
+        let mut close = |plan| parts.close.request(plan);
+        owner.fail_session(
+            &mut close,
+            FailureOwner::Immediate(epoch),
+            recovery::Fault::session(failure::Error::Input(cause)),
+            parts.driver.region_token(),
+        );
+        response::Direct::Committed
+    }
+    fn deliver<'e, 'input, R: buffer::Cursor + hold::raw::Retain<'d>>(
+        owner: &mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        head: frame::Inbound<'input, 'd, R>,
+        context: &mut turns::Context<'_, 'e, 'd, Self::ConnState, Self::Send, KeyTag<ID>>,
+    ) -> response::Direct
+    where
+        'd: 'input,
+    {
+        let conn = context.conn_id;
+        let target = context.wake_target();
+        let attempt = owner.port().content.attempt(conn, target);
+        let input = {
+            let mut parts = context.parts();
+            owner.respond(head, attempt, &mut parts)
+        };
+        match input {
+            Input::Committed => response::Direct::Committed,
+            Input::Blocked(blocked) => match owner.port().content.register(blocked) {
+                Ok(()) => response::Direct::RetryInput,
+                Err(error) => {
+                    let mut parts = context.parts();
+                    let mut close = |plan| parts.close.request(plan);
+                    owner.fail_session(
+                        &mut close,
+                        FailureOwner::Immediate(epoch::Id::new(parts.conn_id)),
+                        recovery::Fault::terminal(error.into()),
+                        parts.driver.region_token(),
+                    );
+                    response::Direct::Committed
+                }
+            },
+        }
+    }
+}
+
+impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
+    admit::Register<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, KeyTag<ID>, 1> for Logic<'o, 'd, ID>
+{
+    fn register(
+        owner: &State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        active: &Activation<'_, 'd, KeyTag<ID>>,
+    ) -> app::Admission {
+        match owner.root().domain().transport.try_activate(active) {
+            Ok(()) => app::Admission::Attached,
+            Err(error::Open::Unknown | error::Open::Exhausted) => app::Admission::Rejected(
+                close::Directive::cut_final(close::Reason::Capacity(close::Capacity::Transport)),
+            ),
+            Err(error::Open::Occupied) => app::Admission::Rejected(close::Directive::cut_final(
+                close::Reason::Local(close::LocalOrigin::ResourceFailure),
+            )),
+        }
+    }
+}
+
+impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
+    policy::Output<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, KeyTag<ID>, 1> for Logic<'o, 'd, ID>
+{
+    fn sent() -> impl for<'a, 'x> Call<(
+        &'a mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        Id<'d, KeyTag<ID>>,
+        egress::Pending,
+        &'x mut region::Token<region::Identity<'d, 1>>,
+    )> {
+        output::Sent::<_>::Ready(
+            |owner: &mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>| {
+                service::Admission::new(owner.root().domain()).sync();
+            },
+        )
+    }
+
+    fn flush() -> impl for<'a, 'x, 'y, 'z> Call<(
+        &'a mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        &'x mut turns::Context<'y, 'z, 'd, Self::ConnState, Self::Send, KeyTag<ID>>,
+    )> {
+        output::Flush::<_>::Ready(
+            |owner: &mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>| {
+                service::Admission::new(owner.root().domain()).sync();
+            },
+        )
+    }
+
+    fn cancel() -> impl for<'a, 'x> Call<(
+        &'a State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        Self::Send,
+        &'x mut region::Token<region::Identity<'d, 1>>,
+    )> {
+        output::Cancel::<Infallible, _>::Owner(
+            |(owner, payload): (
+                &State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+                Self::Send,
+            )| {
+                payload.recycle();
+                service::Admission::new(owner.root().domain()).sync();
+            },
+        )
+    }
+}
+
+impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
+    policy::Connected<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, KeyTag<ID>, 1> for Logic<'o, 'd, ID>
+{
+    type Activation = Registered;
+
+    fn connect<'e>(
+        owner: &mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        _: attempt::Completion<'_, 'd, KeyTag<ID>>,
+        _: socket::Addr,
+        mut ctx: turns::Startup<'_, 'e, 'd, Self::ConnState, Self::Send, KeyTag<ID>>,
+    ) {
+        let epoch = epoch::Id::new(ctx.connection());
+        let until = ctx.lifetime.expires_at();
+        let mut close = |plan| ctx.close.request(plan);
+        owner.connect(
+            epoch,
+            ctx.state,
+            &mut close,
+            &mut ctx.sink,
+            until,
+            ctx.driver.region_token(),
+        );
+    }
+}
+
+impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
+    policy::Exhausted<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, KeyTag<ID>, 1> for Logic<'o, 'd, ID>
+{
+    fn exhaust(
+        owner: &mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        _: attempt::Completion<'_, 'd, KeyTag<ID>>,
+        cause: opening::Exhaustion,
+        driver: &mut driver::Context<'_, 'd>,
+    ) {
+        let change = owner.with_shared(driver.region_token(), |shared| shared.reject(Some(cause)));
+        if change == conn::Change::Applied {
+            let coord = owner.port().coordination();
+            coord.waiters().wake_all();
+            owner.port().admission().wake_all();
+        }
+    }
+}
+
+impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
+    policy::Lifecycle<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, KeyTag<ID>, 1> for Logic<'o, 'd, ID>
+{
+    type Drain = Ready;
+
+    fn io_fail<'e>(
+        owner: &mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        errno: Errno,
+        context: &mut turns::Context<'_, 'e, 'd, Self::ConnState, Self::Send, KeyTag<ID>>,
+    ) {
+        let mut parts = context.parts();
+        let epoch = epoch::Id::new(parts.conn_id);
+        let mut close = |plan| parts.close.request(plan);
+        owner.fail_session(
+            &mut close,
+            FailureOwner::Immediate(epoch),
+            recovery::Fault::session(failure::Error::Receive { errno }),
+            parts.driver.region_token(),
+        );
+    }
+
+    fn clear_send<'turn>(
+        owner: &State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        conn: Id<'d, KeyTag<ID>>,
+        context: &mut turns::Retirement<'_, 'turn, 'd>,
+    ) -> egress::Cleared {
+        let (work, region) = context.parts();
+        owner
+            .root()
+            .domain()
+            .transport
+            .retire(conn, work, region, |tagged| {
+                let (frame, _) = tagged.into_parts();
+                frame.recycle();
+            })
+    }
+
+    fn quarantine(
+        owner: &State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        conn: Id<'d, KeyTag<ID>>,
+        _: &mut Self::ConnState,
+        reason: close::Reason,
+        regions: &mut (
+            region::Token<region::Identity<'d>>,
+            region::Token<region::Identity<'d, 1>>,
+        ),
+    ) {
+        let region = &mut regions.0;
+        let epoch = epoch::Id::new(conn);
+        owner.with_shared(region, |shared| shared.retire(epoch, reason.into()));
+    }
+
+    fn policy(
+        owner: &State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        conn: Id<'d, KeyTag<ID>>,
+        _: &Self::ConnState,
+        _: close::Reason,
+        region: &mut region::Token<region::Identity<'d>>,
+    ) -> close::Policy {
+        let epoch = epoch::Id::new(conn);
+        owner.with_shared(region, |shared| {
+            shared
+                .connection
+                .lifecycle
+                .status()
+                .retirement(epoch)
+                .policy()
+        })
+    }
+
+    fn disconnect(
+        owner: &mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        context: turns::Retired<
+            '_,
+            'd,
+            Self::ConnState,
+            KeyTag<ID>,
+            State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        >,
+    ) {
+        let reason = context.reason();
+        let (drained, _, region) = context.into_parts();
+        owner.disconnect(epoch::Id::new(drained.connection()), reason, region);
+    }
+}
+
+impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
+    policy::Requests<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, KeyTag<ID>, 1> for Logic<'o, 'd, ID>
+{
+    fn drain<'e>(
+        owner: &State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        requests: &mut request::Requests<'_, '_, 'e, 'd, Self::Send, KeyTag<ID>>,
+        _: &mut region::Token<region::Identity<'d, 1>>,
+    ) {
+        let endpoint = owner;
+        endpoint.port().coordination().waiters().wake_flow();
+        owner.root().domain().transport.drain_tagged(
+            requests,
+            |region, auth| match auth {
+                runtime::Authority::Connection => true,
+                runtime::Authority::Channel(lease) => endpoint.with_shared(region, |shared| {
+                    match shared
+                        .routes
+                        .project(lease, |route| route.channel.control().phase)
+                    {
+                        Some(
+                            channel::Phase::Opening
+                            | channel::Phase::Open
+                            | channel::Phase::Closing,
+                        ) => true,
+                        Some(channel::Phase::Closed) | None => false,
+                    }
+                }),
+            },
+            |rejected| {
+                let (frame, _) = rejected.into_parts();
+                frame.recycle();
+            },
+        );
+        service::Admission::new(endpoint.port()).sync();
+    }
+}
+
+impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
+    policy::Scheduling<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, KeyTag<ID>, 1> for Logic<'o, 'd, ID>
+{
+    fn park<'turn>(
+        owner: &mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        work: Work<'turn, 'd>,
+        region: &mut (
+            region::Token<region::Identity<'d>>,
+            region::Token<region::Identity<'d, 1>>,
+        ),
+    ) {
+        let endpoint = owner;
+        endpoint.port().coordination().waiters().flush(work);
+        endpoint.port().admission().flush(work);
+        drain::run(endpoint, work, &mut region.0);
+        replay::run(endpoint, work, &mut region.0);
+        let port = endpoint.port();
+        endpoint
+            .logic_mut()
+            .heartbeat
+            .emit(port, work, &mut region.0);
+    }
+
+    fn shutdown(owner: &mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>) {
+        let coord = owner.port().coordination();
+        coord.waiters().wake_all();
+        owner.port().admission().wake_all();
+    }
+
+    fn progress(
+        owner: &State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        region: &region::Token<region::Identity<'d>>,
+        _: clock::Clock<'_, 'd>,
+    ) -> schedule::Progress<'d> {
+        let endpoint = owner;
+        let coord = endpoint.port().coordination();
+        if coord.waiters().has_pending() || endpoint.port().admission().has_pending() {
+            return schedule::Progress::Runnable;
+        }
+        if endpoint
+            .port()
+            .session
+            .read(local::Read::new(region), |shared| {
+                shared.recovery.is_runnable()
+            })
+        {
+            return schedule::Progress::Runnable;
+        }
+        owner.logic().heartbeat.progress(endpoint.port(), region)
+    }
+
+    fn inbound(
+        _: &State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        _: Id<'d, KeyTag<ID>>,
+        state: &Self::ConnState,
+        base: Positive,
+        _: &mut region::Token<region::Identity<'d>>,
+    ) -> app::Inbound {
+        use o3::base::time::Zero;
+
+        use crate::state::conn::phase::Phase;
+
+        if state.phase != Phase::Ready {
+            return app::Inbound::Awaiting(base);
+        }
+        let seconds = u64::from(state.negotiated.heartbeat);
+        match Positive::try_new(time::Duration::from_secs(seconds)) {
+            Ok(window) => app::Inbound::Awaiting(window),
+            Err(Zero) => app::Inbound::Quiescent,
+        }
+    }
+}

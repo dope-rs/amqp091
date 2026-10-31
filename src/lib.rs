@@ -1,10 +1,10 @@
-#![warn(unreachable_pub)]
-
+#[doc(hidden)]
+pub mod adapter;
 pub mod config;
-pub mod content;
-pub mod error;
-pub mod method;
+pub mod failure;
+pub mod message;
+mod permits;
 pub mod protocol;
-pub mod runtime;
-pub mod topology;
-pub mod wire;
+pub mod service;
+#[doc(hidden)]
+pub mod state;

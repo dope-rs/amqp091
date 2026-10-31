@@ -1,0 +1,211 @@
+use std::convert::Infallible;
+use std::io::Write as _;
+use std::sync::mpsc;
+use std::time::Duration;
+
+use dope::core::driver::life::recovery;
+use dope_amqp091::config;
+use dope_amqp091::message::field::Table;
+use dope_amqp091_fiber::channel::{exchange, queue};
+
+use crate::common::amqp::Peer;
+use crate::common::amqp::wire::Method;
+use crate::common::fiber::{Pinned, poll_once};
+pub mod common;
+
+use dope_amqp091::failure;
+use dope_test::harness::peer::TcpScript;
+
+use crate::common::client::*;
+
+#[test]
+fn reserves_inflight_slot() {
+    TcpScript::with(
+        |stream| {
+            Peer::new(stream).open(TUNE).expect("AMQP broker handshake");
+            for channel in [1, 2] {
+                Method::read(stream)
+                    .expect("channel.open")
+                    .check(channel, 20, 10)
+                    .expect("AMQP method route");
+                stream
+                    .write_all(
+                        &Method::try_encode(channel, 20, 11, &[0, 0, 0, 0])
+                            .expect("AMQP frame fixture"),
+                    )
+                    .expect("channel.open-ok");
+            }
+
+            Method::read(stream)
+                .expect("exchange.declare")
+                .check(1, 40, 10)
+                .expect("AMQP method route");
+            check_no_frame(stream, "reserved topology slot").expect("AMQP fixture");
+            stream
+                .write_all(&Method::try_encode(1, 40, 11, &[]).expect("AMQP frame fixture"))
+                .expect("exchange.declare-ok");
+        },
+        |broker| {
+            with(
+                broker.addr(),
+                config::Config::new("guest", "guest")
+                    .expect("config")
+                    .capacity(
+                        config::Capacity::default()
+                            .topology(config::Topology::default().exchanges(1)),
+                    ),
+                |rt| {
+                    let conn = rt.connection();
+                    assert!(rt.block_on(dope_fiber::fiber!('_ => async move {
+                        wait_ready(conn).await.expect("ready");
+                        let first = conn.channels().open(1).await.expect("first channel");
+                        let second = conn.channels().open(2).await.expect("second channel");
+                        let args = Table::new();
+                        let mut retained = Pinned::new(first.exchange().declare(exchange::Declare {
+                            exchange: "retained",
+                            kind: "direct",
+                            durable: false,
+                            auto_delete: false,
+                            internal: false,
+                            arguments: &args,
+                        }));
+                        assert!(poll_once(retained.as_pin()).await.is_pending());
+
+                        let result = second.exchange().declare(exchange::Declare {
+                                exchange: "overflow",
+                                kind: "direct",
+                                durable: false,
+                                auto_delete: false,
+                                internal: false,
+                                arguments: &args,
+                            }).await;
+                        assert!(matches!(result,
+                            Err(error) if matches!((error).error(), failure::Error::Capacity(
+                                failure::wire::Capacity::TopologyMetadata
+                            ))
+                        ));
+                        retained.await.expect("retained exchange");
+                    })).is_ok(), "AMQP fiber must complete");
+                },
+                recover,
+                |result| {
+                    result
+                        .as_ref()
+                        .map_err(|error| error.kind())
+                        .expect("endpoint completion");
+                },
+            );
+            broker.finish().expect("broker");
+        },
+    )
+    .expect("spawn topology-reservation broker");
+}
+
+#[test]
+fn retains_queue_slot() {
+    let (checked, checks) = mpsc::sync_channel(1);
+    TcpScript::with(
+        move |stream| {
+            assert!(
+                Peer::new(stream).open(TUNE).is_ok(),
+                "AMQP broker handshake"
+            );
+            for channel in [1, 2] {
+                let method = (Method::read(stream)).expect("channel.open");
+                method.check(channel, 20, 10).expect("AMQP method route");
+                assert!(
+                    stream
+                        .write_all(
+                            &Method::try_encode(channel, 20, 11, &[0; 4])
+                                .expect("AMQP frame fixture")
+                        )
+                        .is_ok()
+                );
+            }
+            let method = (Method::read(stream)).expect("reserved queue");
+            method.check(1, 50, 10).expect("AMQP method route");
+            assert_eq!(queue_name(&method).expect("queue name"), "retained");
+            assert!(
+                checks.recv_timeout(Duration::from_secs(3)).is_ok(),
+                "capacity result"
+            );
+            assert!(
+                stream
+                    .write_all(&queue_declare_ok_frame(1, b"retained").expect("AMQP fixture"))
+                    .is_ok()
+            );
+            let method = (Method::read(stream)).expect("queue.delete");
+            method.check(1, 50, 40).expect("AMQP method route");
+            assert!(
+                stream
+                    .write_all(&Method::try_encode(1, 50, 41, &[0; 4]).expect("AMQP frame fixture"))
+                    .is_ok()
+            );
+            let method = (Method::read(stream)).expect("reused queue slot");
+            method.check(2, 50, 10).expect("AMQP method route");
+            assert!(
+                stream
+                    .write_all(&queue_declare_ok_frame(2, b"reused").expect("AMQP fixture"))
+                    .is_ok()
+            );
+        },
+        |broker| {
+            let config = (config::Config::new("guest", "guest")).expect("config");
+            with(
+                broker.addr(),
+                config.capacity(
+                    config::Capacity::default().topology(config::Topology::new(64).queues(1)),
+                ),
+                |rt| {
+                    let conn = rt.connection();
+                    assert!(rt.block_on(dope_fiber::fiber!('_ => async move {
+                        wait_ready(conn).await.expect("ready");
+                        let first = (conn.channels().open(1).await).expect("first channel");
+                        let second = (conn.channels().open(2).await).expect("second channel");
+                        let args = Table::new();
+                        let declare = |name| queue::Declare {
+                            queue: name, durable: false, exclusive: false,
+                            auto_delete: false, arguments: &args,
+                        };
+                        let name = "q".repeat(127);
+                        let result = first.queue().declare(declare(&name)).await;
+                        assert!(matches!(result,
+                            Err(failure::Runtime::Local(failure::Error::Resident {
+                                target: failure::wire::Allocation::Topology,
+                                error: failure::wire::Resident::Budget { available: 64, .. },
+                            }))
+                        ));
+                        let mut retained = Pinned::new(first.queue().declare(declare("retained")));
+                        assert!(poll_once(retained.as_pin()).await.is_pending());
+                        let result = second.queue().declare(declare("overflow")).await;
+                        assert!(matches!(result,
+                            Err(error) if matches!((error).error(), failure::Error::Capacity(
+                                failure::wire::Capacity::TopologyMetadata
+                            ))
+                        ));
+                        assert!(checked.send(()).is_ok(), "publish capacity result");
+                        let result = retained.await;
+                        assert!(result.is_ok(), "reserved queue succeeds");
+                        let result = first.queue().delete("retained", false, false).await;
+                        assert!(result.is_ok(), "remove queue");
+                        let result = second.queue().declare(declare("reused")).await;
+                        assert!(result.is_ok(), "reuse freed slot");
+                    })).is_ok(), "AMQP fiber must complete");
+                },
+                recover,
+                |result| {
+                    result
+                        .as_ref()
+                        .map_err(|error| error.kind())
+                        .expect("endpoint completion");
+                },
+            );
+            assert!(broker.finish().is_ok(), "queue reservation broker");
+        },
+    )
+    .expect("queue reservation broker");
+}
+
+fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
+    panic!("native recovery: {:?}", failure.cause());
+}

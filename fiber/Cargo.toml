@@ -1,0 +1,19 @@
+[package]
+name = "dope-amqp091-fiber"
+version.workspace = true
+edition = "2024"
+rust-version.workspace = true
+authors = ["inq <gofiri@gmail.com>"]
+description = "Fiber API for the dope AMQP 0-9-1 manifold client"
+license = "MIT"
+repository = "https://github.com/dope-rs/amqp091"
+readme = "../README.md"
+
+[dependencies]
+dope = "0.20.0"
+dope-fiber = "0.20.0"
+dope-amqp091 = { path = "..", version = "0.20.0" }
+o3 = "=0.20.0"
+
+[dev-dependencies]
+dope-test = "0.20.0"

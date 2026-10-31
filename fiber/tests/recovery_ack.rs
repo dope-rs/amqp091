@@ -1,0 +1,420 @@
+use std::convert::Infallible;
+use std::io::{Read as _, Write as _};
+
+use dope::core::driver::life::recovery;
+
+use crate::common::amqp::wire::Method;
+use crate::common::recovery::broker::{ack_tag, open_tagged, tagged};
+pub mod common;
+use std::io::ErrorKind;
+use std::task::Poll;
+use std::time::Duration;
+
+use dope::core::platform::wake;
+use dope_amqp091::adapter::consumer;
+use dope_amqp091::config;
+use dope_amqp091::message::ack;
+use dope_amqp091::message::ack::Disposition;
+use dope_amqp091::message::field::Table;
+use dope_amqp091_fiber::channel::{basic, queue};
+use dope_fiber::task::time::sleep::TimerExt as _;
+use dope_test::harness::peer::AcceptScript;
+
+use crate::common::fiber::{Pinned, poll_once, wait};
+use crate::common::recovery::client::{with, with_config};
+
+#[test]
+fn rejects_stale_epoch() {
+    let (released, release) = wake::Ends::blocking().expect("client release").split();
+    let (observed, observe) = wake::Ends::blocking().expect("broker observation").split();
+    AcceptScript::with(
+        move |broker| {
+            let mut first = broker.accept().expect("first connection");
+            open_tagged(&first).expect("AMQP broker");
+            first.write_all(&tagged(1, &[]).expect("AMQP delivery")).expect("first delivery");
+            released
+                .wait_timeout(Duration::from_secs(10))
+                .expect("first delivery observed");
+            drop(first);
+
+            let mut second = broker.accept().expect("second connection");
+            open_tagged(&second).expect("AMQP broker");
+            second.write_all(&tagged(1, &[]).expect("AMQP delivery")).expect("second delivery");
+
+            released
+                .wait_timeout(Duration::from_secs(10))
+                .expect("stale settlement rejected");
+            second
+                .read_wait(Some(Duration::from_millis(250)))
+                .expect("set stale-settlement read deadline");
+            let mut byte = [0_u8; 1];
+            let read = second.read(&mut byte);
+            assert!(
+                matches!(
+                    read,
+                    Err(ref error)
+                        if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
+                ),
+                "generation 2 must remain open without receiving a generation 1 delivery tag: {read:?}"
+            );
+            second
+                .read_wait(Some(Duration::from_secs(5)))
+                .expect("restore broker read deadline");
+            observe.notify().expect("stale settlement absent");
+
+            let ack = Method::read(&mut second).expect("Basic.Ack");
+            ack.check(1, 60, 80).expect("AMQP method route");
+            assert_eq!(ack_tag(&ack).expect("acknowledgement tag"), 1);
+
+            second.write_all(&tagged(2, &[]).expect("AMQP delivery")).expect("requeue delivery");
+            let nack = Method::read(&mut second).expect("Basic.Nack");
+            nack.check(1, 60, 120).expect("AMQP method route");
+            assert_eq!(ack_tag(&nack).expect("acknowledgement tag"), 2);
+            assert_eq!(nack.1[12], 2, "individual NACK must set only requeue");
+
+            second.write_all(&tagged(3, &[]).expect("AMQP delivery")).expect("reject delivery");
+            let reject = Method::read(&mut second).expect("Basic.Reject");
+            reject.check(1, 60, 90).expect("AMQP method route");
+            assert_eq!(ack_tag(&reject).expect("acknowledgement tag"), 3);
+            assert_eq!(reject.1[12], 1, "REJECT must preserve requeue");
+            observe.notify().expect("REJECT observation");
+        },
+        move |broker| {
+            with(
+                broker.addr(),
+                move |runtime| {
+                    let conn = runtime.connection();
+                    let timer = runtime.timer();
+                    assert!(runtime.block_on(dope_fiber::fiber!('_ => async move {
+                    let target = conn
+                        .observe()
+                        .ready()
+                        .await
+                        .expect("first ready");
+                    let channel = conn
+                        .channels()
+                        .open_in(target, 1)
+                        .await
+                        .expect("channel");
+                    let empty = Table::new();
+                    channel
+                        .queue()
+                        .declare(queue::Declare {
+                            queue: "q",
+                            durable: false,
+                            exclusive: false,
+                            auto_delete: false,
+                            arguments: &empty,
+                        })
+                        .await
+                        .expect("queue");
+                    let mut consumer = channel
+                        .basic()
+                        .consume(basic::Consume {
+                            queue: "q",
+                            consumer_tag: "tag",
+                            no_local: false,
+                            ack: ack::Manual,
+                            exclusive: false,
+                            arguments: &empty,
+                        })
+                        .await
+                        .expect("consumer");
+                    let stale = consumer
+                        .recv()
+                        .await
+                        .expect("consumer active")
+                        .expect("first delivery");
+                    let stale_epoch = stale.epoch();
+                    release.notify().expect("first delivery observed");
+
+                    while conn
+                        .observe()
+                        .read(|view| view.ready_cycle())
+                        .await
+                        != Some(2)
+                    {
+                        timer.sleep(Duration::from_millis(1)).expect("recovery wait").await;
+                    }
+                    let current = consumer
+                        .recv()
+                        .await
+                        .expect("consumer active")
+                        .expect("second delivery");
+                    assert!(current.epoch() != stale_epoch);
+                    let error = stale.settle(Disposition::Ack).await.expect_err("stale target was rebound");
+                    std::assert_matches!(error, consumer::Error::SourceUnavailable(_));
+                    release.notify().expect("stale settlement rejected");
+                    wait(&observed).await.expect("stale settlement absent");
+                    current
+                        .settle(Disposition::Ack)
+                        .await
+                        .expect("current settlement");
+                    let requeue = consumer
+                        .recv()
+                        .await
+                        .expect("consumer active")
+                        .expect("requeue delivery");
+                    requeue
+                        .settle(Disposition::Nack { requeue: true })
+                        .await
+                        .expect("requeue settlement");
+                    let reject = consumer
+                        .recv()
+                        .await
+                        .expect("consumer active")
+                        .expect("reject delivery");
+                    reject
+                        .settle(Disposition::Reject { requeue: true })
+                        .await
+                        .expect("reject settlement");
+                    wait(&observed).await.expect("REJECT observation");
+                })).is_ok(), "AMQP fiber must complete");
+                }, recover,
+                |result| {
+                    result
+                        .as_ref()
+                        .map_err(|error| error.kind())
+                        .expect("endpoint completion");
+                },
+            );
+            broker.finish().expect("scripted broker thread");
+        },
+    )
+    .expect("scripted broker");
+}
+
+#[test]
+fn waits_for_egress_credit() {
+    AcceptScript::with(
+        move |broker| {
+            let mut stream = broker.accept().expect("connection");
+            open_tagged(&stream).expect("AMQP broker");
+            stream
+                .write_all(&tagged(1, &[]).expect("AMQP delivery"))
+                .expect("first delivery");
+            stream
+                .write_all(&tagged(2, &[]).expect("AMQP delivery"))
+                .expect("second delivery");
+            stream
+                .write_all(&tagged(3, &[]).expect("AMQP delivery"))
+                .expect("third delivery");
+
+            for expected in [1_u64, 3] {
+                let ack = Method::read(&mut stream).expect("Basic.Ack");
+                ack.check(1, 60, 80).expect("AMQP method route");
+                assert_eq!(ack_tag(&ack).expect("acknowledgement tag"), expected);
+            }
+            Method::read(&mut stream)
+                .expect("Connection.Close")
+                .check(0, 10, 50)
+                .expect("AMQP method route");
+            stream
+                .write_all(&Method::try_encode(0, 10, 51, &[]).expect("AMQP frame fixture"))
+                .expect("Connection.CloseOk");
+        },
+        |broker| {
+            let config = config::Config::new("guest", "guest")
+                .expect("config")
+                .capacity(config::Capacity::default().egress(config::Egress::new(1, 1024)));
+            with_config(
+                broker.addr(),
+                config,
+                |runtime| {
+                    let conn = runtime.connection();
+                    assert!(
+                    runtime
+                        .block_on(dope_fiber::fiber!('_ => async move {
+                            let ready = conn.observe().ready().await.expect("ready");
+                            let channel = conn.channels().open(1).await.expect("channel");
+                            let empty = Table::new();
+                            channel
+                                .queue()
+                                .declare(queue::Declare {
+                                    queue: "q",
+                                    durable: false,
+                                    exclusive: false,
+                                    auto_delete: false,
+                                    arguments: &empty,
+                                })
+                                .await
+                                .expect("queue");
+                            let mut consumer = channel
+                                .basic()
+                                .consume(basic::Consume {
+                                    queue: "q",
+                                    consumer_tag: "tag",
+                                    no_local: false,
+                                    ack: ack::Manual,
+                                    exclusive: false,
+                                    arguments: &empty,
+                                })
+                                .await
+                                .expect("consumer");
+                            let first = consumer
+                                .recv()
+                                .await
+                                .expect("consumer active")
+                                .expect("first delivery");
+                            let second = consumer
+                                .recv()
+                                .await
+                                .expect("consumer active")
+                                .expect("second delivery");
+                            let third = consumer
+                                .recv()
+                                .await
+                                .expect("consumer active")
+                                .expect("third delivery");
+
+                            let mut first = Pinned::new(first.settle(Disposition::Ack));
+                            let first_admission = poll_once(first.as_pin()).await;
+                            std::assert_matches!(first_admission, Poll::Ready(Ok(())));
+
+                            let mut second = Pinned::new(second.settle(Disposition::Ack));
+                            assert!(poll_once(second.as_pin()).await.is_pending());
+                            drop(second);
+
+                            third
+                                .settle(Disposition::Ack)
+                                .await
+                                .expect("replacement settlement resumes after exact egress credit");
+                            conn
+                                .control()
+                                .close(ready, 200, "OK")
+                                .await
+                                .expect("close");
+                        }))
+                        .is_ok(),
+                    "AMQP fiber must complete"
+                );
+                },
+                recover,
+                |result| {
+                    result
+                        .as_ref()
+                        .map_err(|error| error.kind())
+                        .expect("endpoint completion");
+                },
+            );
+            broker.finish().expect("scripted broker thread");
+        },
+    )
+    .expect("scripted broker");
+}
+
+#[test]
+fn releases_body_first() {
+    let (released, release) = wake::Ends::blocking().expect("body release").split();
+    AcceptScript::with(
+        move |broker| {
+            let mut stream = broker.accept().expect("connection");
+            open_tagged(&stream).expect("AMQP broker");
+            stream
+                .write_all(&tagged(1, b"a").expect("AMQP delivery"))
+                .expect("first delivery");
+            released
+                .wait_timeout(Duration::from_secs(10))
+                .expect("first body released");
+            stream
+                .write_all(&tagged(2, b"b").expect("AMQP delivery"))
+                .expect("second delivery");
+
+            for expected in [1_u64, 2] {
+                let ack = Method::read(&mut stream).expect("Basic.Ack");
+                ack.check(1, 60, 80).expect("AMQP method route");
+                assert_eq!(ack_tag(&ack).expect("acknowledgement tag"), expected);
+            }
+            Method::read(&mut stream)
+                .expect("Connection.Close")
+                .check(0, 10, 50)
+                .expect("AMQP method route");
+            stream
+                .write_all(&Method::try_encode(0, 10, 51, &[]).expect("AMQP frame fixture"))
+                .expect("Connection.CloseOk");
+        },
+        |broker| {
+            let config = config::Config::new("guest", "guest")
+                .expect("config")
+                .capacity(config::Capacity::default().body(config::Body::default().fragments(1)));
+            with_config(
+                broker.addr(),
+                config,
+                |runtime| {
+                    let conn = runtime.connection();
+                    assert!(
+                        runtime
+                            .block_on(dope_fiber::fiber!('_ => async move {
+                                let ready = conn.observe().ready().await.expect("ready");
+                                let channel = conn.channels().open(1).await.expect("channel");
+                                let empty = Table::new();
+                                channel
+                                    .queue()
+                                    .declare(queue::Declare {
+                                        queue: "q",
+                                        durable: false,
+                                        exclusive: false,
+                                        auto_delete: false,
+                                        arguments: &empty,
+                                    })
+                                    .await
+                                    .expect("queue");
+                                let mut consumer = channel
+                                    .basic()
+                                    .consume(basic::Consume {
+                                        queue: "q",
+                                        consumer_tag: "tag",
+                                        no_local: false,
+                                        ack: ack::Manual,
+                                        exclusive: false,
+                                        arguments: &empty,
+                                    })
+                                    .await
+                                    .expect("consumer");
+                                let first = consumer
+                                    .recv()
+                                    .await
+                                    .expect("consumer active")
+                                    .expect("first delivery");
+                                assert!(first.body() == b"a"[..]);
+                                let first = first.settle(Disposition::Ack);
+                                release.notify().expect("first body released");
+
+                                let second = consumer
+                                    .recv()
+                                    .await
+                                    .expect("consumer active")
+                                    .expect("second delivery");
+                                assert!(second.body() == b"b"[..]);
+                                first.await.expect("first settlement");
+                                second
+                                    .settle(Disposition::Ack)
+                                    .await
+                                    .expect("second settlement");
+                                conn
+                                    .control()
+                                    .close(ready, 200, "OK")
+                                    .await
+                                    .expect("close");
+                            }))
+                            .is_ok(),
+                        "AMQP fiber must complete"
+                    );
+                },
+                recover,
+                |result| {
+                    result
+                        .as_ref()
+                        .map_err(|error| error.kind())
+                        .expect("endpoint completion");
+                },
+            );
+            broker.finish().expect("scripted broker thread");
+        },
+    )
+    .expect("scripted broker");
+}
+
+fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
+    panic!("native recovery: {:?}", failure.cause());
+}

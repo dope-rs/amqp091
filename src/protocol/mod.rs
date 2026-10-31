@@ -1,105 +1,156 @@
-use std::cell::{Cell, UnsafeCell};
-use std::mem::{replace, take, transmute};
-use std::pin::Pin;
-use std::ptr::NonNull;
-use std::task::Poll;
-use std::time::Instant;
+use std::marker;
 
-use dope::driver::ready::{CompletionKey, CompletionWaker};
-use dope::driver::timer::Timer;
-use dope::driver::token::Token;
-use dope::manifold::connector::lifecycle;
-use dope::manifold::connector::lifecycle::Close;
-use dope::manifold::connector::port::Port;
-use dope::manifold::connector::session::Ctx;
-use dope::manifold::connector::state::IOV_CAP;
-use dope::runtime::executor::StorageFactory;
-use dope_fiber::raw::task::Context;
-use dope_fiber::raw::wait::Waiter;
-use dope_net::link::egress::queue::Queue;
-use o3::buffer::{Pool, PoolLayout};
-use o3::cell::RegionToken;
-use o3::collections::{FixedHashTable, FixedQueue, Slab, SlabKey, SlotQueue};
-use o3::mem::{ByteBudget, ByteBudgetHandle};
+use crate::failure;
+use crate::failure::wire::Fault;
+use crate::message::ack;
+use crate::protocol::method::{basic, queue};
+use crate::protocol::wire::frame;
 
-use crate::config::{ChannelCapacity, Config};
-use crate::content::properties::{ContentHeader, Delivery, Returned};
-use crate::content::{Body, BodyPool};
-use crate::error::Error;
-use crate::method::connection::{Open, StartOk, TuneOk};
-use crate::method::core::ClientMethod;
-use crate::method::{Server, basic, channel, connection, queue};
-use crate::runtime::wake::{WakeRegistry, WakeSlot};
-use crate::topology::Topology;
-use crate::wire::frame::{Codec, Frame, FrameEncoder, FrameType, OVERHEAD};
-use crate::wire::sink::Sink;
+pub(crate) mod class;
+pub mod method;
+pub(crate) mod replays;
+pub(crate) mod topology;
+pub mod wire;
 
-const NONE: u32 = u32::MAX;
+/// Capacity of the largest control-lane frame, `Channel.Close`.
+pub(crate) const CONTROL_FRAME_CAPACITY: usize =
+    frame::OVERHEAD + 4 + 2 + 1 + u8::MAX as usize + 2 + 2;
 
-pub(crate) mod channels;
-pub mod connections;
-pub mod session;
-
-use self::channels::confirm::ConfirmTracker;
-use self::channels::consumer::{ConsumerSlot, ConsumerTable, DeliveryNode};
-use self::channels::messages::ChannelMessages;
-use self::channels::state::{ChannelPhase, ChannelState, InboundContent, PendingMethod};
-use self::connections::channels::Channels;
-use self::connections::free::FreeChannels;
-use self::connections::limits::Limits;
-use self::connections::shared::Shared;
-use self::connections::state::{ConnPhase, ConnState};
-use self::session::Session;
-use self::session::factory::AmqpPortFactory;
-use self::session::outbound::Outbound;
-use self::session::port::AmqpPort;
-
-pub(crate) struct PendingMethodOp<'d> {
-    pub(crate) expect: ExpectMethod,
-    pub(crate) frame: Option<Outbound<'d>>,
-    pub(crate) waker: WakeSlot<'d>,
-    pub(crate) detached: bool,
-    pub(crate) sent: bool,
-    pub(crate) outcome: Option<Result<PendingResponse, Error>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PublishConfirm {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Confirmation {
     Ack,
     Nack { requeue: bool },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExpectMethod {
-    ChannelOpenOk,
-    ChannelCloseOk,
-    QueueDeclareOk,
-    QueueBindOk,
-    QueueUnbindOk,
-    QueuePurgeOk,
-    QueueDeleteOk,
-    ExchangeDeclareOk,
-    ExchangeDeleteOk,
-    ExchangeBindOk,
-    ExchangeUnbindOk,
-    BasicQosOk,
-    BasicConsumeOk,
-    BasicCancelOk,
-    BasicRecoverOk,
-    ConfirmSelectOk,
-    TxSelectOk,
-    TxCommitOk,
-    TxRollbackOk,
-}
-
-#[derive(Debug)]
-pub enum PendingResponse {
-    Empty,
-    QueueDeclareOk(queue::DeclareOk),
+pub enum Response<'b, 'd, Consumer> {
+    Empty(method::Kind),
+    QueueDeclareOk(queue::DeclareOk<'b, 'd>),
     QueuePurgeOk(queue::PurgeOk),
     QueueDeleteOk(queue::DeleteOk),
-    BasicConsumeOk(basic::ConsumeOk, SlabKey),
-    BasicCancelOk(basic::CancelOk),
+    BasicConsumeOk(basic::ConsumeOk<'b, 'd>, Consumer),
+    BasicConsumeReplayOk,
+    BasicCancelOk(basic::CancelOk<'d>),
+}
+
+pub enum Registration<'b, 'd, Consumer> {
+    Registered(basic::ConsumeOk<'b, 'd>, Consumer),
+    Replayed,
+}
+
+impl<'b, 'd, Consumer> method::Complete<'b, 'd, Consumer> for Registration<'b, 'd, Consumer> {
+    type Reply = basic::ConsumeReply;
+}
+
+impl<'b, 'd, Consumer, R: method::Unit> From<R> for Response<'b, 'd, Consumer> {
+    fn from(reply: R) -> Self {
+        Self::Empty(reply.into_kind())
+    }
+}
+
+impl<'b, 'd, Consumer> From<queue::DeclareOk<'b, 'd>> for Response<'b, 'd, Consumer> {
+    fn from(reply: queue::DeclareOk<'b, 'd>) -> Self {
+        Self::QueueDeclareOk(reply)
+    }
+}
+
+impl<'b, 'd, Consumer> From<queue::PurgeOk> for Response<'b, 'd, Consumer> {
+    fn from(reply: queue::PurgeOk) -> Self {
+        Self::QueuePurgeOk(reply)
+    }
+}
+
+impl<'b, 'd, Consumer> From<queue::DeleteOk> for Response<'b, 'd, Consumer> {
+    fn from(reply: queue::DeleteOk) -> Self {
+        Self::QueueDeleteOk(reply)
+    }
+}
+
+impl<'b, 'd, Consumer> From<Registration<'b, 'd, Consumer>> for Response<'b, 'd, Consumer> {
+    fn from(done: Registration<'b, 'd, Consumer>) -> Self {
+        match done {
+            Registration::Registered(reply, key) => Self::BasicConsumeOk(reply, key),
+            Registration::Replayed => Self::BasicConsumeReplayOk,
+        }
+    }
+}
+
+impl<'b, 'd, Consumer> From<basic::CancelOk<'d>> for Response<'b, 'd, Consumer> {
+    fn from(reply: basic::CancelOk<'d>) -> Self {
+        Self::BasicCancelOk(reply)
+    }
+}
+
+/// A consumer identity bound to the acknowledgement mode sent on the wire.
+pub struct ConsumerKey<Consumer, M = ack::Manual> {
+    inner: Consumer,
+    mode: marker::PhantomData<fn() -> M>,
+}
+
+impl<Consumer, M> ConsumerKey<Consumer, M> {
+    fn new(inner: Consumer) -> Self {
+        Self {
+            inner,
+            mode: marker::PhantomData,
+        }
+    }
+
+    pub(crate) const fn inner(&self) -> &Consumer {
+        &self.inner
+    }
+
+    pub(crate) fn into_inner(self) -> Consumer {
+        self.inner
+    }
+}
+
+pub struct Consumer<'b, 'd, Key, M = ack::Manual> {
+    pub method: basic::ConsumeOk<'b, 'd>,
+    pub key: ConsumerKey<Key, M>,
+}
+
+impl<'b, 'd, Key, M> method::Finish<Registration<'b, 'd, Key>> for Consumer<'b, 'd, Key, M> {
+    fn finish(input: Registration<'b, 'd, Key>) -> Result<Self, failure::Error> {
+        use failure::wire::Consumer;
+
+        match input {
+            Registration::Registered(method, key) => Ok(Self {
+                method,
+                key: ConsumerKey::new(key),
+            }),
+            Registration::Replayed => Err(failure::Error::Protocol(Fault::Consumer {
+                expected: Consumer::New,
+                actual: Consumer::Replay,
+            })),
+        }
+    }
+}
+
+impl<'b, 'd, Consumer> Response<'b, 'd, Consumer> {
+    pub(crate) const fn kind(&self) -> method::Kind {
+        match self {
+            Self::Empty(kind) => *kind,
+            Self::QueueDeclareOk(_) => method::Kind::QueueDeclare,
+            Self::QueuePurgeOk(_) => method::Kind::QueuePurge,
+            Self::QueueDeleteOk(_) => method::Kind::QueueDelete,
+            Self::BasicConsumeOk(_, _) | Self::BasicConsumeReplayOk => method::Kind::Consume,
+            Self::BasicCancelOk(_) => method::Kind::CancelOk,
+        }
+    }
+
+    pub(crate) fn try_map<Mapped>(
+        self,
+        map: impl FnOnce(Consumer) -> Result<Mapped, failure::Error>,
+    ) -> Result<Response<'b, 'd, Mapped>, failure::Error> {
+        Ok(match self {
+            Self::Empty(kind) => Response::Empty(kind),
+            Self::QueueDeclareOk(value) => Response::QueueDeclareOk(value),
+            Self::QueuePurgeOk(value) => Response::QueuePurgeOk(value),
+            Self::QueueDeleteOk(value) => Response::QueueDeleteOk(value),
+            Self::BasicConsumeOk(value, key) => Response::BasicConsumeOk(value, map(key)?),
+            Self::BasicConsumeReplayOk => Response::BasicConsumeReplayOk,
+            Self::BasicCancelOk(value) => Response::BasicCancelOk(value),
+        })
+    }
 }
 
 #[derive(Default, Clone, Copy)]

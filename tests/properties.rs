@@ -1,52 +1,50 @@
-use dope_amqp091::content::properties::{BasicProperties, ContentHeader};
-use dope_amqp091::wire::sink::BoundedSink;
-use o3::buffer::BLOCK_CAPACITY;
+use dope_amqp091::message::Builder;
+use dope_amqp091::message::property::Properties;
 
 #[test]
-fn compact_properties_round_trip() {
-    assert!(std::mem::size_of::<BasicProperties>() <= 128);
+fn round_trips_properties() {
+    assert!(std::mem::size_of::<Properties>() <= 128);
 
-    let properties = BasicProperties::builder()
+    let props = Builder::default()
+        .content_type("obsolete")
+        .expect("initial content type")
         .content_type("application/json")
-        .unwrap()
-        .content_encoding("utf-8")
-        .unwrap()
-        .correlation_id("correlation")
-        .unwrap()
+        .expect("valid content type")
+        .encoding("utf-8")
+        .expect("valid content encoding")
+        .correlation("αβ")
+        .expect("valid correlation id")
         .reply_to("reply")
-        .unwrap()
+        .expect("valid reply target")
         .expiration("30000")
-        .unwrap()
+        .expect("valid expiration")
         .message_id("message")
-        .unwrap()
+        .expect("valid message id")
         .kind("event")
-        .unwrap()
+        .expect("valid message kind")
         .user_id("user")
-        .unwrap()
+        .expect("valid user id")
         .app_id("app")
-        .unwrap()
-        .reserved("reserved")
-        .unwrap()
-        .delivery_mode(2)
+        .expect("valid application id")
+        .reserved("")
+        .expect("empty reserved value")
+        .delivery(2)
+        .expect("persistent delivery mode")
         .priority(7)
+        .expect("valid priority")
         .timestamp(42)
         .build();
-    let mut payload = BoundedSink::<BLOCK_CAPACITY>::new();
-    properties.encode_header_frame(&mut payload, 123);
-
-    let header = ContentHeader::read(payload.finish().unwrap().freeze()).unwrap();
-    assert_eq!(header.body_size, 123);
-    assert_eq!(header.properties.content_type(), Some("application/json"));
-    assert_eq!(header.properties.content_encoding(), Some("utf-8"));
-    assert_eq!(header.properties.correlation_id(), Some("correlation"));
-    assert_eq!(header.properties.reply_to(), Some("reply"));
-    assert_eq!(header.properties.expiration(), Some("30000"));
-    assert_eq!(header.properties.message_id(), Some("message"));
-    assert_eq!(header.properties.kind(), Some("event"));
-    assert_eq!(header.properties.user_id(), Some("user"));
-    assert_eq!(header.properties.app_id(), Some("app"));
-    assert_eq!(header.properties.reserved(), Some("reserved"));
-    assert_eq!(header.properties.delivery_mode, Some(2));
-    assert_eq!(header.properties.priority, Some(7));
-    assert_eq!(header.properties.timestamp, Some(42));
+    assert_eq!(props.content_type(), Some("application/json"));
+    assert_eq!(props.encoding(), Some("utf-8"));
+    assert_eq!(props.correlation(), Some("αβ"));
+    assert_eq!(props.reply_to(), Some("reply"));
+    assert_eq!(props.expiration(), Some("30000"));
+    assert_eq!(props.message_id(), Some("message"));
+    assert_eq!(props.kind(), Some("event"));
+    assert_eq!(props.user_id(), Some("user"));
+    assert_eq!(props.app_id(), Some("app"));
+    assert_eq!(props.reserved(), Some(""));
+    assert_eq!(props.delivery(), Some(2));
+    assert_eq!(props.priority(), Some(7));
+    assert_eq!(props.timestamp, Some(42));
 }
