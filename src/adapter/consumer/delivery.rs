@@ -1,3 +1,5 @@
+use std::num;
+
 use crate::adapter::conn;
 use crate::adapter::consumer::{Mode, Origin, Settle};
 use crate::message::ack::{self, Disposition};
@@ -22,7 +24,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8, M: Mode>
         }
     }
 
-    pub fn delivery_tag(&self) -> u64 {
+    pub fn delivery_tag(&self) -> num::NonZero<u64> {
         self.content.delivery_tag()
     }
 

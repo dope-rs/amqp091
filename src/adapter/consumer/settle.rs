@@ -1,4 +1,4 @@
-use std::task;
+use std::{num, task};
 
 use dope::core::driver::schedule::ready::wake;
 use dope::core::driver::schedule::ready::wake::queue;
@@ -21,7 +21,7 @@ enum State {
 /// delivered its tag.
 pub struct Settle<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> {
     source: Origin<'o, 'r, 'c, 'b, 'd, ID>,
-    delivery_tag: u64,
+    delivery_tag: num::NonZero<u64>,
     credit: queue::Registration<'o, 'd, fifo::Scope<'c>>,
     state: State,
 }
@@ -29,7 +29,7 @@ pub struct Settle<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> {
 impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Settle<'o, 'r, 'c, 'b, 'd, ID> {
     pub(super) const fn new(
         source: Origin<'o, 'r, 'c, 'b, 'd, ID>,
-        tag: u64,
+        tag: num::NonZero<u64>,
         kind: Disposition,
     ) -> Self {
         Self {
@@ -62,7 +62,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Settle<'o, 'r, 'c, 'b, 'd
             |output| match kind {
                 Disposition::Ack => method::Encode::write(
                     &basic::Ack {
-                        delivery_tag: tag,
+                        delivery_tag: tag.get(),
                         multiple: false,
                     },
                     output,
@@ -70,7 +70,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Settle<'o, 'r, 'c, 'b, 'd
                 ),
                 Disposition::Nack { requeue: retry } => method::Encode::write(
                     &basic::Nack {
-                        delivery_tag: tag,
+                        delivery_tag: tag.get(),
                         multiple: false,
                         requeue: retry,
                     },

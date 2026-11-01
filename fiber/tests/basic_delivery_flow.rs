@@ -154,7 +154,7 @@ fn interleaves_by_channel() {
                         .await
                         .expect("second delivery state")
                         .expect("second delivery");
-                    assert_eq!(second_delivery.delivery_tag(), 2);
+                    assert_eq!(second_delivery.delivery_tag().get(), 2);
                     assert!(second_delivery.body().is_empty());
                     second_delivery.release();
 
@@ -163,7 +163,7 @@ fn interleaves_by_channel() {
                         .await
                         .expect("first delivery state")
                         .expect("first delivery");
-                    assert_eq!(first_delivery.delivery_tag(), 1);
+                    assert_eq!(first_delivery.delivery_tag().get(), 1);
                     assert_eq!(first_delivery.body().as_slice(), Some(&b"left"[..]));
                     first_delivery.release();
                     drop(first_consumer);
@@ -277,7 +277,7 @@ fn held_deliveries_block() {
                             .await
                             .expect("delivery state")
                             .expect("basic.deliver");
-                        assert_eq!(delivery.delivery_tag(), tag);
+                        assert_eq!(delivery.delivery_tag().get(), tag);
                         held.push(delivery);
                     }
                     let result = Race::new(consumer.recv(), Yield::new()).await;
@@ -289,7 +289,7 @@ fn held_deliveries_block() {
                         .await
                         .expect("fourth delivery state")
                         .expect("fourth basic.deliver");
-                    assert_eq!(fourth.delivery_tag(), 4);
+                    assert_eq!(fourth.delivery_tag().get(), 4);
                     assert_eq!(fourth.body().as_slice(), Some(&b"d"[..]));
                     assert_eq!(held[0].body().as_slice(), Some(&b"b"[..]));
                     assert_eq!(held[1].body().as_slice(), Some(&b"c"[..]));
@@ -459,7 +459,7 @@ fn cancel_wakes_route() {
                         .expect("second delivery state")
                         .expect("second basic.deliver");
                     assert_eq!(delivery.consumer_tag(), SECOND_TAG);
-                    assert_eq!(delivery.delivery_tag(), 2);
+                    assert_eq!(delivery.delivery_tag().get(), 2);
                     assert_eq!(delivery.body().as_slice(), Some(&b"b"[..]));
                     delivery.release();
 

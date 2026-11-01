@@ -327,6 +327,7 @@ pub enum Fault {
         channel: u16,
         max: u16,
     },
+    DeliveryTagZero,
 }
 
 #[repr(u8)]

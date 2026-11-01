@@ -373,7 +373,7 @@ fn rejects_foreign_channel_key() {
                                 receive.poll(local::Access::new(cx.as_mut().region_token()), || wake.completion())
                             }).await.expect("consumer receive").expect("untouched delivery")
                         };
-                        assert_eq!(delivery.delivery_tag(), 7);
+                        assert_eq!(delivery.delivery_tag().get(), 7);
                         assert_eq!(delivery.body().as_slice(), Some(&b"x"[..]));
                         let mut settle = delivery.settle(ack::Disposition::Ack);
                         poll_fn(|mut cx| {

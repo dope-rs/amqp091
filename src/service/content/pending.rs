@@ -1,4 +1,4 @@
-use std::{marker, mem};
+use std::{marker, mem, num};
 
 use o3::buffer::resident;
 use o3::depot::arena::pool::{Unique, recycle};
@@ -213,7 +213,7 @@ impl Lease<'_, '_, '_, content::DeliveryText> {
         unsafe { &self.entry().kind.delivery }
     }
 
-    pub(crate) fn delivery_tag(&self) -> u64 {
+    pub(crate) fn delivery_tag(&self) -> num::NonZero<u64> {
         self.delivery().delivery_tag
     }
 

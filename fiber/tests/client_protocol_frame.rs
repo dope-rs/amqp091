@@ -16,8 +16,9 @@ use dope_test::harness::peer::TcpScript;
 use crate::common::client::*;
 
 #[test]
-fn rejects_large_header() {
-    TcpScript::with(
+fn rejects_invalid_frames() {
+    for zero_tag in [false, true] {
+        TcpScript::with(
         |stream| {
             Peer::new(stream).open(TUNE).expect("AMQP broker handshake");
             Method::read(stream)
@@ -32,9 +33,15 @@ fn rejects_large_header() {
             let trigger = Method::read(stream).expect("AMQP method");
             trigger.check(1, 50, 30).expect("AMQP method route");
             assert_eq!(queue_name(&trigger).expect("AMQP fixture"), "trigger");
-            let mut header = vec![1, 0, 0];
-            header.extend_from_slice(&131_072u32.to_be_bytes());
-            stream.write_all(&header).expect("oversized frame header");
+            let frame = if zero_tag {
+                common::basic::delivery::method(1, "consumer", 0)
+                    .expect("zero delivery tag fixture")
+            } else {
+                let mut header = vec![1, 0, 0];
+                header.extend_from_slice(&131_072u32.to_be_bytes());
+                header
+            };
+            stream.write_all(&frame).expect("invalid frame");
         },
         |broker| {
             let addr = broker.addr();
@@ -47,15 +54,17 @@ fn rejects_large_header() {
                         rt.block_on(dope_fiber::fiber!('_ => async move {
                             wait_ready(conn).await.expect("ready");
                             let channel = conn.channels().open(1).await.expect("open channel");
-                            let result = channel.queue().purge("trigger").await;
-                            std::assert_matches!(result,
-                                Err(error) if matches!((error).error(), failure::Error::Frame(
+                            let error = channel.queue().purge("trigger").await
+                                .expect_err("invalid frame must fail the pending request");
+                            assert!(matches!((zero_tag, error.error()),
+                                (false, failure::Error::Frame(
                                     frame::Fault::FrameTooLarge {
                                     size: 131_080,
                                     max: 131_072,
                                     }
                                 ))
-                            );
+                                | (true, failure::Error::Protocol(failure::wire::Fault::DeliveryTagZero))
+                            ), "{:?}", error.error());
                         }))
                         .is_ok(),
                         "AMQP fiber must complete"
@@ -72,7 +81,8 @@ fn rejects_large_header() {
             broker.finish().expect("broker");
         },
     )
-    .expect("spawn oversized-frame broker");
+    .expect("spawn invalid-frame broker");
+    }
 }
 
 fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {

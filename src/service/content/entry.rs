@@ -1,4 +1,4 @@
-use std::{mem, pin};
+use std::{mem, num, pin};
 
 use o3::buffer::resident;
 use o3::depot::arena::pool::recycle;
@@ -18,7 +18,7 @@ pub(super) union Kind {
 
 #[derive(Clone, Copy)]
 pub(super) struct Delivery {
-    pub(super) delivery_tag: u64,
+    pub(super) delivery_tag: num::NonZero<u64>,
     pub(super) redelivered: bool,
     pub(super) text: fields::Packed<content::DeliveryText>,
 }

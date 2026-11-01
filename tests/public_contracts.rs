@@ -262,9 +262,7 @@
 //! ```
 
 #[test]
-fn checks_public_contracts() {
-    use std::env;
-
+fn checks_public_contracts() -> Result<(), dope_test::checks::Error> {
     use dope_test::checks::Suite;
 
     let suite = Suite::new(
@@ -272,27 +270,11 @@ fn checks_public_contracts() {
         file!(),
         &["dope-amqp091", "dope", "o3"],
     );
-    let exe = env::current_exe().expect("test executable");
-    let status = suite
-        .try_build(&exe, env!("CARGO_PKG_NAME"))
-        .expect("build command")
-        .status()
-        .expect("build original library");
-    assert!(status.success(), "build original library: {status}");
-    assert_eq!(
-        suite
-            .try_errors(&exe, include_str!("public_contracts.rs"))
-            .expect("exact compiler errors"),
-        9,
-    );
-    let status = suite
-        .try_rustdoc(&exe)
-        .expect("rustdoc command")
-        .args([
-            "-Zunstable-options",
-            "--doctest-build-arg=-Znext-solver=globally",
-        ])
-        .status()
-        .expect("compiler contracts");
+    let exe = std::env::current_exe()?;
+    let output = suite.try_build(&exe, env!("CARGO_PKG_NAME"))?.output()?;
+    let suite = suite.try_collect(&exe, output)?;
+    assert_eq!(suite.try_errors(include_str!("public_contracts.rs"))?, 9);
+    let status = suite.try_rustdoc()?.status()?;
     assert!(status.success(), "public contracts: {status}");
+    Ok(())
 }

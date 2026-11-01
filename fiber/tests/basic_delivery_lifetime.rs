@@ -239,7 +239,7 @@ fn empty_ends_at_header() {
                         .await
                         .expect("delivery state")
                         .expect("empty basic.deliver");
-                    assert_eq!(delivery.delivery_tag(), 2);
+                    assert_eq!(delivery.delivery_tag().get(), 2);
                     assert!(delivery.body().is_empty());
                     assert_eq!(delivery.body().as_slice(), Some(&[][..]));
                     delivery.release();

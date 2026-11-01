@@ -1,3 +1,5 @@
+use std::num;
+
 use o3::buffer::hold::scope;
 use o3::buffer::{self};
 
@@ -348,7 +350,7 @@ impl<'input> Return<'input> {
 }
 
 pub struct Deliver<'a> {
-    pub delivery_tag: u64,
+    pub delivery_tag: num::NonZero<u64>,
     pub redelivered: bool,
     pub(crate) text: fields::View<'a, content::DeliveryText, 3>,
 }
@@ -371,7 +373,8 @@ impl<'input> Deliver<'input> {
                 Ok(((tag, again), dec))
             })?;
         Ok(Self {
-            delivery_tag: tag,
+            delivery_tag: num::NonZero::new(tag)
+                .ok_or(failure::Error::Protocol(Fault::DeliveryTagZero))?,
             redelivered: again,
             text,
         })
@@ -418,7 +421,7 @@ impl method::Args for Ack {
 
 #[derive(Clone, Copy)]
 pub struct Reject {
-    pub delivery_tag: u64,
+    pub delivery_tag: num::NonZero<u64>,
     pub requeue: bool,
 }
 
@@ -428,7 +431,7 @@ impl method::Spec for Reject {
 
 impl method::Args for Reject {
     fn write_args<S: wire::Put>(&self, out: &mut S) {
-        out.put_u64(self.delivery_tag);
+        out.put_u64(self.delivery_tag.get());
         out.put_bits([self.requeue]);
     }
 }
