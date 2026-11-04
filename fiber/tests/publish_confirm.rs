@@ -8,7 +8,6 @@ use crate::common::amqp::wire::Method;
 use crate::common::client::{check_publish, confirm_ack, confirm_select};
 pub mod common;
 
-use std::io::Write as _;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -95,6 +94,152 @@ fn rejects_plain_after_select() {
         },
     )
     .expect("broker");
+}
+
+#[test]
+fn keeps_partial_ack_before_later_publish() {
+    use dope::core::platform::wake;
+
+    for short_prefix in [true, false] {
+        let (suffix, complete) = wake::Ends::blocking().expect("ACK suffix gate").split();
+        TcpScript::with(
+            move |stream| {
+                Peer::new(stream).open(TUNE).expect("handshake");
+                let channel = common::basic::returned::open_channel(stream).expect("channel");
+                confirm_select(stream, channel).expect("confirm.select");
+                check_publish(stream, channel, "first", b"first").expect("first publish");
+                Method::read(stream)
+                    .expect("barrier")
+                    .check(channel, 50, 30)
+                    .expect("purge route");
+                let mut args = [0; 9];
+                args[8] = 1;
+                let ack = Method::try_encode(channel, 60, 80, &args).expect("bulk ACK");
+                let split = if short_prefix { 2 } else { ack.len() - 1 };
+                let mut prefix = Method::try_encode(channel, 50, 31, &0u32.to_be_bytes())
+                    .expect("barrier reply");
+                prefix.extend_from_slice(&ack[..split]);
+                stream.write_all(&prefix).expect("barrier and partial ACK");
+                suffix
+                    .wait_timeout(Duration::from_secs(10))
+                    .expect("later publish polled");
+                stream.write_all(&ack[split..]).expect("ACK suffix");
+                check_publish(stream, channel, "second", b"second").expect("second publish");
+                Method::write_parts(stream, channel, 60, 120, &[&2u64.to_be_bytes(), &[0]])
+                    .expect("second publish NACK");
+                common::basic::returned::close_connection(stream).expect("connection close");
+            },
+            |broker| {
+                with_config(
+                    broker.addr(),
+                    common::amqp::app::plan::confirms(2).expect("config"),
+                    |rt| {
+                        let conn = rt.connection();
+                        rt.block_on(dope_fiber::fiber!('_ => async move {
+                            let ready = conn.observe().ready().await.expect("ready");
+                            let channel = conn.channels().open(1).await.expect("channel");
+                            let confirms = channel.confirm().select().await.expect("confirm.select");
+                            let props = Properties::default();
+                            let mut first = Pinned::new(confirms.publish(
+                                common::client::channel::request("", "first", &props, b"first"),
+                            ));
+                            assert!(poll_once(first.as_pin()).await.is_pending());
+                            channel.queue().purge("barrier").await.expect("barrier reply");
+                            let mut second = Pinned::new(confirms.publish(
+                                common::client::channel::request("", "second", &props, b"second"),
+                            ));
+                            assert!(poll_once(second.as_pin()).await.is_pending());
+                            complete.notify().expect("complete earlier ACK");
+                            let first = first.await.expect("first confirmation");
+                            let second = second.await.expect("second confirmation");
+                            conn.control().close(ready, 200, "done").await.expect("close");
+                            assert_eq!(first, protocol::Confirmation::Ack);
+                            assert_eq!(second, protocol::Confirmation::Nack { requeue: false });
+                        }))
+                        .expect("fiber");
+                    },
+                    recover,
+                    |result| {
+                        result
+                            .as_ref()
+                            .map_err(|error| error.kind())
+                            .expect("endpoint completion");
+                    },
+                );
+                broker.finish().expect("broker completion");
+            },
+        )
+        .expect("broker");
+    }
+}
+
+#[test]
+fn keeps_incomplete_publish_unconfirmed() {
+    TcpScript::with(
+        |stream| {
+            Peer::new(stream).open(TUNE).expect("handshake");
+            let channel = common::basic::returned::open_channel(stream).expect("channel");
+            confirm_select(stream, channel).expect("confirm.select");
+            Method::read(stream)
+                .expect("publish method")
+                .check(channel, 60, 40)
+                .expect("publish route");
+            Method::write_parts(stream, channel, 60, 80, &[&0u64.to_be_bytes(), &[1]])
+                .expect("acknowledge completed publications");
+            Method::write(stream, 0, 10, 60, b"\x05ready").expect("ACK observation barrier");
+            let common::amqp::wire::Frame(kind, actual, _) =
+                common::amqp::wire::Frame::read(stream).expect("content header");
+            assert_eq!((kind, actual), (2, channel));
+            let common::amqp::wire::Frame(kind, actual, body) =
+                common::amqp::wire::Frame::read(stream).expect("content body");
+            assert_eq!(
+                (kind, actual, body.as_slice()),
+                (3, channel, b"x".as_slice())
+            );
+            Method::write_parts(stream, channel, 60, 120, &[&1u64.to_be_bytes(), &[0]])
+                .expect("reject completed publication");
+            common::basic::returned::close_connection(stream).expect("connection close");
+        },
+        |broker| {
+            let config = config::Config::new("guest", "guest")
+                .expect("config")
+                .capacity(config::Capacity::default().egress(config::Egress::new(1, 4096)));
+            with_config(
+                broker.addr(),
+                config,
+                |rt| {
+                    let conn = rt.connection();
+                    rt.block_on(dope_fiber::fiber!('_ => async move {
+                        let ready = conn.observe().ready().await.expect("ready");
+                        let channel = conn.channels().open(1).await.expect("channel");
+                        let confirms = channel.confirm().select().await.expect("confirm.select");
+                        let props = Properties::default();
+                        let mut publish = Pinned::new(confirms.publish(
+                            common::client::channel::request("", "incomplete", &props, b"x"),
+                        ));
+                        // The sole regular frame admits only basic.publish on this poll.
+                        assert!(poll_once(publish.as_pin()).await.is_pending());
+                        while !conn.observe().read(|view| view.is_blocked()).await {
+                            Yield::new().await;
+                        }
+                        let outcome = publish.await.expect("publication confirmation");
+                        conn.control().close(ready, 200, "done").await.expect("close");
+                        assert_eq!(outcome, protocol::Confirmation::Nack { requeue: false });
+                    }))
+                    .expect("fiber");
+                },
+                recover,
+                |result| {
+                    result
+                        .as_ref()
+                        .map_err(|error| error.kind())
+                        .expect("endpoint completion");
+                },
+            );
+            broker.finish().expect("broker");
+        },
+    )
+    .expect("scripted broker");
 }
 
 #[test]

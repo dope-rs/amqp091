@@ -85,7 +85,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'exchange, 'key, 'properties, 'body, 'd: 'b, co
 
 impl<const ID: u8> Drop for Confirm<'_, '_, '_, '_, '_, '_, '_, '_, '_, ID> {
     fn drop(&mut self) {
-        match &self.phase {
+        match &mut self.phase {
             Phase::Active(active) => active.cancel(),
             Phase::Wait(wait) => wait.ticket.cancel(),
             Phase::Done => {}

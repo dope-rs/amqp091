@@ -7,7 +7,6 @@ use crate::common::amqp::app::Endpoint;
 use crate::common::amqp::wire::Frame;
 pub mod common;
 
-use std::io::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 

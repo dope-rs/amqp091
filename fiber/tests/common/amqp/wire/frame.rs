@@ -1,5 +1,4 @@
-use std::io;
-use std::io::Read;
+use crate::common::amqp::io::Read;
 
 use crate::common::amqp::Error;
 use crate::common::amqp::wire::encoded::Encoded;
@@ -41,7 +40,7 @@ impl Frame {
     ) -> Result<(), Error> {
         let mut received = Vec::with_capacity(expected.len());
         while received.len() < expected.len() {
-            let frame = Self::read(source).map_err(Error::Io)?;
+            let frame = Self::read(source)?;
             frame.check(3, channel)?;
             received.extend_from_slice(frame.payload());
         }
@@ -49,7 +48,7 @@ impl Frame {
     }
 
     /// Reads one complete frame and owns its payload once.
-    pub fn read(source: &mut impl Read) -> io::Result<Self> {
+    pub fn read(source: &mut impl Read) -> Result<Self, Error> {
         let header = Header::read(source)?;
         let length = header.length() as usize;
         let mut payload = vec![0_u8; length];
@@ -57,10 +56,7 @@ impl Frame {
         let mut end = [0_u8; 1];
         source.read_exact(&mut end)?;
         if end[0] != super::END {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "invalid AMQP frame end",
-            ));
+            return Err(Error::FrameEnd(end[0]));
         }
         Ok(Self(header.frame_type(), header.channel(), payload))
     }

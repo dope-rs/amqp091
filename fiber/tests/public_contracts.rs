@@ -97,11 +97,30 @@ fn checks_public_contracts() -> Result<(), dope_test::checks::Error> {
             "o3",
         ],
     );
-    let exe = std::env::current_exe()?;
-    let output = suite.try_build(&exe, env!("CARGO_PKG_NAME"))?.output()?;
+    let exe = std::env::current_exe().expect("current test executable");
+    let output = suite
+        .try_build(&exe, env!("CARGO_PKG_NAME"))?
+        .output()
+        .expect("run cargo");
     let suite = suite.try_collect(&exe, output)?;
-    assert_eq!(suite.try_errors(include_str!("public_contracts.rs"))?, 3);
-    let status = suite.try_rustdoc()?.status()?;
+    assert_eq!(
+        suite.try_errors(include_str!("public_contracts.rs"), compile)?,
+        3
+    );
+    let status = suite.try_rustdoc()?.status().expect("run rustdoc");
     assert!(status.success(), "public contracts: {status}");
     Ok(())
+}
+
+fn compile(command: &mut std::process::Command, source: &str) -> std::process::Output {
+    let mut child = command.spawn().expect("start compiler");
+    let written = child
+        .stdin
+        .take()
+        .map(|mut input| std::io::Write::write_all(&mut input, source.as_bytes()));
+    let output = child.wait_with_output().expect("reap compiler");
+    written
+        .expect("compiler stdin")
+        .expect("write compiler source");
+    output
 }

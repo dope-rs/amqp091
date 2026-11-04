@@ -32,7 +32,7 @@ impl Layout {
                     confirms: count,
                 },
             ))?;
-        confirm.checked_add(2).ok_or(failure::Error::InvalidConfig(
+        confirm.checked_add(3).ok_or(failure::Error::InvalidConfig(
             wire::Config::CancellationSlots {
                 confirm_end: confirm,
             },
@@ -45,7 +45,7 @@ impl Layout {
     }
 
     pub(super) const fn slots(self) -> u32 {
-        self.confirm_end + 2
+        self.confirm_end + 3
     }
 
     pub(super) fn offset(self, kind: lanes::Kind, slot: u32) -> Result<u32, round::Bounds> {
@@ -55,6 +55,7 @@ impl Layout {
             lanes::Kind::Consumer => (self.method_end, self.consumer_end),
             lanes::Kind::Confirm => (self.consumer_end, self.confirm_end),
             lanes::Kind::Publish => (self.confirm_end, self.confirm_end + 1),
+            lanes::Kind::Control => (self.confirm_end + 2, self.confirm_end + 3),
         };
         if slot >= end - base {
             return Err(round::Bounds::Slot {

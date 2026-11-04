@@ -1,6 +1,4 @@
 use std::convert::Infallible;
-use std::io;
-use std::io::Write as _;
 
 use dope::core::driver::life::recovery;
 use dope_test::alloc;
@@ -28,6 +26,7 @@ use dope_amqp091::{adapter, config, failure};
 use dope_fiber::abi::poll_fn;
 use dope_fiber::task::local::Once;
 use dope_test::alloc::Tracker;
+use dope_test::fibers::Yield;
 use dope_test::harness::peer::{AcceptScript, TcpScript};
 use o3::base::cell::local;
 
@@ -201,9 +200,366 @@ fn keeps_generation() {
 }
 
 #[test]
+fn closes_abandoned_open_before_new_method() {
+    let (finished, complete) = wake::Ends::blocking().expect("close completion").split();
+    TcpScript::with(
+        move |stream| {
+            Peer::new(stream).open(TUNE).expect("handshake");
+            Method::read(stream).expect("channel open").check(1, 20, 10).expect("open route");
+            Method::write(stream, 1, 20, 11, &[0; 4]).expect("open reply");
+            Method::read(stream).expect("abandoned channel close").check(1, 20, 40).expect("close route");
+            Method::write(stream, 1, 20, 41, &[]).expect("close reply");
+            finished.wait_timeout(Duration::from_secs(5)).expect("channel collected");
+        },
+        |broker| {
+            let config = config::Config::new("guest", "guest")
+                .expect("config")
+                .capacity(config::Capacity::default().channel(config::Channel::default().methods(1)));
+            Endpoint::new(broker.addr(), config).try_check::<timing::Throughput, _>(
+                Policy::new(1, 16, Duration::from_secs(10)),
+                |scope| {
+                    let amqp = adapter::Adapter::new(scope.port());
+                    let target = scope.block_on(Ready {
+                        state: amqp.connection().observe(),
+                        wait: fanout::Registration::new(),
+                        gate: None,
+                    }).expect("fiber drive").expect("connection ready");
+                    let (lease, mut opening) = scope.block_on(Once::new(|mut access| {
+                        let lease = amqp.channels().reserve(access.reborrow(), target, 1)?.commit();
+                        amqp.methods()
+                            .reserve(access, target, lease, channel::Open)
+                            .map(|opening| (lease, opening))
+                    })).expect("fiber drive").expect("open reservation");
+                    scope.block_on(poll_fn(|mut cx| {
+                        let wake = cx.as_ref().completion();
+                        let access = local::Access::new(cx.as_mut().region_token());
+                        assert!(opening.poll(access, wake).is_pending());
+                        std::task::Poll::Ready(())
+                    })).expect("send open");
+                    scope.block_on(dope_fiber::fiber!('_ => async move {
+                        while Once::new(|access| amqp.channels().flow_active(access, target, lease))
+                            .await.expect("channel state") != Some(true)
+                        {
+                            Yield::new().await;
+                        }
+                        let error = Once::new(move |access| {
+                            drop(opening);
+                            amqp.methods().reserve(
+                                access,
+                                target,
+                                lease,
+                                queue::Purge { queue: short::Name::EMPTY },
+                            )
+                        }).await.err().expect("abandoned open must close admission before reuse");
+                        assert!(matches!(error.error(), failure::Error::Closed), "{:?}", error.error());
+                        while Once::new(|access| amqp.channels().current(access, 1)).await.is_some() {
+                            Yield::new().await;
+                        }
+                        complete.notify().expect("close completion");
+                    })).expect("fiber drive");
+                },
+                recover,
+                |result| {
+                    result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
+                },
+            );
+            broker.finish().expect("broker");
+        },
+    ).expect("scripted broker");
+}
+
+#[test]
+fn wakes_publish_after_notified_waiter_is_cancelled() {
+    use std::task::Poll;
+
+    use dope_amqp091::adapter::publish;
+    use dope_amqp091::message::property::Properties;
+    use dope_amqp091::protocol::{Confirmation, method::confirm};
+    use dope_fiber::task::batch::{Join, Pool};
+
+    use crate::common::amqp::wire::Frame;
+
+    TcpScript::with(
+        |stream| {
+            Peer::new(stream).open(TUNE).expect("handshake");
+            Method::read(stream)
+                .expect("channel open")
+                .check(1, 20, 10)
+                .expect("open route");
+            Method::write(stream, 1, 20, 11, &[0; 4]).expect("open reply");
+            Method::read(stream)
+                .expect("confirm select")
+                .check(1, 85, 10)
+                .expect("select route");
+            Method::write(stream, 1, 85, 11, &[]).expect("select reply");
+            let sent = Method::read(stream).expect("surviving publish");
+            sent.check(1, 60, 40).expect("publish route");
+            assert_eq!(
+                common::publish::routing_key(&sent).expect("routing key"),
+                "second"
+            );
+            Frame::read(stream)
+                .expect("empty publish header")
+                .check(2, 1)
+                .expect("header route");
+            Method::write(stream, 1, 60, 80, &[0, 0, 0, 0, 0, 0, 0, 1, 0])
+                .expect("surviving publish acknowledgement");
+        },
+        |broker| {
+            with_client(
+                broker.addr(),
+                16,
+                |scope| {
+                    let amqp = adapter::Adapter::new(scope.port());
+                    let target = scope
+                        .block_on(Ready {
+                            state: amqp.connection().observe(),
+                            wait: fanout::Registration::new(),
+                            gate: None,
+                        })
+                        .expect("fiber drive")
+                        .expect("connection ready");
+                    let lease = scope
+                        .block_on(Open {
+                            adapter: amqp,
+                            target,
+                            lease: None,
+                            call: None,
+                        })
+                        .expect("fiber drive")
+                        .expect("channel open");
+                    let mut select = scope
+                        .block_on(Once::new(|access| {
+                            amqp.methods()
+                                .reserve(access, target, lease, confirm::Select)
+                        }))
+                        .expect("fiber drive")
+                        .expect("select reservation");
+                    scope
+                        .block_on(poll_fn(|mut cx| {
+                            let wake = cx.as_ref().completion();
+                            let access = local::Access::new(cx.as_mut().region_token());
+                            select.poll(access, wake)
+                        }))
+                        .expect("fiber drive")
+                        .expect("confirm select");
+                    let guard = scope
+                        .block_on(Once::new(|access| {
+                            amqp.methods().reserve(
+                                access,
+                                target,
+                                lease,
+                                queue::Purge {
+                                    queue: short::Name::EMPTY,
+                                },
+                            )
+                        }))
+                        .expect("fiber drive")
+                        .expect("held method");
+                    let properties = Properties::default();
+                    let properties = &properties;
+                    let fibers = [(true, None), (false, Some(guard))].map(|(cancel, mut guard)| {
+                        let mut send = None;
+                        let mut waiting = false;
+                        poll_fn(move |mut cx| {
+                            if cancel && waiting {
+                                drop(send.take());
+                                return Poll::Ready(Ok(()));
+                            }
+                            let wake = cx.as_ref().completion();
+                            let access = local::Access::new(cx.as_mut().region_token());
+                            let send = send.get_or_insert_with(|| {
+                                amqp.publish()
+                                    .confirm(
+                                        access.read(),
+                                        target,
+                                        lease,
+                                        publish::Request {
+                                            exchange: "",
+                                            routing_key: if cancel { "first" } else { "second" },
+                                            mandatory: false,
+                                            properties,
+                                            body: &[],
+                                        },
+                                    )
+                                    .expect("publish request")
+                            });
+                            let result = send.poll(access, wake);
+                            if !waiting {
+                                assert!(result.is_pending(), "held method must block each publish");
+                                waiting = true;
+                                if let Some(guard) = guard.take() {
+                                    // B follows A in Join's initial polling order.
+                                    drop(guard);
+                                }
+                            }
+                            result.map(|result| {
+                                result.map(|reply| assert_eq!(reply, Confirmation::Ack))
+                            })
+                        })
+                    });
+                    let mut pool = scope
+                        .block_on(Pool::<2>::acquire())
+                        .expect("fiber drive")
+                        .expect("batch pool");
+                    let results = scope
+                        .block_on(Join::from_array(&mut pool, fibers))
+                        .expect("surviving publish must retain its wake")
+                        .expect("publish batch");
+                    for result in results {
+                        result.expect("publish waiter completion");
+                    }
+                },
+                recover,
+                |result| {
+                    result
+                        .as_ref()
+                        .map_err(|error| error.kind())
+                        .expect("endpoint completion");
+                },
+            );
+            broker.finish().expect("publish cancellation broker");
+        },
+    )
+    .expect("scripted broker");
+}
+
+#[test]
+fn keeps_publish_credit_while_close_waits_for_input() {
+    use dope::core::driver::schedule::ready::wake::queue::Registration;
+    use dope_amqp091::adapter::publish;
+    use dope_amqp091::message::property::Properties;
+    use dope_fiber::task::batch::{Join, Pool};
+
+    use crate::common::amqp::wire::Frame;
+    use crate::common::wake::Flow;
+
+    TcpScript::with(
+        |stream| {
+            stream
+                .read_wait(Some(Duration::from_secs(5)))
+                .expect("broker read deadline");
+            Peer::new(stream).open(TUNE).expect("handshake");
+            let channel = common::basic::returned::open_channel(stream).expect("channel");
+            Method::read(stream)
+                .expect("barrier")
+                .check(channel, 50, 30)
+                .expect("purge route");
+            let heartbeat = Frame::try_encode(8, 0, &[]).expect("heartbeat");
+            let mut prefix =
+                Method::try_encode(channel, 50, 31, &0u32.to_be_bytes()).expect("barrier reply");
+            prefix.extend_from_slice(&heartbeat[..2]);
+            stream
+                .write_all(&prefix)
+                .expect("barrier and partial heartbeat");
+            Method::read(stream)
+                .expect("sole credit owner")
+                .check(channel, 20, 20)
+                .expect("flow route");
+            common::client::check_publish(stream, channel, "survivor", &[])
+                .expect("plain publish must retain the released credit wake");
+            stream.write_all(&heartbeat[2..]).expect("heartbeat suffix");
+            common::basic::returned::close_connection(stream).expect("connection close");
+        },
+        |broker| {
+            let config = config::Config::new("guest", "guest")
+                .expect("config")
+                .capacity(config::Capacity::default().egress(config::Egress::new(1, 4096)));
+            Endpoint::new(broker.addr(), config).try_check::<timing::Throughput, _>(
+                Policy::new(1, 16, Duration::from_secs(10)),
+                |scope| {
+                    let amqp = adapter::Adapter::new(scope.port());
+                    scope.block_on(dope_fiber::fiber!('_ => async move {
+                        let target = Ready {
+                            state: amqp.connection().observe(),
+                            wait: fanout::Registration::new(),
+                            gate: None,
+                        }.await.expect("connection ready");
+                        let lease = Open {
+                            adapter: amqp,
+                            target,
+                            lease: None,
+                            call: None,
+                        }.await.expect("channel open");
+                        let mut barrier = Once::new(|access| {
+                            amqp.methods().reserve(
+                                access,
+                                target,
+                                lease,
+                                queue::Purge { queue: short::Name::EMPTY },
+                            )
+                        }).await.expect("barrier reservation");
+                        Purge { call: &mut barrier, gate: None }.await.expect("barrier reply");
+                        let mut pool = Pool::<2>::acquire().await.expect("batch pool");
+                        let properties = Properties::default();
+                        let properties = &properties;
+                        let fibers = [true, false].map(|closing| {
+                            let mut close = closing.then(|| {
+                                amqp.connection().control().close(target, 200, "done")
+                            });
+                            let mut send = None;
+                            let mut first = true;
+                            poll_fn(move |mut cx| {
+                                let wake = cx.as_ref().completion();
+                                let access = local::Access::new(cx.as_mut().region_token());
+                                let result = if let Some(close) = &mut close {
+                                    close.poll(access, wake)
+                                } else {
+                                    let send = send.get_or_insert_with(|| {
+                                        amqp.publish().send(
+                                            access.read(),
+                                            target,
+                                            lease,
+                                            publish::Request {
+                                                exchange: "",
+                                                routing_key: "survivor",
+                                                mandatory: false,
+                                                properties,
+                                                body: &[],
+                                            },
+                                        ).expect("publish request")
+                                    });
+                                    send.poll(access, wake)
+                                };
+                                if first {
+                                    assert!(result.is_pending(), "input or sole credit must block");
+                                    first = false;
+                                }
+                                result
+                            })
+                        });
+                        Flow {
+                            adapter: amqp,
+                            target: target.epoch(),
+                            lease,
+                            credit: Registration::new(),
+                            gate: None,
+                        }.await.expect("fill the sole regular frame");
+                        // Join registers close before publish, without an intervening I/O turn.
+                        let results = Join::from_array(&mut pool, fibers).await.expect("batch");
+                        for result in results {
+                            result.expect("close and independent publish must complete");
+                        }
+                    })).expect("fiber drive");
+                },
+                recover,
+                |result| {
+                    result
+                        .as_ref()
+                        .map_err(|error| error.kind())
+                        .expect("endpoint completion");
+                },
+            );
+            broker.finish().expect("broker");
+        },
+    )
+    .expect("scripted broker");
+}
+
+#[test]
 fn consumes_once() {
     TcpScript::with(
-        |stream| -> io::Result<()> {
+        |stream| -> Result<(), crate::common::amqp::Error> {
             assert!(
                 Peer::new(stream).open(TUNE).is_ok(),
                 "AMQP broker handshake"

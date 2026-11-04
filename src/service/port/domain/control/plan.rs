@@ -10,7 +10,7 @@ use crate::state::channel::{self, facets};
 #[must_use = "write plan owns any route freed while preparing it"]
 pub(super) enum Plan<P> {
     Send(pool::Cursor, P, channel::Freed),
-    Pending(channel::Freed),
+    Pending(Option<P>, channel::Freed),
     Missing(channel::Freed),
     Failed(failure::Error),
 }
@@ -18,17 +18,20 @@ pub(super) enum Plan<P> {
 impl Plan<send::Next> {
     pub(super) fn encode<const ID: u8>(
         method: &mut facets::Method<'_, '_, '_, '_, ID>,
-        egress: &egress::Egress,
+        egress: Option<&egress::Egress>,
         channel: u16,
         next: send::Next,
         freed: channel::Freed,
     ) -> Self {
+        let Some(egress) = egress else {
+            return Self::Pending(Some(next), freed);
+        };
         match method.preview(channel, &next, |command| {
             egress.control().map(|frame| frame.write(channel, command))
         }) {
             Ok(Some(Some(Ok(frame)))) => Self::Send(frame, next, freed),
             Ok(Some(Some(Err(cause)))) => Self::Failed(cause),
-            Ok(None | Some(None)) => Self::Pending(freed),
+            Ok(None | Some(None)) => Self::Pending(Some(next), freed),
             Err(cause) => Self::Failed(failure::Error::Protocol(cause)),
         }
     }

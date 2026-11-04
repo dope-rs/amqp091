@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::time::Duration;
 
 use dope::core::driver::life::recovery;
@@ -11,6 +12,30 @@ use crate::common::amqp::{Error, Tune};
 use crate::common::basic;
 const POLICY: Policy = Policy::new(1, 8, Duration::from_secs(10));
 pub const TUNE: Tune = Tune::new(1, 4096, 0);
+
+#[pin_project::pin_project]
+#[derive(dope::Application)]
+pub struct Split<H> {
+    #[pin]
+    #[app]
+    primary: H,
+    #[pin]
+    #[app(optional)]
+    idle: Option<H>,
+}
+
+impl<H> Split<H> {
+    pub const fn new(primary: H) -> Self {
+        Self {
+            primary,
+            idle: None,
+        }
+    }
+
+    pub fn primary(self: Pin<&Self>) -> Pin<&H> {
+        self.project_ref().primary
+    }
+}
 
 pub fn with_client(
     address: SocketAddr,

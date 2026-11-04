@@ -8,6 +8,7 @@ use crate::adapter::{conn, core};
 use crate::failure;
 use crate::protocol::method;
 use crate::state::channel::cancel::lanes;
+use crate::state::channel::methods::DetachAction;
 
 #[repr(transparent)]
 pub struct Methods<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> {
@@ -48,14 +49,18 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Methods<'o, 'r, 'c, 'b, '
                     Some(state.methods.reap(state.phase, active, cancel.identity()))
                 })?
                 .transpose()?;
-            let cancel = state.methods.enqueue(state.phase, expect, |key| {
-                self.core
-                    .cancel()
-                    .issue(route.index, lease.raw(), lanes::Slot::from(key), key)
-            });
             let (action, next) = match reaped {
                 Some(result) => (Some(result.action), result.control),
                 None => (None, None),
+            };
+            let cancel = if matches!(action, Some(DetachAction::CloseAbandonedOpen)) {
+                Err(failure::Error::Closed)
+            } else {
+                state.methods.enqueue(state.phase, expect, |key| {
+                    self.core
+                        .cancel()
+                        .issue(route.index, lease.raw(), lanes::Slot::from(key), key)
+                })
             };
             Ok::<_, failure::Error>((route.index.lane(), cancel, action, next))
         });

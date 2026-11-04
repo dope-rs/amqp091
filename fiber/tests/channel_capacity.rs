@@ -7,7 +7,6 @@ use crate::common::amqp::wire::Method;
 use crate::common::amqp::{Peer, Tune};
 pub mod common;
 
-use std::io::Write as _;
 use std::time::Duration;
 
 use dope::core::io::Reclaimed;

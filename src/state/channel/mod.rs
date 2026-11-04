@@ -235,13 +235,8 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Session<'r, 'c, 'b, 'd, ID> {
     }
 
     pub(crate) fn protocol(&self) -> facets::Protocol {
-        let want = match self.stable.methods.head() {
-            methods::Head::Sent(kind) => Some(kind),
-            methods::Head::Empty | methods::Head::Waiting => None,
-        };
         facets::Protocol {
             phase: self.epoch.control.phase,
-            expected: want,
             inbound_idle: self.epoch.inbound.is_idle(),
         }
     }

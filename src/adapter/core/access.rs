@@ -73,6 +73,7 @@ impl Seal for Methods {}
 impl Permit<State> for Methods {}
 impl Permit<Egress> for Methods {}
 impl Permit<Control> for Methods {}
+impl Permit<WaiterAccess> for Methods {}
 impl Permit<Registry> for Methods {}
 impl Permit<Issue<lanes::Method>> for Methods {}
 impl Permit<Issue<lanes::Consumer>> for Methods {}

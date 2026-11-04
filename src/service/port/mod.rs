@@ -184,11 +184,11 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Port<'r, 'c, 'b, 'd, ID> {
     }
 }
 
-/// The three waiter fanouts each retain a drain epoch across publications.
+/// The route root includes three waiter drain epochs and six cancellation groups.
 const _: () = {
     assert!(
         std::mem::size_of::<Port<'static, 'static, 'static, 'static>>()
-            == 162 * std::mem::size_of::<usize>()
+            == 167 * std::mem::size_of::<usize>()
     );
     assert!(
         std::mem::align_of::<Port<'static, 'static, 'static, 'static>>()

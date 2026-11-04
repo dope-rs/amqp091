@@ -126,7 +126,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Wait<'o, 'r, 'c, 'b, 'd, 
 
 const _: () = assert!(
     mem::size_of::<Close<'static, 'static, 'static, 'static, 'static, 'static, 0>>()
-        == 8 * mem::size_of::<usize>()
+        == 9 * mem::size_of::<usize>()
 );
 const _: () = assert!(
     mem::size_of::<Wait<'static, 'static, 'static, 'static, 'static, 0>>()

@@ -17,7 +17,7 @@ use crate::state::channels::{Error, Index, Lease, Plan};
 
 #[derive(Clone, Copy)]
 #[repr(transparent)]
-pub(super) struct Generation(num::NonZero<u64>);
+pub(crate) struct Generation(num::NonZero<u64>);
 
 #[repr(C)]
 pub(super) struct Map<'r, 'c, 'b, 'd, const ID: u8> {
@@ -49,6 +49,10 @@ impl Generation {
 
     pub(super) fn pack(self, id: u16) -> num::NonZero<u64> {
         self.0 | u64::from(id)
+    }
+
+    pub(crate) fn admits<const ID: u8>(self, lease: Lease<'_, ID>) -> bool {
+        num::NonZero::from(lease).get() & !u64::from(u16::MAX) <= self.0.get()
     }
 }
 
@@ -146,6 +150,10 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Map<'r, 'c, 'b, 'd, ID> {
 
     pub(super) fn key_at(&self, id: u16) -> Option<Lease<'d, ID>> {
         self.store.key_at(id)
+    }
+
+    pub(super) fn generation(&self) -> Option<Generation> {
+        self.generation
     }
 
     pub(super) fn occupied(

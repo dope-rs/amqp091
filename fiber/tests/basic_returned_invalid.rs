@@ -7,8 +7,6 @@ use crate::common::amqp::app::{Endpoint, plan};
 use crate::common::amqp::wire::{Frame, Method};
 pub mod common;
 
-use std::io::Write as _;
-
 use dope::manifold::timing;
 use dope_amqp091::message::property::Properties;
 use dope_amqp091::{adapter, config, failure};

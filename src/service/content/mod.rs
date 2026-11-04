@@ -48,6 +48,22 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Store<'r, 'c, 'b, 'd, ID> {
         )
     }
 
+    pub(in crate::service) fn retry_staging(
+        &self,
+        error: &resident::staging::reserve::Error,
+    ) -> Option<resource::Resource> {
+        use resident::{AllocError, staging::reserve};
+
+        match error {
+            reserve::Error::Resident(AllocError::Budget(credit))
+            | reserve::Error::Spill {
+                error: AllocError::Budget(credit),
+                ..
+            } if self.wait.can_release() => Some(resource::Resource::Staging(*credit)),
+            _ => None,
+        }
+    }
+
     pub(crate) const fn pool(&self) -> &'c pool::Pool<'b, 'd> {
         self.pool
     }

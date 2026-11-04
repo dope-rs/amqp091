@@ -9,7 +9,7 @@ use crate::state::channels;
 
 #[must_use = "an exact cancellation ticket must be retained or used"]
 pub struct Ticket<'a, 'd, L: Lane<'d, ID>, const ID: u8> {
-    entry: values::Snapshot<'a, registry::Active<'d, ID>, 5, round::Place>,
+    entry: values::Snapshot<'a, registry::Active<'d, ID>, { lanes::Kind::COUNT }, round::Place>,
     identity: L::Identity,
     owner: &'a Coord<'d, ID>,
 }

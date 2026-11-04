@@ -6,8 +6,6 @@ use crate::common::amqp::Peer;
 use crate::common::amqp::wire::Method;
 pub mod common;
 
-use std::io::Write as _;
-
 use common::basic::returned;
 use common::client::{TUNE, returned_body, with};
 use common::fiber::{Pinned, poll_once};

@@ -1,4 +1,4 @@
-use std::io::{ErrorKind, Read as _, Write as _};
+use dope_test::harness::peer;
 use std::time::Duration;
 
 use dope::core::platform::wake;
@@ -14,21 +14,13 @@ pub fn close<R>(
 ) -> Result<R, Spawn> {
     AcceptScript::with(
         move |acceptor| {
-            let mut stream = acceptor.accept().map_err(Error::Io)?;
-            stream
-                .read_wait(Some(Duration::from_secs(5)))
-                .map_err(Error::Io)?;
-            stream
-                .write_wait(Some(Duration::from_secs(5)))
-                .map_err(Error::Io)?;
+            let mut stream = acceptor.accept()?;
+            stream.read_wait(Some(Duration::from_secs(5)))?;
+            stream.write_wait(Some(Duration::from_secs(5)))?;
             Peer::new(&mut stream).open(TUNE)?;
-            Method::read(&mut stream)
-                .map_err(Error::Io)?
-                .check(0, 10, 50)?;
+            Method::read(&mut stream)?.check(0, 10, 50)?;
             if ack {
-                stream
-                    .write_all(&Method::try_encode(0, 10, 51, &[])?)
-                    .map_err(Error::Io)?;
+                stream.write_all(&Method::try_encode(0, 10, 51, &[])?)?;
             }
             drop(stream);
 
@@ -45,13 +37,9 @@ pub fn handshake<R>(
 ) -> Result<R, Spawn> {
     AcceptScript::with(
         move |acceptor| {
-            let mut stream = acceptor.accept().map_err(Error::Io)?;
-            stream
-                .read_wait(Some(Duration::from_secs(5)))
-                .map_err(Error::Io)?;
-            stream
-                .write_wait(Some(Duration::from_secs(5)))
-                .map_err(Error::Io)?;
+            let mut stream = acceptor.accept()?;
+            stream.read_wait(Some(Duration::from_secs(5)))?;
+            stream.write_wait(Some(Duration::from_secs(5)))?;
 
             Peer::new(&mut stream)
                 .preface()?
@@ -74,13 +62,9 @@ pub fn illegal<R>(
 ) -> Result<R, Spawn> {
     AcceptScript::with(
         move |acceptor| {
-            let mut stream = acceptor.accept().map_err(Error::Io)?;
-            stream
-                .read_wait(Some(Duration::from_secs(5)))
-                .map_err(Error::Io)?;
-            stream
-                .write_wait(Some(Duration::from_secs(5)))
-                .map_err(Error::Io)?;
+            let mut stream = acceptor.accept()?;
+            stream.read_wait(Some(Duration::from_secs(5)))?;
+            stream.write_wait(Some(Duration::from_secs(5)))?;
 
             Peer::new(&mut stream)
                 .preface()?
@@ -90,28 +74,15 @@ pub fn illegal<R>(
             let (sent, closed) = match stream.read(&mut response) {
                 Ok(0) => (false, true),
                 Ok(_) => (true, false),
-                Err(error) => {
-                    let kind = error.kind();
-                    if !matches!(
-                        kind,
-                        ErrorKind::ConnectionReset
-                            | ErrorKind::ConnectionAborted
-                            | ErrorKind::WouldBlock
-                            | ErrorKind::TimedOut
-                    ) {
-                        return Err(Error::Io(error));
-                    }
-                    (
-                        false,
-                        matches!(
-                            kind,
-                            ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
-                        ),
-                    )
+                Err(peer::Error::Syscall(error)) if error.is_reset() || error.is_aborted() => {
+                    (false, true)
                 }
+                Err(peer::Error::TimedOut) => (false, false),
+                Err(peer::Error::Syscall(error)) if error.is_block() => (false, false),
+                Err(error) => return Err(Error::Io(error)),
             };
             drop(stream);
-            let redial = Redial::observe(acceptor).map_err(Error::Io)?;
+            let redial = Redial::observe(acceptor)?;
             done.notify().map_err(Error::Notify)?;
             Ok((sent, closed, redial))
         },
@@ -125,10 +96,8 @@ pub fn rejection<R>(
     TcpScript::with(
         move |stream| {
             Peer::new(stream).open(TUNE)?;
-            Method::read(stream).map_err(Error::Io)?.check(1, 20, 10)?;
-            stream
-                .write_all(&Method::try_encode(1, 20, 11, &[0, 0, 0, 0])?)
-                .map_err(Error::Io)?;
+            Method::read(stream)?.check(1, 20, 10)?;
+            stream.write_all(&Method::try_encode(1, 20, 11, &[0, 0, 0, 0])?)?;
             check_no_frame(stream, "exhausted topology retention")
         },
         run,

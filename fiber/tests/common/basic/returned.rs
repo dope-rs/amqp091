@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use crate::common::amqp::io::{Read, Write};
 
 use crate::common::amqp::Error;
 use crate::common::amqp::wire::{self, Frame, Method};
@@ -60,7 +60,7 @@ pub fn check_publish(
     body: &[u8],
     mime: Option<&str>,
 ) -> Result<(), Error> {
-    let method = Method::read(stream).map_err(Error::Io)?;
+    let method = Method::read(stream)?;
     method.check(channel, 60, 40)?;
     let (actual, offset) = wire::short(&method.1, 6)?;
     wire::check(actual.as_bytes(), exchange.as_bytes())?;
@@ -72,7 +72,7 @@ pub fn check_publish(
     })?;
     wire::check(&[flags & 3], &[1])?;
 
-    let frame = Frame::read(stream).map_err(Error::Io)?;
+    let frame = Frame::read(stream)?;
     frame.check(2, channel)?;
     let (header, tail) = frame
         .payload()
@@ -93,27 +93,27 @@ pub fn check_publish(
 }
 
 pub fn open_channel(stream: &mut (impl Read + Write)) -> Result<u16, Error> {
-    let method = Method::read(stream).map_err(Error::Io)?;
+    let method = Method::read(stream)?;
     let channel = method.channel();
     method.check(channel, 20, 10)?;
-    Method::write(stream, channel, 20, 11, &[0, 0, 0, 0]).map_err(Error::Io)?;
+    Method::write(stream, channel, 20, 11, &[0, 0, 0, 0])?;
     Ok(channel)
 }
 
 pub fn close_connection(stream: &mut (impl Read + Write)) -> Result<(), Error> {
-    Method::read(stream).map_err(Error::Io)?.check(0, 10, 50)?;
-    Method::write(stream, 0, 10, 51, &[]).map_err(Error::Io)?;
+    Method::read(stream)?.check(0, 10, 50)?;
+    Method::write(stream, 0, 10, 51, &[])?;
     Ok(())
 }
 
 pub fn check_connection_close(stream: &mut (impl Read + Write), code: u16) -> Result<(), Error> {
-    let close = Method::read(stream).map_err(Error::Io)?;
+    let close = Method::read(stream)?;
     close.check(0, 10, 50)?;
     let prefix = close.1.first_chunk::<6>().ok_or(Error::Truncated {
         offset: 6,
         length: close.1.len(),
     })?;
     wire::check(&prefix[4..6], &code.to_be_bytes())?;
-    Method::write(stream, 0, 10, 51, &[]).map_err(Error::Io)?;
+    Method::write(stream, 0, 10, 51, &[])?;
     Ok(())
 }

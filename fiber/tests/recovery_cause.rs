@@ -5,7 +5,6 @@ use dope::core::driver::life::recovery;
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::Method;
 pub mod common;
-use std::io::{self, Read as _, Write as _};
 use std::time::Duration;
 
 use dope::core::platform::wake;
@@ -124,7 +123,7 @@ fn retains_disconnect_cause() {
             Peer::new(&mut second)
                 .open(TUNE)
                 .expect("AMQP broker handshake");
-            io::copy(&mut second, &mut io::sink()).expect("endpoint teardown");
+            while second.read(&mut [0; 256]).expect("endpoint teardown") != 0 {}
         },
         move |broker| {
             with(

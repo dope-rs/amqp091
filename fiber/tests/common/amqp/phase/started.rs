@@ -1,4 +1,4 @@
-use std::io::Write;
+use crate::common::amqp::io::Write;
 
 use crate::common::amqp::phase::{Secure, Tuning};
 use crate::common::amqp::wire::Method;
@@ -15,7 +15,7 @@ impl<'a, IO: Write> Started<'a, IO> {
         let length = u32::try_from(nonce.len())
             .map_err(Error::Length)?
             .to_be_bytes();
-        Method::write_parts(self.io, 0, 10, 20, &[&length, nonce]).map_err(Error::Io)?;
+        Method::write_parts(self.io, 0, 10, 20, &[&length, nonce])?;
         Ok(Secure { io: self.io })
     }
 
@@ -34,7 +34,7 @@ impl<'a, IO: Write> Started<'a, IO> {
             interval[0],
             interval[1],
         ];
-        Method::write(self.io, 0, 10, 30, &args).map_err(Error::Io)?;
+        Method::write(self.io, 0, 10, 30, &args)?;
         Ok(Tuning { io: self.io })
     }
 }

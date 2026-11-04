@@ -116,6 +116,7 @@ impl<'d> Store<'d> {
         let (demand, spare) = match resource {
             Resource::Body(error)
             | Resource::Resident(error)
+            | Resource::Staging(error)
             | Resource::Copy(error)
             | Resource::Account(error) => error.into_parts(),
             Resource::Delivery | Resource::Returned | Resource::Fragment | Resource::Route => {
@@ -193,6 +194,11 @@ impl<'d> Store<'d> {
             self.wake(resource::Kind::Body, free);
         }
         if release.resident {
+            // Staging uses a separate budget; only its allocator can re-admit.
+            // Retry each retained generation once after an owner releases.
+            while let Some(target) = self.take_one(resource::Kind::Staging) {
+                target.wake(self.owner);
+            }
             if self.owners.get() == 0 {
                 while let Some(target) = self.take_one(resource::Kind::Resident) {
                     target.wake(self.owner);

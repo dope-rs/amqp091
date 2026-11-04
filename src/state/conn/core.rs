@@ -12,6 +12,7 @@ use crate::{failure, protocol};
 
 pub(crate) struct Core<'c, 'b, 'd, const ID: u8> {
     pub lifecycle: Lifecycle<'c, 'b, 'd, ID>,
+    pub(crate) input: super::Input<'d, ID>,
     blocked: Option<resident::Exact<'d>>,
     negotiated: protocol::Negotiated,
 }
@@ -27,6 +28,7 @@ impl<'c, 'b, 'd, const ID: u8> Core<'c, 'b, 'd, ID> {
     pub(crate) fn new() -> Self {
         Self {
             lifecycle: Lifecycle::new(),
+            input: super::Input::Empty,
             blocked: None,
             negotiated: protocol::Negotiated::default(),
         }
@@ -40,7 +42,10 @@ impl<'c, 'b, 'd, const ID: u8> Core<'c, 'b, 'd, ID> {
         let start = self.lifecycle.begin(target, hold);
         match &start {
             Start::Ignored => {}
-            Start::Applied | Start::Replaced { .. } => self.unblock(),
+            Start::Applied | Start::Replaced { .. } => {
+                self.input = super::Input::Empty;
+                self.unblock();
+            }
         }
         start
     }

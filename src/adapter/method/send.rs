@@ -1,13 +1,12 @@
 use dope::core::driver::schedule::ready::wake;
-use dope::core::driver::schedule::ready::wake::queue::Registration;
 use o3::base::cell::{local, region};
-use o3::depot::queue::resident::fifo;
 
 use crate::adapter::channel::route;
 use crate::adapter::method::admit::Admit;
 use crate::adapter::method::wait;
 use crate::adapter::{core, step};
 use crate::failure;
+use crate::permits;
 use crate::protocol::method;
 use crate::service::{self, cancel};
 use crate::state::channel::cancel::lanes;
@@ -23,7 +22,7 @@ pub(in crate::adapter::method) enum Poll<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, con
 pub(in crate::adapter::method) struct Send<'o, 'c: 'o, 'd: 'c, const ID: u8, M> {
     pub(in crate::adapter::method) ticket: cancel::Ticket<'o, 'd, lanes::Method, ID>,
     method: M,
-    credit: Registration<'o, 'd, fifo::Scope<'c>>,
+    credit: step::Wait<'o, 'c, 'd>,
 }
 
 impl<'o, 'c: 'o, 'd: 'c, const ID: u8, M> Send<'o, 'c, 'd, ID, M> {
@@ -34,8 +33,13 @@ impl<'o, 'c: 'o, 'd: 'c, const ID: u8, M> Send<'o, 'c, 'd, ID, M> {
         Self {
             ticket,
             method,
-            credit: Registration::new(),
+            credit: step::Wait::new(),
         }
+    }
+
+    pub(in crate::adapter::method) fn cancel(&mut self, permits: &permits::Registry<'c, 'd>) {
+        self.credit.cancel(permits);
+        self.ticket.cancel();
     }
 
     pub(in crate::adapter::method) fn poll<'r: 'o, 'b: 'c>(
@@ -48,12 +52,26 @@ impl<'o, 'c: 'o, 'd: 'c, const ID: u8, M> Send<'o, 'c, 'd, ID, M> {
         M: method::Op<'d>,
     {
         let core = route.core();
-        let admit = <<M as requests::Source<'d>>::Policy<ID> as Admit<'d, M, ID>>::admit(
-            route,
-            access.reborrow(),
-            &self.ticket,
-            &self.method,
-        );
+        let admit = match route.read(access.read(), |shared| shared.connection.input.is_ready()) {
+            service::EpochAccess::Live(true) => {
+                <<M as requests::Source<'d>>::Policy<ID> as Admit<'d, M, ID>>::admit(
+                    route,
+                    access.reborrow(),
+                    &self.ticket,
+                    &self.method,
+                )
+            }
+            service::EpochAccess::Live(false) => {
+                return match self.credit.input(route, access, &wake) {
+                    Ok(()) => Poll::Pending(self),
+                    Err(error) => Poll::Error(error, self),
+                };
+            }
+            service::EpochAccess::Terminal(cause) => Ok(core::Admit::Error(cause.branded())),
+            service::EpochAccess::Unknown => Ok(core::Admit::Error(failure::Runtime::from(
+                failure::Error::Closed,
+            ))),
+        };
         let admit = match admit {
             Ok(admit) => admit,
             Err(Defer::Wait) => {
@@ -77,7 +95,7 @@ impl<'o, 'c: 'o, 'd: 'c, const ID: u8, M> Send<'o, 'c, 'd, ID, M> {
                 };
             }
         };
-        match step::Step::admit(route, access, admit, &mut self.credit, wake) {
+        match step::Step::admit(route, access, admit, self.credit.credit(), wake) {
             step::Step::Pending => Poll::Pending(self),
             step::Step::Error(error) => Poll::Error(error, self),
             step::Step::Ready(index, next) => {
@@ -90,5 +108,5 @@ impl<'o, 'c: 'o, 'd: 'c, const ID: u8, M> Send<'o, 'c, 'd, ID, M> {
 
 const _: () = assert!(
     std::mem::size_of::<Send<'static, 'static, 'static, 0, method::channel::Open>>()
-        == 6 * std::mem::size_of::<usize>()
+        == 7 * std::mem::size_of::<usize>()
 );

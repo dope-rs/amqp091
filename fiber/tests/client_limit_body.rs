@@ -1,6 +1,6 @@
+use dope_test::harness::peer;
 use std::array;
 use std::convert::Infallible;
-use std::io::{ErrorKind, Read as _, Write as _};
 
 use dope::core::driver::life::recovery;
 use dope_amqp091::config;
@@ -501,7 +501,7 @@ fn rejects_fragment_exhaustion() {
                 stream.read_wait(None).expect("wait for client close");
                 match stream.read(&mut [0]) {
                     Ok(0) => {}
-                    Err(error) if error.kind() == ErrorKind::ConnectionReset => {}
+                    Err(error) if matches!(error, peer::Error::Syscall(error) if error.is_reset()) => {}
                     result => panic!("client did not close: {result:?}"),
                 }
             },
@@ -582,7 +582,7 @@ fn rejects_fragment_cycle() {
             stream.read_wait(None).expect("wait for client close");
             match stream.read(&mut [0]) {
                 Ok(0) => {}
-                Err(error) if error.kind() == ErrorKind::ConnectionReset => {}
+                Err(error) if matches!(error, peer::Error::Syscall(error) if error.is_reset()) => {}
                 result => panic!("client did not close: {result:?}"),
             }
         },
@@ -673,7 +673,7 @@ fn rejects_resident_cycle() {
                 stream.read_wait(None).expect("wait for client close");
                 match stream.read(&mut [0]) {
                     Ok(0) => {}
-                    Err(error) if error.kind() == ErrorKind::ConnectionReset => {}
+                    Err(error) if matches!(error, peer::Error::Syscall(error) if error.is_reset()) => {}
                     result => panic!("client did not close: {result:?}"),
                 }
             },

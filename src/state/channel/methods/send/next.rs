@@ -11,7 +11,7 @@ impl Next {
         Self { key }
     }
 
-    pub(in crate::state::channel::methods) const fn key(&self) -> MethodKey {
+    pub(crate) const fn key(&self) -> MethodKey {
         self.key
     }
 }

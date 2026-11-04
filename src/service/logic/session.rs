@@ -26,12 +26,6 @@ pub(crate) trait SessionOps<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> {
         region: &mut region::Token<region::Identity<'d>>,
         f: impl for<'a> FnOnce(&'a mut shared::Edit<'_, 'r, 'c, 'b, 'd, ID>) -> R,
     ) -> R;
-    fn with_channel<R>(
-        &self,
-        region: &mut region::Token<region::Identity<'d>>,
-        id: u16,
-        f: impl for<'a> FnOnce(&'a mut channel::Session<'r, 'c, 'b, 'd, ID>) -> R,
-    ) -> Option<R>;
     fn with_lease<R>(
         &self,
         region: &mut region::Token<region::Identity<'d>>,
@@ -114,17 +108,6 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> SessionOps<'o, 'r, 'c, 'b
         f: impl for<'a> FnOnce(&'a mut shared::Edit<'_, 'r, 'c, 'b, 'd, ID>) -> R,
     ) -> R {
         self.port().session.write(local::Access::new(region), f)
-    }
-
-    fn with_channel<R>(
-        &self,
-        region: &mut region::Token<region::Identity<'d>>,
-        id: u16,
-        f: impl for<'a> FnOnce(&'a mut channel::Session<'r, 'c, 'b, 'd, ID>) -> R,
-    ) -> Option<R> {
-        self.with_shared(region, |shared| {
-            shared.routes.with_id(id, |view| f(view.channel))
-        })
     }
 
     fn with_lease<R>(

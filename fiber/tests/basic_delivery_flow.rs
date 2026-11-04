@@ -8,7 +8,6 @@ use crate::common::amqp::wire::{Frame, Method};
 use crate::common::cancel;
 pub mod common;
 
-use std::io::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;

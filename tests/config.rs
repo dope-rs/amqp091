@@ -71,7 +71,7 @@ fn rejects_cancel_overflow() {
         Spec::<0>::try_new(config, 1, 1),
         Err(failure::Error::InvalidConfig(wire::Config::CancellationEntryCapacity {
             channels: 2, slots,
-        })) if slots == u32::MAX / 2 + 2
+        })) if slots == u32::MAX / 2 + 3
     ));
 }
 

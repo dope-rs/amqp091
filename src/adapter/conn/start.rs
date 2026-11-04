@@ -1,9 +1,7 @@
 use std::{mem, task};
 
 use dope::core::driver::schedule::ready::wake;
-use dope::core::driver::schedule::ready::wake::queue;
 use o3::base::cell::{local, region};
-use o3::depot::queue::resident::fifo;
 
 use crate::adapter::conn::{Epoch, Ready};
 use crate::adapter::{core, step};
@@ -11,13 +9,14 @@ use crate::failure;
 use crate::protocol::method::conn::CloseRef;
 use crate::protocol::method::{self};
 use crate::protocol::wire::text::short;
+use crate::service;
 
 enum State<'text, 'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> {
     Send {
         gate: core::Gate<'o, 'r, 'c, 'b, 'd, ID, core::Command>,
         reply_code: u16,
         reply_text: short::Short<'text>,
-        credit: queue::Registration<'o, 'd, fifo::Scope<'c>>,
+        credit: step::Wait<'o, 'c, 'd>,
     },
     Error(failure::Error),
     Done,
@@ -41,7 +40,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'text, 'd: 'b, const ID: u8> Start<'text, 'o, '
                 gate: core::Gate::new(core, ready),
                 reply_code: code,
                 reply_text: text,
-                credit: queue::Registration::new(),
+                credit: step::Wait::new(),
             },
             Err(error) => State::Error(error),
         };
@@ -90,24 +89,37 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'text, 'd: 'b, const ID: u8> Start<'text, 'o, '
             }
         };
         let target = gate.epoch();
-        let admit = gate.admit(
-            access.reborrow(),
-            None,
-            |output| {
-                let close = CloseRef {
-                    reply_code: code,
-                    reply_text: text,
-                    class_id: 0,
-                    method_id: 0,
-                };
-                method::Encode::write(&close, output, 0);
+        let step = match gate.read(access.read(), |state| state.connection.input.is_ready()) {
+            service::EpochAccess::Live(true) => {
+                let admit = gate.admit(
+                    access.reborrow(),
+                    None,
+                    |output| {
+                        let close = CloseRef {
+                            reply_code: code,
+                            reply_text: text,
+                            class_id: 0,
+                            method_id: 0,
+                        };
+                        method::Encode::write(&close, output, 0);
+                    },
+                    |state| {
+                        state.connection.start_close(target.raw())?;
+                        Ok((gate.core(), target))
+                    },
+                );
+                step::Step::admit(gate, access, admit, credit.credit(), wake)
+            }
+            service::EpochAccess::Live(false) => match credit.input(gate, access, &wake) {
+                Ok(()) => step::Step::Pending,
+                Err(error) => step::Step::Error(error),
             },
-            |state| {
-                state.connection.start_close(target.raw())?;
-                Ok((gate.core(), target))
-            },
-        );
-        match step::Step::admit(gate, access, admit, &mut credit, wake) {
+            service::EpochAccess::Terminal(cause) => step::Step::Error(cause.branded()),
+            service::EpochAccess::Unknown => {
+                step::Step::Error(failure::Runtime::from(failure::Error::Closed))
+            }
+        };
+        match step {
             step::Step::Pending => {
                 self.state = State::Send {
                     gate,
@@ -118,12 +130,23 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'text, 'd: 'b, const ID: u8> Start<'text, 'o, '
                 step::Step::Pending
             }
             step::Step::Ready(wait, done) => step::Step::Ready(wait, done),
-            step::Step::Error(error) => step::Step::Error(error),
+            step::Step::Error(error) => {
+                credit.cancel(gate.core().permits());
+                step::Step::Error(error)
+            }
+        }
+    }
+}
+
+impl<const ID: u8> Drop for Start<'_, '_, '_, '_, '_, '_, ID> {
+    fn drop(&mut self) {
+        if let State::Send { gate, credit, .. } = &mut self.state {
+            credit.cancel(gate.core().permits());
         }
     }
 }
 
 const _: () = assert!(
     mem::size_of::<Start<'static, 'static, 'static, 'static, 'static, 'static, 0>>()
-        == 8 * mem::size_of::<usize>()
+        == 9 * mem::size_of::<usize>()
 );

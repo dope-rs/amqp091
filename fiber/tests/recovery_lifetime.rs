@@ -3,9 +3,8 @@ use std::thread;
 
 use dope::core::driver::life::recovery;
 
-use crate::common::amqp::Peer;
+use crate::common::amqp::{Greeting, Peer};
 pub mod common;
-use std::io;
 use std::time::Duration;
 
 use common::recovery::Profile;
@@ -31,11 +30,23 @@ fn owns_deadline() {
             first
                 .write_wait(Some(Duration::from_secs(10)))
                 .expect("first write timeout");
+            let preface = Peer::new(&mut first).preface().expect("AMQP preface");
+            // The client publishes its lifetime before sending this preface.
             thread::sleep(DELAY);
-            Peer::new(&mut first)
-                .open(TUNE)
-                .expect("AMQP broker handshake");
-            io::copy(&mut first, &mut io::sink()).expect("generation-1 retirement");
+            preface
+                .start(Greeting::PLAIN)
+                .expect("AMQP start")
+                .recv()
+                .expect("AMQP start ok")
+                .tune(TUNE)
+                .expect("AMQP tune")
+                .recv()
+                .expect("AMQP tune ok")
+                .recv()
+                .expect("AMQP open")
+                .send()
+                .expect("AMQP open ok");
+            while first.read(&mut [0; 256]).expect("generation-1 retirement") != 0 {}
             drop(first);
 
             let mut second = broker.accept().expect("second connection");
@@ -48,7 +59,7 @@ fn owns_deadline() {
             Peer::new(&mut second)
                 .open(TUNE)
                 .expect("AMQP broker handshake");
-            io::copy(&mut second, &mut io::sink()).expect("endpoint teardown");
+            while second.read(&mut [0; 256]).expect("endpoint teardown") != 0 {}
         },
         |broker| {
             with_policy::<Profile>(

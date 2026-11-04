@@ -1,5 +1,9 @@
-use std::io::{IoSlice, Read, Write};
-use std::{cmp, io};
+use std::cmp;
+
+use super::{
+    Error,
+    io::{Read, Write},
+};
 
 pub struct Duplex<const IN: usize, const OUT: usize> {
     pub(crate) input: [u8; IN],
@@ -13,11 +17,8 @@ pub struct Duplex<const IN: usize, const OUT: usize> {
 }
 
 impl<const IN: usize, const OUT: usize> Read for Duplex<IN, OUT> {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let input = self
-            .input
-            .get(self.read..)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "fixture read offset"))?;
+    fn read(&mut self, buffer: &mut [u8]) -> Result<usize, Error> {
+        let input = self.input.get(self.read..).ok_or(Error::ReadOffset)?;
         let length = cmp::min(buffer.len(), cmp::min(self.read_max, input.len()));
         buffer[..length].copy_from_slice(&input[..length]);
         self.read += length;
@@ -26,30 +27,12 @@ impl<const IN: usize, const OUT: usize> Read for Duplex<IN, OUT> {
 }
 
 impl<const IN: usize, const OUT: usize> Write for Duplex<IN, OUT> {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+    fn write_vectored(&mut self, buffers: &[&[u8]]) -> Result<usize, Error> {
         let output = self
             .output
             .get_mut(self.written..)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "fixture write offset"))?;
-        let length = cmp::min(buffer.len(), cmp::min(self.write_max, output.len()));
-        output[..length].copy_from_slice(&buffer[..length]);
-        self.written += length;
-        Ok(length)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-
-    fn write_vectored(&mut self, buffers: &[IoSlice<'_>]) -> io::Result<usize> {
-        let output = self
-            .output
-            .get_mut(self.written..)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "fixture write offset"))?;
-        let writes = self
-            .writes
-            .checked_add(1)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "fixture write count"))?;
+            .ok_or(Error::WriteOffset)?;
+        let writes = self.writes.checked_add(1).ok_or(Error::WriteCount)?;
         if let Some(length) = self.vectors.get_mut(self.writes) {
             *length = buffers.len();
         }

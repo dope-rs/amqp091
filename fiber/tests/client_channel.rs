@@ -1,5 +1,4 @@
 use std::convert::Infallible;
-use std::io::Write as _;
 use std::task::Poll;
 use std::time::Duration;
 

@@ -7,6 +7,7 @@ use crate::service::cancel::layout::Layout;
 use crate::service::cancel::pending::{Pending, reap};
 use crate::service::cancel::{Lane, Plan, Signal};
 use crate::state::channel::cancel::lanes;
+use crate::state::channel::methods;
 use crate::state::channels;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -16,14 +17,31 @@ pub(super) struct Active<'d, const ID: u8> {
 }
 
 pub(crate) struct Registry<'d, const ID: u8> {
-    entries: values::Values<Active<'d, ID>, 5>,
+    entries: values::Values<Active<'d, ID>, { lanes::Kind::COUNT }>,
     layout: Layout,
     cursor: cell::Cell<lanes::Kind>,
+    pub(in crate::service) deferred_control: cell::Cell<bool>,
 }
 
 struct Front<'a, 'd, const ID: u8> {
-    inner: values::Snapshot<'a, Active<'d, ID>, 5, round::Front>,
+    inner: values::Snapshot<'a, Active<'d, ID>, { lanes::Kind::COUNT }, round::Front>,
     active: Active<'d, ID>,
+}
+
+pub(crate) struct Retry<'a, 'd, const ID: u8> {
+    inner: values::Snapshot<'a, Active<'d, ID>, { lanes::Kind::COUNT }, round::Turn>,
+    active: Active<'d, ID>,
+}
+
+impl<'d, const ID: u8> Retry<'_, 'd, ID> {
+    pub(crate) fn lease(&self) -> channels::Lease<'d, ID> {
+        self.active.lease
+    }
+
+    pub(crate) fn complete(self) {
+        let active = self.active;
+        let _ = self.inner.pop_if(|current| current == active);
+    }
 }
 
 impl<'d, const ID: u8> Active<'d, ID> {
@@ -46,6 +64,7 @@ impl<'d, const ID: u8> Registry<'d, ID> {
             entries: lanes,
             layout: plan.layout(),
             cursor: cell::Cell::new(lanes::Kind::Reservation),
+            deferred_control: cell::Cell::new(false),
         })
     }
 
@@ -55,7 +74,10 @@ impl<'d, const ID: u8> Registry<'d, ID> {
         slot: lanes::Slot<L>,
         lease: channels::Lease<'d, ID>,
         id: L::Identity,
-    ) -> Result<values::Snapshot<'a, Active<'d, ID>, 5, round::Place>, round::Bounds> {
+    ) -> Result<
+        values::Snapshot<'a, Active<'d, ID>, { lanes::Kind::COUNT }, round::Place>,
+        round::Bounds,
+    > {
         let node = u32::from(ch.offset()) * self.layout.slots()
             + self.layout.offset(L::KIND, slot.raw())?;
         let slot = self.entries.try_slot(node as usize)?;
@@ -80,19 +102,51 @@ impl<'d, const ID: u8> Registry<'d, ID> {
     }
 
     pub(crate) fn has_pending(&self) -> bool {
-        self.entries.has_pending()
+        self.entries.group::<0>().active().is_some()
+            || self.entries.group::<1>().active().is_some()
+            || self.entries.group::<2>().active().is_some()
+            || self.entries.group::<3>().active().is_some()
+            || self.entries.group::<4>().active().is_some()
     }
 
-    pub(crate) fn pop(&self) -> Option<Signal<'d, ID>> {
+    pub(crate) fn has_control(&self) -> bool {
+        self.control().is_some()
+    }
+
+    fn control(&self) -> Option<Retry<'_, 'd, ID>> {
+        let (inner, active) = self.entries.group::<5>().active()?;
+        Some(Retry { inner, active })
+    }
+
+    pub(crate) fn retry(
+        &self,
+        index: channels::Index<'_, ID>,
+        lease: channels::Lease<'d, ID>,
+        method: methods::MethodKey,
+    ) -> Result<(), round::Bounds> {
+        let entry = self.activate(index, lanes::Slot::<lanes::Control>::ZERO, lease, method)?;
+        let _ = entry.set(|_| Some(()));
+        Ok(())
+    }
+
+    pub(crate) fn pop(&self, control: bool) -> Option<Signal<'_, 'd, ID>> {
         let mut kind = self.cursor.get();
         let mut left = lanes::Kind::COUNT;
         while left != 0 {
+            if kind == lanes::Kind::Control
+                && control
+                && let Some(retry) = self.control()
+            {
+                self.cursor.set(Self::advance(kind));
+                return Some(Signal::Control(retry));
+            }
             let next = match kind {
                 lanes::Kind::Reservation => self.entries.group::<0>().next(),
                 lanes::Kind::Method => self.entries.group::<1>().next(),
                 lanes::Kind::Consumer => self.entries.group::<2>().next(),
                 lanes::Kind::Confirm => self.entries.group::<3>().next(),
                 lanes::Kind::Publish => self.entries.group::<4>().next(),
+                lanes::Kind::Control => None,
             };
             let Some(active) = next else {
                 kind = Self::advance(kind);
@@ -100,7 +154,7 @@ impl<'d, const ID: u8> Registry<'d, ID> {
                 continue;
             };
             self.cursor.set(Self::advance(kind));
-            return Some(Signal {
+            return Some(Signal::Cancel {
                 lease: active.lease,
                 kind,
                 identity: active.identity,
@@ -119,6 +173,7 @@ impl<'d, const ID: u8> Registry<'d, ID> {
             lanes::Kind::Consumer => self.entries.group::<2>().active(),
             lanes::Kind::Confirm => self.entries.group::<3>().active(),
             lanes::Kind::Publish => self.entries.group::<4>().active(),
+            lanes::Kind::Control => self.entries.group::<5>().active(),
         };
         let Some((turn, active)) = head else {
             return;
@@ -186,7 +241,8 @@ impl<'d, const ID: u8> Registry<'d, ID> {
             lanes::Kind::Method => lanes::Kind::Consumer,
             lanes::Kind::Consumer => lanes::Kind::Confirm,
             lanes::Kind::Confirm => lanes::Kind::Publish,
-            lanes::Kind::Publish => lanes::Kind::Reservation,
+            lanes::Kind::Publish => lanes::Kind::Control,
+            lanes::Kind::Control => lanes::Kind::Reservation,
         }
     }
 }

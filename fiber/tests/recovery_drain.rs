@@ -1,5 +1,4 @@
 use std::convert::Infallible;
-use std::io::Write as _;
 
 use dope::core::driver::life::recovery;
 
@@ -15,12 +14,13 @@ use dope::core::platform::wake;
 use dope_amqp091::message::ack;
 use dope_amqp091::message::ack::Disposition;
 use dope_amqp091::message::field::Table;
+use dope_amqp091::{config, failure};
 use dope_amqp091_fiber::channel::{basic, queue};
 use dope_test::fibers::Yield;
 use dope_test::harness::peer::{AcceptScript, Stream};
 
 use crate::common::recovery::TUNE;
-use crate::common::recovery::client::with;
+use crate::common::recovery::client::with_config;
 
 fn open_topology(mut stream: &Stream<'_>, name: &str) {
     Method::read(&mut stream)
@@ -66,6 +66,9 @@ fn follows_active_queue() {
             steps
                 .wait_timeout(Duration::from_secs(10))
                 .expect("first queue activation");
+            let query = Method::read(&mut first).expect("first queue fence");
+            query.check(1, 50, 10).expect("AMQP method route");
+            assert_eq!(queue_name(&query).expect("queue name"), "q1");
             drop(first);
 
             let mut second = broker.accept().expect("second generation");
@@ -96,12 +99,40 @@ fn follows_active_queue() {
             second
                 .write_all(&queue_declare_ok(1, "q2", 0, 1).expect("queue declaration"))
                 .expect("passive Queue.DeclareOk");
+            steps
+                .wait_timeout(Duration::from_secs(10))
+                .expect("second fence released");
+            drop(second);
+
+            let mut third = broker.accept().expect("third generation");
+            third
+                .read_wait(Some(Duration::from_secs(10)))
+                .expect("third read timeout");
+            third
+                .write_wait(Some(Duration::from_secs(10)))
+                .expect("third write timeout");
+            Peer::new(&mut third)
+                .open(TUNE)
+                .expect("AMQP broker handshake");
+            open_topology(&third, "q3");
+            let query = Method::read(&mut third).expect("third queue fence");
+            query.check(1, 50, 10).expect("AMQP method route");
+            assert_eq!(queue_name(&query).expect("queue name"), "q3");
+            third
+                .write_all(&queue_declare_ok(1, "q3", 0, 1).expect("queue declaration"))
+                .expect("passive Queue.DeclareOk");
         },
         |broker| {
             let addr = broker.addr();
 
-            with(
+            with_config(
                 addr,
+                config::Config::new("guest", "guest")
+                    .expect("config")
+                    .capacity(
+                        config::Capacity::default()
+                            .topology(config::Topology::default().queues(1).identities(2)),
+                    ),
                 |rt| {
                     let conn = rt.connection();
                     let run = dope_fiber::fiber!('_ => async move {
@@ -140,8 +171,32 @@ fn follows_active_queue() {
                             })
                             .await
                             .expect("consumer");
+                        let initial_queue = Box::<str>::from(decl.queue.as_ref());
+                        drop(decl);
                         let chan = chan.into_auto();
                         step.notify().expect("publish first queue activation");
+                        let error = chan
+                            .in_ready(target)
+                            .queue()
+                            .inspect(queue::Inspect {
+                                queue: &initial_queue,
+                                durable: false,
+                                exclusive: true,
+                                auto_delete: true,
+                                arguments: &empty,
+                            })
+                            .await
+                            .err()
+                            .expect("in-flight fence must fail when its epoch retires");
+                        match &error {
+                            failure::Runtime::Terminal(cause) => {
+                                assert_eq!(cause.generation(), 1);
+                            }
+                            failure::Runtime::Local(cause) => {
+                                std::assert_matches!(cause, failure::Error::Closed);
+                            }
+                        }
+                        drop(error);
 
                         while conn
                             .observe()
@@ -151,6 +206,21 @@ fn follows_active_queue() {
                         {
                             Yield::new().await;
                         }
+                        let error = chan
+                            .in_ready(target)
+                            .queue()
+                            .inspect(queue::Inspect {
+                                queue: &initial_queue,
+                                durable: false,
+                                exclusive: true,
+                                auto_delete: true,
+                                arguments: &empty,
+                            })
+                            .await
+                            .err()
+                            .expect("retired fence must not reach the recovered transport");
+                        std::assert_matches!(error.error(), failure::Error::Closed);
+                        drop(error);
                         let snap = loop {
                             let snap = sub.snapshot().await.expect("consumer snapshot");
                             if snap.buffered_deliveries == 1 {
@@ -160,6 +230,7 @@ fn follows_active_queue() {
                         };
                         assert_eq!(snap.generation, 2);
                         assert_eq!(snap.queue.as_ref(), "q2");
+                        drop(snap);
                         step.notify().expect("publish recovered delivery observation");
 
                         let item = sub
@@ -173,10 +244,14 @@ fn follows_active_queue() {
                             .expect("generation-bound ACK admission");
                         let prior = sub.snapshot().await.expect("pre-fence snapshot");
                         assert_eq!(prior.buffered_deliveries, 0);
+                        let queue_name = Box::<str>::from(prior.queue.as_ref());
+                        drop(prior);
+                        let current = conn.observe().ready().await.expect("second ready");
                         let fence = chan
+                            .in_ready(current)
                             .queue()
                             .inspect(queue::Inspect {
-                                queue: prior.queue.as_ref(),
+                                queue: &queue_name,
                                 durable: false,
                                 exclusive: true,
                                 auto_delete: true,
@@ -185,6 +260,23 @@ fn follows_active_queue() {
                             .await
                             .expect("same-channel settlement fence");
                         assert_eq!(fence.message_count, 0);
+                        drop(fence);
+                        step.notify().expect("second fence released");
+                        conn.observe().retired(current.epoch()).await.expect("second retirement");
+                        let current = conn.observe().ready().await.expect("third ready");
+                        let next = sub.snapshot().await.expect("third snapshot");
+                        assert_eq!(next.generation, 3);
+                        assert_eq!(next.queue.as_ref(), "q3");
+                        assert_eq!(initial_queue.as_ref(), "q1");
+                        let queue_name = Box::<str>::from(next.queue.as_ref());
+                        drop(next);
+                        assert_eq!(chan.in_ready(current).queue().inspect(queue::Inspect {
+                            queue: &queue_name,
+                            durable: false,
+                            exclusive: true,
+                            auto_delete: true,
+                            arguments: &empty,
+                        }).await.expect("third same-channel fence").message_count, 0);
                     });
                     assert!(rt.block_on(run).is_ok(), "AMQP fiber must complete");
                 },

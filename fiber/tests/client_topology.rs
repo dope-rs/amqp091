@@ -1,5 +1,4 @@
 use std::convert::Infallible;
-use std::io::Write as _;
 use std::time::Duration;
 
 use dope::core::driver::life::recovery;
@@ -9,8 +8,8 @@ use dope_amqp091::{config, failure};
 use dope_amqp091_fiber::channel::{exchange, queue};
 use dope_fiber::abi::Join;
 
+use crate::common::amqp::Peer;
 use crate::common::amqp::wire::{Method, put_short};
-use crate::common::amqp::{Error, Peer};
 use crate::common::fiber::{Pinned, poll_once};
 pub mod common;
 
@@ -356,9 +355,9 @@ fn rejects_deleted_declare() {
                 stream.write_all(&queue_declare_ok_frame(1, b"q").expect("queue reply fixture"))
                     .expect("stale queue.declare-ok");
                 Method::read(stream)
-                    .map_err(Error::Io)?
+                    ?
                     .check(0, 10, 50)?;
-                Method::write(stream, 0, 10, 51, &[]).map_err(Error::Io)
+                Method::write(stream, 0, 10, 51, &[])
             },
             |broker| {
                 with(

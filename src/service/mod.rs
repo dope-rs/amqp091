@@ -79,6 +79,9 @@ impl<const ID: u8> settings::Resource for Spec<ID> {
 }
 
 impl<const ID: u8> Spec<ID> {
+    /// `waits` bounds the admission queue and each connection wake set separately.
+    /// Requests waiting for input readiness share the flow wake set with flow
+    /// and unblocked observers; exhaustion returns `failure::Error::Fanout(Full)`.
     pub fn try_new(
         config: config::Config,
         capacity: usize,

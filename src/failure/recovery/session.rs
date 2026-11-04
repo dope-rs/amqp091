@@ -3,6 +3,7 @@ use dope::core::driver::result::SubmitCause;
 use dope::core::driver::schedule::ready::wake::{fanout, queue, table};
 use dope::manifold::app::receive;
 use dope::manifold::client::close;
+use dope::manifold::client::conn::Transmit;
 use dope::net::link::event;
 use o3::buffer::hold;
 use o3::buffer::resident::staging::reserve;
@@ -109,10 +110,16 @@ impl recovery::Policy for Session {
         let error = failure.error();
         let class = match error {
             failure::Error::Disconnected(reason) => Self::classify_reason(reason),
+            failure::Error::Transmit(Transmit::Rejected(error)) => match error.into_error().cause()
+            {
+                SubmitCause::Full => recovery::Class::Recoverable,
+                SubmitCause::IdentityExhausted => recovery::Class::Fatal,
+            },
             failure::Error::Closed
             | failure::Error::Method(_)
             | failure::Error::MethodIdentity(_)
             | failure::Error::Receive { .. }
+            | failure::Error::Transmit(Transmit::Io(_))
             | failure::Error::Retain(_) => recovery::Class::Recoverable,
             failure::Error::Opening(_)
             | failure::Error::Allocation { .. }
@@ -122,6 +129,7 @@ impl recovery::Policy for Session {
             | failure::Error::Resident { .. }
             | failure::Error::Hold { .. }
             | failure::Error::Input(_)
+            | failure::Error::Transmit(Transmit::Invalid(_))
             | failure::Error::Protocol(_)
             | failure::Error::Field(_)
             | failure::Error::Decode(_)

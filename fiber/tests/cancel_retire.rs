@@ -1,5 +1,4 @@
 use std::convert::Infallible;
-use std::io::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 

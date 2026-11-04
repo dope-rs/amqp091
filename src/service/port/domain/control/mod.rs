@@ -78,7 +78,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
                         return Plan::Missing(freed);
                     };
                     let Some(next) = vacant.retire(key, ready) else {
-                        return Plan::Pending(freed);
+                        return Plan::Pending(None, freed);
                     };
                     Plan::encode(&mut method, egress, chan, next, freed)
                 }) {
@@ -90,7 +90,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
             Admission::Missing(freed) => {
                 freed.merge(self.detach(access.reborrow(), lease.raw(), key, stores))
             }
-            Admission::Continue(freed) => freed,
+            Admission::Continue(freed) | Admission::Pending(freed) => freed,
             Admission::Failed(cause) => {
                 self.domain.session.write(access.reborrow(), |state| {
                     state.routes.collect(lease.raw());
@@ -187,7 +187,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
                         }
                     };
                     let Some(next) = next else {
-                        return Plan::Pending(Freed::Available);
+                        return Plan::Pending(None, Freed::Available);
                     };
                     Plan::encode(&mut method, egress, chan, next, Freed::Available)
                 }) {
@@ -200,7 +200,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
                 Some(key) => freed.merge(self.detach(access.reborrow(), lease, key, stores)),
                 None => freed,
             },
-            Admission::Continue(freed) => freed,
+            Admission::Continue(freed) | Admission::Pending(freed) => freed,
             Admission::Failed(cause) => {
                 self.domain.fail(access, target, cause);
                 return;
@@ -259,6 +259,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
                         return Plan::Missing(Freed::Available);
                     };
                     let next = vacant.close();
+                    *method.phase = Phase::Closing;
                     Plan::encode(&mut method, egress, chan, next, Freed::Available)
                 }) {
                     Some(plan) => plan,
@@ -271,7 +272,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
                     state.routes.abandon(lease.raw(), stores)
                 }))
             }
-            Admission::Continue(freed) => freed,
+            Admission::Continue(freed) | Admission::Pending(freed) => freed,
             Admission::Failed(cause) => {
                 self.domain.fail(access, target, cause);
                 return;

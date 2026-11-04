@@ -281,8 +281,6 @@ fn close_wakes_consumer() {
 
 #[test]
 fn rejects_foreign_channel_key() {
-    use std::io::Write as _;
-
     use dope::core::platform::wake;
     use dope_amqp091::adapter::{self, Poll as _};
     use dope_amqp091::protocol::method;

@@ -5,7 +5,6 @@ use dope::core::driver::life::recovery;
 use crate::common::amqp::wire::{Frame, Method};
 use crate::common::amqp::{Greeting, Peer};
 pub mod common;
-use std::io::Write as _;
 use std::time::Duration;
 
 use dope::core::platform::wake;
@@ -82,8 +81,6 @@ fn answers_empty_challenge() {
 
 #[test]
 fn rejects_challenge() {
-    use std::io::Read as _;
-
     AcceptScript::with(
         move |acceptor| {
             let mut stream = acceptor.accept().expect("connection");
@@ -130,8 +127,6 @@ fn rejects_challenge() {
 
 #[test]
 fn times_out_startup_before_ready() {
-    use std::io::Read as _;
-
     use dope::manifold::timing::Policy as _;
     use dope_amqp091::config;
     use dope_fiber::task::time::sleep::TimerExt as _;

@@ -1,11 +1,85 @@
 use dope::core::driver::schedule::ready::wake;
-use dope::core::driver::schedule::ready::wake::queue;
+use dope::core::driver::schedule::ready::wake::{fanout, queue};
 use o3::base::cell::{local, region};
 use o3::depot::queue::resident::fifo;
 
 use crate::adapter::channel::route;
 use crate::adapter::core;
-use crate::{failure, service};
+use crate::{failure, permits, service};
+
+/// Owns exactly one wait domain. Input readiness publishes to subscribers;
+/// resource availability wakes one queued operation to retry admission.
+pub(in crate::adapter) enum Wait<'o, 'c: 'o, 'd: 'c> {
+    Credit(queue::Registration<'o, 'd, fifo::Scope<'c>>),
+    Input(fanout::Registration<'o, 'd>),
+}
+
+impl<'o, 'c: 'o, 'd: 'c> Wait<'o, 'c, 'd> {
+    pub(in crate::adapter) const fn new() -> Self {
+        Self::Credit(queue::Registration::new())
+    }
+
+    pub(in crate::adapter) fn credit(
+        &mut self,
+    ) -> &mut queue::Registration<'o, 'd, fifo::Scope<'c>> {
+        if matches!(self, Self::Input(_)) {
+            *self = Self::new();
+        }
+        let Self::Credit(credit) = self else {
+            unreachable!("credit");
+        };
+        credit
+    }
+
+    pub(in crate::adapter) fn into_credit(self) -> queue::Registration<'o, 'd, fifo::Scope<'c>> {
+        let Self::Credit(credit) = self else {
+            unreachable!("credit");
+        };
+        credit
+    }
+
+    pub(in crate::adapter) fn clear(&mut self) {
+        *self = Self::new();
+    }
+
+    pub(in crate::adapter) fn cancel(&mut self, permits: &permits::Registry<'c, 'd>) {
+        match self {
+            Self::Credit(credit) => permits.cancel(credit),
+            Self::Input(input) => input.clear(),
+        }
+    }
+
+    pub(in crate::adapter) fn input<'r: 'o, 'b: 'c, S, const ID: u8>(
+        &mut self,
+        source: S,
+        cx: local::Access<'_, region::Identity<'d>>,
+        wake: &wake::Waker<'d>,
+    ) -> Result<(), failure::Runtime<'c, 'b, 'd, ID>>
+    where
+        S: Source<'o, 'r, 'c, 'b, 'd, ID>,
+        S::Kind: core::Allows<core::WaiterAccess>,
+        'c: 'r,
+        'd: 'b,
+    {
+        source.live(cx)?;
+        if let Self::Credit(credit) = self {
+            source.core().permits().cancel(credit);
+            *self = Self::Input(fanout::Registration::new());
+        }
+        let Self::Input(input) = self else {
+            unreachable!("input");
+        };
+        source
+            .core()
+            .waiters()
+            .watch_flow(input, wake)
+            .map_err(failure::Runtime::from)
+    }
+}
+
+const _: () = assert!(
+    std::mem::size_of::<Wait<'static, 'static, 'static>>() == 3 * std::mem::size_of::<usize>()
+);
 
 pub(in crate::adapter) trait Source<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>:
     Copy

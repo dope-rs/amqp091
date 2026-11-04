@@ -121,6 +121,10 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Table<'r, 'c, 'b, 'd, ID> {
         self.table.key_at(id)
     }
 
+    pub(crate) fn generation(&self) -> Option<Generation> {
+        self.table.generation()
+    }
+
     pub(crate) fn collect(&mut self, lease: Lease<'d, ID>) {
         let Some(mut entry) = self.table.occupied(lease) else {
             return;

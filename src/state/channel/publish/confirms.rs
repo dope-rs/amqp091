@@ -71,6 +71,10 @@ impl<'c, 'b, 'd> Ledger<'c, 'b, 'd> {
         })
     }
 
+    pub(crate) const fn published(&self) -> u64 {
+        self.cursor.tag
+    }
+
     pub(crate) fn try_reserve<R>(
         &mut self,
         admit: impl FnOnce(lanes::Slot<lanes::Confirm>, Key<'d>) -> Result<R, failure::Error>,
@@ -156,18 +160,21 @@ impl<'c, 'b, 'd> Ledger<'c, 'b, 'd> {
 
     pub(crate) fn complete(
         &mut self,
+        published: u64,
         tag: u64,
         many: bool,
         out: protocol::Confirmation,
     ) -> Result<(), failure::Error> {
         if many {
-            if tag == 0 {
-                while let Some(entry) = self.slots.front() {
-                    Self::settle(entry, out);
+            let tag = if tag == 0 {
+                if published == 0 {
+                    return Ok(());
                 }
-                return Ok(());
-            }
-            let key = self.try_key(tag, true)?;
+                published
+            } else {
+                tag
+            };
+            let key = self.try_key(tag, true, published)?;
             while let Some(entry) = self.slots.front() {
                 if entry.key().raw > key.raw {
                     break;
@@ -176,7 +183,7 @@ impl<'c, 'b, 'd> Ledger<'c, 'b, 'd> {
             }
             return Ok(());
         }
-        let key = self.try_key(tag, false)?;
+        let key = self.try_key(tag, false, published)?;
         if let Some(index) = key.try_index(self.slots.capacity()) {
             match self.slots.entry(index) {
                 Some(staged::Entry::Queued(entry)) if *entry.key() == key => {
@@ -240,12 +247,12 @@ impl<'c, 'b, 'd> Ledger<'c, 'b, 'd> {
         }
     }
 
-    /// Commits preserve raw >= tag; retirement resets only tag.
-    fn try_key(&self, tag: u64, many: bool) -> Result<Key<'d>, failure::Error> {
-        let Some(tag) = num::NonZero::new(tag).filter(|tag| tag.get() <= self.cursor.tag) else {
+    /// The receive cutoff belongs to this live epoch. Commits preserve raw - tag.
+    fn try_key(&self, tag: u64, many: bool, published: u64) -> Result<Key<'d>, failure::Error> {
+        let Some(tag) = num::NonZero::new(tag).filter(|tag| tag.get() <= published) else {
             return Err(failure::Error::Protocol(wire::Fault::ConfirmTag {
                 tag,
-                published: self.cursor.tag,
+                published,
                 multiple: many,
             }));
         };

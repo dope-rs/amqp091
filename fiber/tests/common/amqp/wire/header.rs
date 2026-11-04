@@ -1,12 +1,11 @@
-use std::io;
-use std::io::Read;
+use crate::common::amqp::Error;
+use crate::common::amqp::io::Read;
 
 pub(super) struct Header([u8; 7]);
 
 impl Header {
-    pub(super) fn new(kind: u8, channel: u16, length: usize) -> io::Result<Self> {
-        let length = u32::try_from(length)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    pub(super) fn new(kind: u8, channel: u16, length: usize) -> Result<Self, Error> {
+        let length = u32::try_from(length).map_err(Error::Length)?;
         let mut bytes = [0; 7];
         bytes[0] = kind;
         bytes[1..3].copy_from_slice(&channel.to_be_bytes());
@@ -14,7 +13,7 @@ impl Header {
         Ok(Self(bytes))
     }
 
-    pub(super) fn read(source: &mut impl Read) -> io::Result<Self> {
+    pub(super) fn read(source: &mut impl Read) -> Result<Self, Error> {
         let mut bytes = [0; 7];
         source.read_exact(&mut bytes)?;
         Ok(Self(bytes))

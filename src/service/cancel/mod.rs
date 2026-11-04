@@ -37,4 +37,4 @@ const _: () = {
     assert_lane_layout::<Publish>();
 };
 const _: () = assert!(mem::size_of::<Registry<'static, 0>>() <= 15 * mem::size_of::<usize>());
-const _: () = assert!(mem::size_of::<Signal<'static, 0>>() == 3 * mem::size_of::<usize>());
+const _: () = assert!(mem::size_of::<Signal<'static, 'static, 0>>() <= 5 * mem::size_of::<usize>());

@@ -26,6 +26,7 @@ pub(crate) enum Resource {
     Returned,
     Body(credit::Error),
     Resident(credit::Error),
+    Staging(credit::Error),
     Copy(credit::Error),
     Account(credit::Error),
     Fragment,
@@ -39,6 +40,7 @@ pub(super) enum Kind {
     Returned,
     Body,
     Resident,
+    Staging,
     Fragment,
 }
 
@@ -67,7 +69,8 @@ impl Kind {
             Self::Returned => bounded::U32::exact::<1>(),
             Self::Body => bounded::U32::exact::<2>(),
             Self::Resident => bounded::U32::exact::<3>(),
-            Self::Fragment => bounded::U32::exact::<4>(),
+            Self::Staging => bounded::U32::exact::<4>(),
+            Self::Fragment => bounded::U32::exact::<5>(),
         }
     }
 }
@@ -79,6 +82,7 @@ impl Resource {
             Self::Returned => Some(Kind::Returned),
             Self::Body(_) => Some(Kind::Body),
             Self::Resident(_) | Self::Copy(_) | Self::Account(_) => Some(Kind::Resident),
+            Self::Staging(_) => Some(Kind::Staging),
             Self::Fragment => Some(Kind::Fragment),
             Self::Route => None,
         }

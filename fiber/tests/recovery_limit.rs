@@ -6,7 +6,7 @@ use crate::common::amqp::wire::Method;
 use crate::common::amqp::{Greeting, Peer, Tune};
 pub mod common;
 
-use std::io::{ErrorKind, Read as _, Write as _};
+use dope_test::harness::peer;
 use std::time::Duration;
 
 use dope::core::platform::wake;
@@ -49,10 +49,7 @@ fn rejects_large_method() {
             let error = stream
                 .read(&mut byte)
                 .expect_err("local oversized method changed the transport");
-            assert!(matches!(
-                error.kind(),
-                ErrorKind::WouldBlock | ErrorKind::TimedOut
-            ));
+            assert!(matches!(error, peer::Error::TimedOut) || matches!(error, peer::Error::Syscall(error) if error.is_block()));
             observe.notify().expect("frame rejection observation");
         },
         |broker| {

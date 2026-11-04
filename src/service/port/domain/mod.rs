@@ -74,39 +74,47 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Domain<'r, 'c, 'b, 'd, ID> {
         mut access: local::Access<'_, region::Identity<'d>>,
         target: epoch::Id<'d, ID>,
     ) -> service::Admit<Replay> {
-        let Some(frame) = self.egress.regular.acquire() else {
-            return service::Admit::Unavailable;
-        };
-        let frame = match self.session.write(access.reborrow(), |state| {
-            frame.try_encode(|output| {
-                let plan = state.recovery.plan(&mut state.routes, |step, ticket| {
+        let plan = match self.session.write(access.reborrow(), |state| {
+            let ready = state.connection.input.is_ready();
+            let plan = state.recovery.plan(&mut state.routes, |step, ticket| {
+                if !ready {
+                    return service::Admit::Inactive;
+                }
+                let Some(frame) = self.egress.regular.acquire() else {
+                    return service::Admit::Unavailable;
+                };
+                match frame.encode(|output| {
                     step.write(output, ticket.lease().id());
                     ticket
-                })?;
-                if let Plan::Ready(target) = &plan {
-                    state.connection.lifecycle.mark_ready(*target)?;
+                }) {
+                    Ok(frame) => service::Admit::Item(frame.into_parts()),
+                    Err(error) => service::Admit::Error(error),
                 }
-                Ok(plan)
-            })
+            })?;
+            if let Plan::Ready(target) = &plan {
+                state.connection.lifecycle.mark_ready(*target)?;
+            }
+            Ok::<_, failure::Error>(plan)
         }) {
-            Ok(frame) => frame,
+            Ok(plan) => plan,
             Err(error) => {
                 Admission::new(self).sync();
                 return service::Admit::Error(error);
             }
         };
-        let (frame, plan) = frame.into_parts();
-        let ticket = match plan {
-            Plan::Item(ticket) => ticket,
+        let (frame, ticket) = match plan {
+            Plan::Item(service::Admit::Item(frame)) => frame,
             Plan::Idle => {
-                frame.recycle();
-                Admission::new(self).sync();
                 return service::Admit::Item(Replay::Idle);
             }
             Plan::Ready(_) => {
-                frame.recycle();
-                Admission::new(self).sync();
                 return service::Admit::Item(Replay::Ready);
+            }
+            Plan::Item(service::Admit::Unavailable) => return service::Admit::Unavailable,
+            Plan::Item(service::Admit::Inactive) => return service::Admit::Inactive,
+            Plan::Item(service::Admit::Error(error)) => {
+                Admission::new(self).sync();
+                return service::Admit::Error(error);
             }
         };
         Admission::new(self).reserve(

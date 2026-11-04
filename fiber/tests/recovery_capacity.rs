@@ -1,12 +1,11 @@
 use std::convert::Infallible;
-use std::io::Read as _;
 
 use dope::core::driver::life::recovery;
 
 use crate::common::amqp::Peer;
 pub mod common;
 
-use std::io::ErrorKind;
+use dope_test::harness::peer;
 use std::time::Duration;
 
 use dope::core::platform::wake;
@@ -35,17 +34,14 @@ fn rejects_reconnect() {
                 .expect("initial AMQP epoch readiness");
             drop(first);
 
-            let mut rejected = broker.accept().expect("rejected reconnect");
+            let rejected = broker.accept().expect("rejected reconnect");
             rejected
                 .read_wait(Some(Duration::from_secs(5)))
                 .expect("rejected read timeout");
             let mut byte = [0_u8; 1];
             match rejected.read(&mut byte) {
                 Ok(read) => assert_eq!(read, 0, "rejected transport emitted a protocol byte"),
-                Err(error) => assert!(matches!(
-                    error.kind(),
-                    ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted
-                )),
+                Err(error) => assert!(matches!(error, peer::Error::Syscall(error) if error.is_reset() || error.is_aborted())),
             }
         },
         |broker| {

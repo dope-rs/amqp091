@@ -5,7 +5,6 @@ use dope::core::driver::life::recovery;
 use crate::common::amqp::wire::{Frame, Method};
 use crate::common::amqp::{Peer, Tune};
 pub mod common;
-use std::io::{self, Write as _};
 use std::time::Duration;
 
 use dope::core::platform::wake;
@@ -21,8 +20,8 @@ fn honors_negotiated_heartbeat_deadlines() {
     use crate::common::amqp::app::{Endpoint, Policy};
     use dope::manifold::timing;
     use dope_amqp091::{config, failure};
+    use dope_test::harness::peer;
     use dope_test::harness::peer::TcpScript;
-    use std::io::{ErrorKind, Read as _};
 
     for heartbeat in [0, 1, 2] {
         let (observed, observe) = wake::Ends::blocking()
@@ -36,19 +35,19 @@ fn honors_negotiated_heartbeat_deadlines() {
                 stream.read_wait(Some(timeout)).expect("heartbeat read timeout");
                 if heartbeat == 0 {
                     let error = stream.read(&mut [0]).expect_err("disabled heartbeat emitted a frame");
-                    assert!(matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut));
+                    assert!(matches!(error, peer::Error::TimedOut) || matches!(error, peer::Error::Syscall(error) if error.is_block()));
                 } else {
                     let frame = Frame::read(stream).expect("heartbeat before the full timeout");
                     frame.check(8, 0).expect("heartbeat route");
                     assert!(frame.payload().is_empty());
                 }
                 if heartbeat == 1 {
-                    io::copy(stream, &mut io::sink()).expect("inbound heartbeat timeout");
+                    while stream.read(&mut [0; 256]).expect("inbound heartbeat timeout") != 0 {}
                     assert!(started.elapsed() < Duration::from_millis(1500), "peer silence must expire at one negotiated second");
                 }
                 observe.notify().expect("heartbeat observed");
                 if heartbeat != 1 {
-                    io::copy(stream, &mut io::sink()).expect("endpoint teardown");
+                    while stream.read(&mut [0; 256]).expect("endpoint teardown") != 0 {}
                 }
             },
             |broker| {
@@ -141,7 +140,7 @@ fn readies_after_replay() {
                     &Method::try_encode(1, 20, 11, &[0, 0, 0, 0]).expect("AMQP frame fixture"),
                 )
                 .expect("replayed Channel.OpenOk");
-            io::copy(&mut second, &mut io::sink()).expect("endpoint teardown");
+            while second.read(&mut [0; 256]).expect("endpoint teardown") != 0 {}
         },
         move |broker| {
             with(

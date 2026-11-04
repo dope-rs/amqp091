@@ -18,7 +18,7 @@ use crate::state::channel::consumer::access;
 use crate::state::channel::methods::flight;
 use crate::state::channel::{Freed, Phase, change};
 use crate::state::conn::status::Retirement;
-use crate::state::conn::{Transport, phase};
+use crate::state::conn::{Owner, Transport, phase};
 use crate::state::{channels, epoch};
 use crate::{failure, protocol, service};
 
@@ -57,6 +57,7 @@ pub(crate) trait Ops<'o, 'r, 'c, 'b, 'd, const ID: u8> {
     fn recv_chan(
         &mut self,
         lease: channels::Lease<'d, ID>,
+        published: u64,
         server: channel::Event<'_, 'd>,
         attempt: Attempt<'d, ID>,
         parts: &mut service::Turn<'_, '_, 'd, ID>,
@@ -78,7 +79,12 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
         match pending::Pending::inspect(channel, payload)? {
             pending::Pending::Connection(pending) => {
                 let region = parts.driver.region_token();
-                let Some(event) = pending.admit(budget, parts.state.phase, closing)? else {
+                let (phase, admitted_close) =
+                    self.with_shared(region, |shared| match shared.connection.input.owner() {
+                        Some(Owner::Connection { phase, closing }) => (phase, closing),
+                        _ => unreachable!("input"),
+                    });
+                let Some(event) = pending.admit(budget, phase, admitted_close, closing)? else {
                     return Ok(ops::Input::Committed);
                 };
                 let mut close = |next| parts.close.request(next);
@@ -103,7 +109,8 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
                 else {
                     return Ok(ops::Input::Committed);
                 };
-                self.recv_chan(gate.into_lease(), event, attempt, parts)
+                let (lease, published) = gate.into_parts();
+                self.recv_chan(lease, published, event, attempt, parts)
             }
         }
     }
@@ -124,13 +131,33 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
             }));
         }
         let admit = self.with_shared(region, |shared| {
-            let lease = shared.routes.lease(channel.get())?;
+            let Owner::Channel {
+                lease,
+                sent,
+                published,
+            } = shared.connection.input.owner()?
+            else {
+                return None;
+            };
             shared.routes.project(lease, |view| {
+                let current = view
+                    .channel
+                    .method_state()
+                    .methods
+                    .sent()
+                    .map(|(key, _)| key);
                 let state = view.channel.protocol();
-                (lease, state.phase, state.expected, state.inbound_idle)
+                (
+                    lease,
+                    state.phase,
+                    sent,
+                    current,
+                    state.inbound_idle,
+                    published,
+                )
             })
         });
-        let Some((lease, phase, expected, idle)) = admit else {
+        let Some((lease, phase, expected, current, idle, published)) = admit else {
             kind?;
             return Err(failure::Error::Protocol(Fault::ChannelUnknown {
                 channel: channel.get(),
@@ -138,7 +165,10 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
         };
         let closing = phase == Phase::Closing;
         let close = matches!(&kind, Ok(method::Kind::Close | method::Kind::CloseOk));
-        if closing && !close && !matches!(&kind, Ok(kind) if expected == Some(*kind)) {
+        if closing
+            && !close
+            && !matches!(&kind, Ok(kind) if expected.map(|(_, expected)| expected) == Some(*kind))
+        {
             return Ok(None);
         }
         if !idle && !(closing && close) {
@@ -146,7 +176,8 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
             return Err(failure::Error::Protocol(Fault::ContentInterrupted));
         }
         let kind = kind?;
-        gates::Channel::check(kind, phase, expected, lease).map(|gate| Some((gate, kind)))
+        gates::Channel::check(kind, phase, expected, current, lease, published)
+            .map(|gate| Some((gate, kind)))
     }
 
     fn recv_conn(
@@ -233,6 +264,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
     fn recv_chan(
         &mut self,
         lease: channels::Lease<'d, ID>,
+        published: u64,
         server: channel::Event<'_, 'd>,
         attempt: Attempt<'d, ID>,
         parts: &mut service::Turn<'_, '_, 'd, ID>,
@@ -426,13 +458,18 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
             channel::Event::Recover(ok) => self.complete(lease, ok, epoch, region),
             channel::Event::Ack(a) => self
                 .with_lease(region, lease, |c| {
-                    c.confirm()
-                        .complete(a.delivery_tag, a.multiple, protocol::Confirmation::Ack)
+                    c.confirm().complete(
+                        published,
+                        a.delivery_tag,
+                        a.multiple,
+                        protocol::Confirmation::Ack,
+                    )
                 })
                 .ok_or(failure::Error::Protocol(Fault::ChannelUnknown { channel }))?,
             channel::Event::Nack(n) => self
                 .with_lease(region, lease, |c| {
                     c.confirm().complete(
+                        published,
                         n.delivery_tag,
                         n.multiple,
                         protocol::Confirmation::Nack { requeue: n.requeue },

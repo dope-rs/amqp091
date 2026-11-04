@@ -1,13 +1,24 @@
-use std::{array, io, num, str};
+use std::{array, num, str};
 
 use dope::core::platform::wake;
+use dope_test::harness::peer;
 
 use crate::common::amqp::wire::route::Route;
 
 /// Failure while driving the broker side of an AMQP handshake.
 #[derive(Debug)]
 pub enum Error {
-    Io(io::Error),
+    Io(peer::Error),
+    UnexpectedEof,
+    WriteZero,
+    ReadOffset,
+    WriteOffset,
+    WriteCount,
+    FrameType(u8),
+    FrameEnd(u8),
+    MethodLength(usize),
+    PayloadRemaining(u32),
+    Parts(usize),
     Notify(wake::NotifyError),
     Wait(wake::WaitError),
     Length(num::TryFromIntError),
@@ -42,6 +53,12 @@ pub enum Error {
         expected: [u16; 3],
         actual: [u16; 3],
     },
+}
+
+impl From<peer::Error> for Error {
+    fn from(error: peer::Error) -> Self {
+        Self::Io(error)
+    }
 }
 
 impl Error {

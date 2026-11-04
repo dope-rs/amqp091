@@ -1,5 +1,4 @@
 use std::convert::Infallible;
-use std::io::{Read as _, Write as _};
 use std::sync::mpsc;
 use std::task::Poll;
 use std::time::Duration;

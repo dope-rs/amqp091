@@ -1,5 +1,5 @@
+use dope_test::harness::peer;
 use std::convert::Infallible;
-use std::io::{ErrorKind, Read as _, Write as _};
 
 use dope::core::driver::life::recovery;
 use dope_amqp091::config;
@@ -221,7 +221,7 @@ fn drop_quarantines_borrow() {
                     Ok(0) => break,
                     Ok(_) => {}
                     Err(error) => {
-                        assert_eq!(error.kind(), ErrorKind::ConnectionReset);
+                        assert!(matches!(error, peer::Error::Syscall(error) if error.is_reset()));
                         break;
                     }
                 }

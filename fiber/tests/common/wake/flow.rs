@@ -45,3 +45,9 @@ impl<'o, 'r, 'c, 'b, 'd> Fiber<'d> for Flow<'_, 'o, 'r, 'c, 'b, 'd> {
         poll.map_err(Fault::Runtime)
     }
 }
+
+impl Drop for Flow<'_, '_, '_, '_, '_, '_> {
+    fn drop(&mut self) {
+        self.adapter.channels().cancel_send(&mut self.credit);
+    }
+}

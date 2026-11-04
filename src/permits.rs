@@ -82,6 +82,10 @@ impl<'scope, 'd: 'scope> Registry<'scope, 'd> {
         self.0.wake_first()
     }
 
+    pub(crate) fn cancel(&self, slot: &mut queue::Registration<'_, 'd, fifo::Scope<'scope>>) {
+        self.0.cancel(slot);
+    }
+
     pub(crate) fn wake_channel(&self, lane: fifo::Index<'scope>) {
         self.0.wake_one(lane);
     }

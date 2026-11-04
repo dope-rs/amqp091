@@ -115,6 +115,19 @@ where
 impl<'o: 'app, 'r: 'o, 'c: 'r, 'b: 'c, 'app, 'd: 'app + 'b, B: ?Sized, const ID: u8>
     Channel<'app, 'o, 'r, 'c, 'b, 'd, B, ID>
 {
+    /// Restricts this existing channel to one topology-ready transport epoch.
+    /// Each operation retains the same channel lease and rejects a retired epoch.
+    pub fn in_ready(
+        &self,
+        ready: conn::Ready<'d, ID>,
+    ) -> Channel<'app, 'o, 'r, 'c, 'b, 'd, B, ID, conn::Ready<'d, ID>> {
+        Channel {
+            handle: self.handle,
+            lease: self.lease,
+            access: ready,
+        }
+    }
+
     pub fn flow(
         &self,
     ) -> impl abi::Fiber<'d, Output = Result<(), failure::Runtime<'c, 'b, 'd, ID>>> + '_ {

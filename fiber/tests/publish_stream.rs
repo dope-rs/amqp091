@@ -7,7 +7,6 @@ use crate::common::amqp::Peer;
 use crate::common::amqp::wire::{Frame, Method};
 pub mod common;
 
-use std::io::Write as _;
 use std::sync::mpsc;
 use std::time::Duration;
 

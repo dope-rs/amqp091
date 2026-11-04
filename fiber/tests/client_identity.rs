@@ -1,5 +1,4 @@
 use std::convert::Infallible;
-use std::io::Write;
 use std::time::Duration;
 
 use dope::core::driver::life::recovery;
@@ -25,13 +24,13 @@ fn keeps_queue_identities() {
     let (replayed, replay) = mpsc::channel();
     AcceptScript::with(
         move |acceptor| {
-            fn declare_ok(mut stream: impl Write, name: &[u8]) {
+            fn declare_ok(stream: &dope_test::harness::peer::Stream<'_>, name: &[u8]) {
                 stream
                     .write_all(&queue_declare_ok_frame(1, name).expect("AMQP fixture"))
                     .expect("queue.declare-ok");
             }
 
-            fn consume_ok(mut stream: impl Write, tag: &[u8]) {
+            fn consume_ok(stream: &dope_test::harness::peer::Stream<'_>, tag: &[u8]) {
                 let mut response = Vec::new();
                 put_short(&mut response, tag).expect("AMQP short string");
                 stream

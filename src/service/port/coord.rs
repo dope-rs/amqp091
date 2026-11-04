@@ -13,14 +13,21 @@ impl<'d, const ID: u8> Coord<'d, ID> {
         &self.waiters
     }
 
-    pub(crate) fn drain<'turn>(
-        &self,
+    pub(crate) fn is_runnable(&self) -> bool {
+        self.cancellations.has_pending() || self.cancellations.deferred_control.get()
+    }
+
+    pub(crate) fn drain<'a, 'turn>(
+        &'a self,
         work: app::Work<'turn, 'd>,
-    ) -> quota::Admission<(cancel::Signal<'d, ID>, app::Permit<'turn, 'd>)> {
-        let admit = work.claim(|| self.cancellations.pop());
-        if matches!(admit, quota::Admission::Exhausted) && self.cancellations.has_pending() {
-            self.waiters.wake_flow();
-        }
+        control: bool,
+    ) -> quota::Admission<(cancel::Signal<'a, 'd, ID>, app::Permit<'turn, 'd>)> {
+        let admit = work.claim(|| self.cancellations.pop(control));
+        self.cancellations.deferred_control.set(
+            matches!(admit, quota::Admission::Exhausted)
+                && control
+                && self.cancellations.has_control(),
+        );
         admit
     }
 }

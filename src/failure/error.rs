@@ -2,6 +2,7 @@ use std::num;
 
 use dope::core::Errno;
 use dope::core::driver::schedule::ready::wake::{fanout, queue, table};
+use dope::manifold::client::conn::Transmit;
 use dope::net::link::egress::reserve::error;
 use dope::net::link::egress::{self};
 use dope::net::link::pool::change::opening;
@@ -52,6 +53,7 @@ pub enum Error<Text = short::Buf> {
     Receive {
         errno: Errno,
     },
+    Transmit(Transmit),
     Protocol(wire::Fault),
     Field(field::Fault),
     Decode(reader::Fault),
@@ -172,6 +174,7 @@ impl<Text> Error<Text> {
             Self::Polled => Error::Polled,
             Self::Disconnected(reason) => Error::Disconnected(reason),
             Self::Receive { errno } => Error::Receive { errno },
+            Self::Transmit(error) => Error::Transmit(error),
             Self::Protocol(fault) => Error::Protocol(fault),
             Self::Field(fault) => Error::Field(fault),
             Self::Decode(error) => Error::Decode(error),

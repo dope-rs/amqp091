@@ -55,7 +55,6 @@ pub(crate) struct Content<'a, 'r, 'c, 'b, 'd, const ID: u8> {
 
 pub(crate) struct Protocol {
     pub(crate) phase: channel::Phase,
-    pub(crate) expected: Option<method::Kind>,
     pub(crate) inbound_idle: bool,
 }
 
@@ -327,6 +326,12 @@ impl<'c, 'b, 'd, const ID: u8> Permit<'_, 'c, 'b, 'd, ID> {
 }
 
 impl<'c, 'b, 'a, 'd, const ID: u8> Publish<'a, 'c, 'b, 'd, ID> {
+    pub(crate) fn published(&self) -> u64 {
+        // The active confirmed stream has reserved a tag but not its final frame.
+        self.confirm.published()
+            - u64::from(self.control.has_confirms() && self.publishing.is_active())
+    }
+
     pub(crate) fn is_waiting(&self) -> bool {
         matches!(
             self.methods.head(),
@@ -379,6 +384,7 @@ impl<'c, 'b, 'a, 'd> Confirm<'a, 'c, 'b, 'd> {
 
     pub(crate) fn complete(
         &mut self,
+        published: u64,
         tag: u64,
         many: bool,
         result: protocol::Confirmation,
@@ -389,7 +395,7 @@ impl<'c, 'b, 'a, 'd> Confirm<'a, 'c, 'b, 'd> {
                 multiple: many,
             }));
         }
-        self.confirm.complete(tag, many, result)
+        self.confirm.complete(published, tag, many, result)
     }
 
     pub(crate) fn reap(&mut self, id: num::NonZero<u64>) -> confirms::Reap {

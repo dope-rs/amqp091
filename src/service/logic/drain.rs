@@ -1,3 +1,5 @@
+use std::task::Poll;
+
 use dope::core::driver::route::KeyTag;
 use dope::core::driver::schedule::app;
 use dope::manifold::client::close;
@@ -7,6 +9,7 @@ use o3::depot::arena::slab::key;
 use o3::mem::quota;
 
 use crate::adapter::channel;
+use crate::service::cancel::Signal;
 use crate::service::logic::session::SessionOps as _;
 use crate::state::channel::cancel::Outcome;
 use crate::state::channel::{consumer, methods};
@@ -34,12 +37,63 @@ pub(super) fn run<'turn, 'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>(
     region: &mut region::Token<region::Identity<'d>>,
 ) {
     loop {
-        let (signal, turn) = match endpoint.port().coordination().drain(work) {
+        let target = endpoint.with_shared(region, |shared| {
+            if shared.connection.input.is_ready() {
+                shared.connection.lifecycle.status().epoch()
+            } else {
+                None
+            }
+        });
+        let (signal, turn) = match endpoint.port().coordination().drain(work, target.is_some()) {
             quota::Admission::Item(item) => item,
             quota::Admission::Empty | quota::Admission::Exhausted => return,
         };
-        let lease = signal.lease();
-        let (kind, id) = signal.local();
+        let (lease, kind, id) = match signal {
+            Signal::Cancel {
+                lease,
+                kind,
+                identity,
+            } => (lease, kind, identity),
+            Signal::Control(retry) => {
+                let Some(target) = target else {
+                    unreachable!("control");
+                };
+                let lease = retry.lease();
+                let result = turn.run(|| {
+                    let next = endpoint.with_shared(region, |shared| {
+                        shared
+                            .routes
+                            .project(lease, |view| view.channel.method_state().methods.next())
+                            .flatten()
+                    });
+                    match next {
+                        Some(next) => endpoint
+                            .port()
+                            .control()
+                            .write(target, lease)
+                            .send(local::Access::new(region), next),
+                        None => Ok(Poll::Ready(())),
+                    }
+                });
+                match result {
+                    Ok(Poll::Pending) => {
+                        let coord = endpoint.port().coordination();
+                        if coord.cancellations.has_pending() {
+                            coord.waiters().wake_flow();
+                        }
+                        return;
+                    }
+                    Ok(Poll::Ready(())) => retry.complete(),
+                    Err(cause) => {
+                        retry.complete();
+                        endpoint
+                            .port()
+                            .fail(local::Access::new(region), target, cause);
+                    }
+                }
+                continue;
+            }
+        };
         let action = turn.run(|| {
             endpoint.with_shared(region, |shared| {
                 let (index, out) = shared

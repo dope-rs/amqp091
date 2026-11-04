@@ -58,6 +58,10 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Routes<'r, 'c, 'b, 'd, ID> {
         self.channels.lease(id)
     }
 
+    pub(crate) fn generation(&self) -> Option<channels::Generation> {
+        self.channels.generation()
+    }
+
     pub(crate) fn next_tracked(
         &self,
         after: Option<channels::Index<'c, ID>>,
@@ -71,6 +75,10 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Routes<'r, 'c, 'b, 'd, ID> {
 }
 
 impl<'r, 'c, 'b, 'd, const ID: u8> Edit<'_, 'r, 'c, 'b, 'd, ID> {
+    pub(crate) fn generation(&self) -> Option<channels::Generation> {
+        self.inner.generation()
+    }
+
     pub(crate) fn with_id<R>(
         &mut self,
         id: u16,

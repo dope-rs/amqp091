@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use crate::common::amqp::io::{Read, Write};
 
 use crate::common::amqp::phase::Preface;
 use crate::common::amqp::{Error, Greeting, Tune};
@@ -18,7 +18,7 @@ impl<'a, IO> Peer<'a, IO> {
 impl<'a, IO: Read> Peer<'a, IO> {
     pub fn preface(self) -> Result<Preface<'a, IO>, Error> {
         let mut actual = [0; 8];
-        self.io.read_exact(&mut actual).map_err(Error::Io)?;
+        self.io.read_exact(&mut actual)?;
         if actual != *b"AMQP\0\0\x09\x01" {
             return Err(Error::Preface(actual));
         }

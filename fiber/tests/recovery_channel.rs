@@ -7,7 +7,6 @@ use crate::common::amqp::wire::Method;
 use crate::common::recovery::broker::tagged;
 pub mod common;
 
-use std::io::{Read as _, Write as _};
 use std::time::Duration;
 
 use dope::core::platform::wake;

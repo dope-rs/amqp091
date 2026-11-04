@@ -1,4 +1,4 @@
-use std::io::Write;
+use crate::common::amqp::io::Write;
 
 use crate::common::amqp::Error;
 use crate::common::amqp::wire::Method;
@@ -11,7 +11,7 @@ pub struct Opened<'a, IO> {
 
 impl<IO: Write> Opened<'_, IO> {
     pub fn send(self) -> Result<(), Error> {
-        Method::write(self.io, 0, 10, 41, &[0]).map_err(Error::Io)?;
+        Method::write(self.io, 0, 10, 41, &[0])?;
         Ok(())
     }
 }

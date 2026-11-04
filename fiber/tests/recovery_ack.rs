@@ -1,12 +1,11 @@
 use std::convert::Infallible;
-use std::io::{Read as _, Write as _};
 
 use dope::core::driver::life::recovery;
 
 use crate::common::amqp::wire::Method;
 use crate::common::recovery::broker::{ack_tag, open_tagged, tagged};
 pub mod common;
-use std::io::ErrorKind;
+use dope_test::harness::peer;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -29,7 +28,7 @@ fn rejects_stale_epoch() {
     let (observed, observe) = wake::Ends::blocking().expect("broker observation").split();
     AcceptScript::with(
         move |broker| {
-            let mut first = broker.accept().expect("first connection");
+            let first = broker.accept().expect("first connection");
             open_tagged(&first).expect("AMQP broker");
             first.write_all(&tagged(1, &[]).expect("AMQP delivery")).expect("first delivery");
             released
@@ -53,7 +52,7 @@ fn rejects_stale_epoch() {
                 matches!(
                     read,
                     Err(ref error)
-                        if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
+                        if matches!(error, peer::Error::TimedOut) || matches!(error, peer::Error::Syscall(error) if error.is_block())
                 ),
                 "generation 2 must remain open without receiving a generation 1 delivery tag: {read:?}"
             );

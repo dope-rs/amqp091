@@ -1,4 +1,4 @@
-use std::mem;
+use std::{mem, task::Poll};
 
 use dope::manifold::client::port;
 use dope::net::link::egress::{Rejected, Rejection};
@@ -10,13 +10,14 @@ use crate::failure;
 use crate::service::port::domain::control::plan::Plan;
 use crate::service::port::domain::egress;
 use crate::service::{Domain, runtime};
-use crate::state::channel::methods::send;
+use crate::state::channel::methods::{self, send};
 use crate::state::channels::Lease;
 use crate::state::{channel, epoch, shared};
 
 #[must_use = "write admission owns any route freed while preparing it"]
 pub(super) enum Admission {
     Continue(channel::Freed),
+    Pending(channel::Freed),
     Missing(channel::Freed),
     Failed(failure::Error),
 }
@@ -50,20 +51,27 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Write<'a, 'r, 'c, 'b, 'd, ID> {
         mut access: local::Access<'_, region::Identity<'d>>,
         prepare: impl for<'s> FnOnce(
             &'s mut shared::Edit<'_, 'r, 'c, 'b, 'd, ID>,
-            &egress::Egress,
+            Option<&egress::Egress>,
         ) -> Plan<send::Next>,
     ) -> Admission {
         let plan = self.domain.session.write(access.reborrow(), |state| {
-            prepare(state, self.domain.egress())
+            let egress = state
+                .connection
+                .input
+                .is_ready()
+                .then_some(self.domain.egress());
+            prepare(state, egress)
         });
         let (frame, next, freed) = match plan {
             Plan::Send(frame, next, freed) => (frame, next, freed),
-            Plan::Pending(freed) => return Admission::Continue(freed),
+            Plan::Pending(Some(next), freed) => return self.pending(access, next.key(), freed),
+            Plan::Pending(None, freed) => return Admission::Continue(freed),
             Plan::Missing(freed) => return Admission::Missing(freed),
             Plan::Failed(cause) => return Admission::Failed(cause),
         };
+        let key = next.key();
         let frame = Authority::tagged(frame, Some(self.lease));
-        access.with_region(|region| {
+        let result = access.reborrow().with_region(|region| {
             let slot = self
                 .domain
                 .transport
@@ -78,7 +86,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Write<'a, 'r, 'c, 'b, 'd, ID> {
                 Reserve::Rejected(cause) => {
                     let (frame, _) = cause.load.into_inner().into_parts();
                     frame.recycle();
-                    return Admission::Continue(freed);
+                    return Admission::Pending(freed);
                 }
                 Reserve::Invalid(cause) => {
                     let (load, cause) = Rejected::<_>::from(cause).into_parts();
@@ -98,7 +106,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Write<'a, 'r, 'c, 'b, 'd, ID> {
                 Err(frame) => {
                     let (frame, _) = frame.into_inner().into_parts();
                     frame.recycle();
-                    return Admission::Continue(freed);
+                    return Admission::Pending(freed);
                 }
             };
             let effect = slot.try_commit(|region| {
@@ -118,14 +126,39 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Write<'a, 'r, 'c, 'b, 'd, ID> {
                     Admission::Failed(cause)
                 }
             }
-        })
+        });
+        match result {
+            Admission::Pending(freed) => self.pending(access, key, freed),
+            result => result,
+        }
+    }
+
+    fn pending(
+        &self,
+        access: local::Access<'_, region::Identity<'d>>,
+        key: methods::MethodKey,
+        freed: channel::Freed,
+    ) -> Admission {
+        let result = self.domain.session.write(access, |state| {
+            state.routes.project(self.lease, |view| {
+                self.domain
+                    .coordination
+                    .cancellations
+                    .retry(view.index, self.lease, key)
+            })
+        });
+        match result {
+            Some(Ok(())) => Admission::Pending(freed),
+            Some(Err(cause)) => Admission::Failed(failure::Error::Cancellation(cause)),
+            None => Admission::Missing(freed),
+        }
     }
 
     pub(crate) fn send(
         self,
         access: local::Access<'_, region::Identity<'d>>,
         next: send::Next,
-    ) -> Result<(), failure::Error> {
+    ) -> Result<Poll<()>, failure::Error> {
         let lease = self.lease;
         match self.admit(access, |state, egress| {
             state
@@ -142,7 +175,8 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Write<'a, 'r, 'c, 'b, 'd, ID> {
                 .unwrap_or(Plan::Missing(channel::Freed::Available))
         }) {
             Admission::Failed(cause) => Err(cause),
-            Admission::Continue(_) | Admission::Missing(_) => Ok(()),
+            Admission::Continue(_) | Admission::Missing(_) => Ok(Poll::Ready(())),
+            Admission::Pending(_) => Ok(Poll::Pending),
         }
     }
 }

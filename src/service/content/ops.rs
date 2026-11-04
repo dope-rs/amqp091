@@ -175,7 +175,8 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
             methods::Next::Idle { freed } => self.wake_route(epoch, freed)?,
             methods::Next::Resume { next, freed } => {
                 self.wake_route(epoch, freed)?;
-                self.port()
+                let _ = self
+                    .port()
                     .control()
                     .write(epoch, lease)
                     .send(local::Access::new(region), next)?;
@@ -319,7 +320,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
         let store = &self.port().content;
         let stores = store.stores();
         let result = self.with_shared(region, |shared| {
-            let Some(lease) = shared.routes.lease(channel) else {
+            let Some(lease) = shared.connection.input.lease() else {
                 Draft::parse(payload)?;
                 return Err(pending::Error::Failure(failure::Error::Protocol(
                     Fault::ChannelUnknown { channel },
@@ -386,20 +387,26 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
         let policy = self.logic().config.capacity.body.retention;
         let store = &self.port().content;
         let stores = store.stores();
-        self.with_channel(region, channel, move |channel| {
-            if channel.control().phase == Phase::Closing {
-                return Ok(Input::Committed);
-            }
-            let mut content = channel.content(stores);
-            let length = payload.len();
-            let result = content.body(length, store.wait.wake(), |target| {
-                target.store(payload, policy, store)
-            });
-            match result {
-                Ok(()) => Ok(Input::Committed),
-                Err(pending::Error::Retry(resource)) => Ok(Input::Blocked(attempt.block(resource))),
-                Err(pending::Error::Failure(error)) => Err(error),
-            }
+        self.with_shared(region, |shared| {
+            let lease = shared.connection.input.lease()?;
+            shared.routes.project(lease, move |view| {
+                let channel = view.channel;
+                if channel.control().phase == Phase::Closing {
+                    return Ok(Input::Committed);
+                }
+                let mut content = channel.content(stores);
+                let length = payload.len();
+                let result = content.body(length, store.wait.wake(), |target| {
+                    target.store(payload, policy, store)
+                });
+                match result {
+                    Ok(()) => Ok(Input::Committed),
+                    Err(pending::Error::Retry(resource)) => {
+                        Ok(Input::Blocked(attempt.block(resource)))
+                    }
+                    Err(pending::Error::Failure(error)) => Err(error),
+                }
+            })
         })
         .ok_or(failure::Error::Protocol(Fault::ChannelUnknown { channel }))?
     }

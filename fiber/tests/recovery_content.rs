@@ -6,7 +6,7 @@ use crate::common::amqp::Peer;
 use crate::common::amqp::wire::{Frame, Method};
 pub mod common;
 
-use std::io::{ErrorKind, Read as _, Write as _};
+use dope_test::harness::peer;
 use std::time::Duration;
 
 use dope_amqp091::message::ack;
@@ -44,7 +44,7 @@ fn rejects_partial_body_credit_cycle() {
             stream.write_all(&frames).expect("interleaved content");
             let read = stream.read(&mut [0]);
             assert!(matches!(read, Ok(0)) || matches!(read,
-                Err(ref error) if matches!(error.kind(), ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted)
+                Err(ref error) if matches!(error, peer::Error::Syscall(error) if error.is_reset() || error.is_aborted())
             ), "unreleasable body credit must retire the transport: {read:?}");
         },
         |broker| {

@@ -239,6 +239,8 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Channels<'o, 'r, 'c, 'b, 
 
     /// Waits for exact channel order and transport credit while the caller
     /// retains the semantic method value.
+    /// After `Pending`, retain `credit` for the next poll or pass it to
+    /// [`Self::cancel_send`] before abandoning the operation.
     pub fn poll_send<M: method::Encode>(
         self,
         access: local::Access<'_, region::Identity<'d>>,
@@ -256,6 +258,13 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Channels<'o, 'r, 'c, 'b, 
             credit,
             wake,
         )
+    }
+
+    /// Cancels a pending send and wakes at most one successor in its original
+    /// channel or transport-credit lane. The wake is a retry hint; its recipient
+    /// must recheck admission.
+    pub fn cancel_send(self, credit: &mut queue::Registration<'o, 'd, fifo::Scope<'c>>) {
+        self.core.permits().cancel(credit);
     }
 
     pub fn flow_active(

@@ -122,6 +122,13 @@ impl<'c, 'b, 'd, const ID: u8> Methods<'c, 'b, 'd, ID> {
         }
     }
 
+    pub(crate) fn sent(&mut self) -> Option<(MethodKey, method::Kind)> {
+        let (cursor, ..) = Slot::front(self)?;
+        let key = cursor.key();
+        let state = cursor.release().pending();
+        state.sent.then_some((key, state.expect))
+    }
+
     pub(crate) fn is_quiescent(&self) -> bool {
         self.pending.len() == capacity::Count::EMPTY && self.flight.is_empty()
     }

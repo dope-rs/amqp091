@@ -5,7 +5,6 @@ use dope::core::driver::life::recovery;
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::Method;
 pub mod common;
-use std::io::{self, Write as _};
 use std::time::Duration;
 
 use dope::core::platform::wake;
@@ -73,7 +72,7 @@ fn isolates_partial_frame() {
                     &Method::try_encode(1, 20, 11, &[0, 0, 0, 0]).expect("AMQP frame fixture"),
                 )
                 .expect("replayed Channel.OpenOk");
-            io::copy(&mut second, &mut io::sink()).expect("endpoint teardown");
+            while second.read(&mut [0; 256]).expect("endpoint teardown") != 0 {}
         },
         move |broker| {
             with(
