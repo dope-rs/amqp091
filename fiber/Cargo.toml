@@ -12,7 +12,7 @@ readme = "../README.md"
 [dependencies]
 dope = "0.24"
 dope-fiber = "0.24"
-dope-amqp091 = { path = "..", version = "0.22.0" }
+dope-amqp091 = { path = "..", version = "0.22.1" }
 o3 = "0.21"
 
 [dev-dependencies]

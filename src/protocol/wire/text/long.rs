@@ -66,4 +66,8 @@ impl Buf {
     pub fn as_long(&self) -> Long<'_> {
         Long(self.0.as_slice())
     }
+
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [u8] {
+        self.0.as_mut_slice()
+    }
 }

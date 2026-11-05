@@ -5,6 +5,7 @@ use crate::failure::{self, wire};
 use crate::message::field;
 use crate::protocol::wire::text::{long, short};
 
+mod raw;
 mod tune;
 
 pub use tune::Tune;
@@ -369,6 +370,8 @@ impl Config {
         Ok(Self {
             auth: Auth {
                 virtual_host: short::Buf::new("/")?,
+                locale: short::Buf::new("en_US")?,
+                // Build the secret last so allocation failure cannot bypass Auth's drop.
                 response: long::Buf::try_concat(
                     &[
                         b"\0",
@@ -378,7 +381,6 @@ impl Config {
                     ],
                     wire::Allocation::Authentication,
                 )?,
-                locale: short::Buf::new("en_US")?,
             },
             tune: Tune::default(),
             capacity: Capacity::default(),
