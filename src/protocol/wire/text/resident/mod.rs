@@ -44,9 +44,7 @@ pub(crate) struct Pool(shared::Store<Inline>);
 
 #[must_use = "an identity writer must be committed, restored, or released"]
 #[repr(transparent)]
-pub(crate) struct Writer<'d>(
-    Unique<'d, shared::Resident<Inline>, shared::Header<Inline>, shared::Initialized>,
-);
+pub(crate) struct Writer<'d>(Unique<'d, shared::Resident<Inline>, (), shared::Initialized>);
 
 #[must_use = "dropping the final identity lease recycles its slot"]
 #[derive(Debug)]

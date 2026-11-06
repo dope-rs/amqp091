@@ -24,6 +24,7 @@ pub(super) fn connection_phase(phase: Phase) -> wire::ConnPhase {
 pub(super) fn connection(
     kind: conn::Kind,
     phase: Phase,
+    receipt: Phase,
     closing: bool,
 ) -> Result<bool, failure::Error> {
     if closing && !matches!(kind, conn::Kind::Close | conn::Kind::CloseOk) {
@@ -40,9 +41,15 @@ pub(super) fn connection(
         conn::Kind::CloseOk => phase == Phase::Ready && closing,
         conn::Kind::Blocked | conn::Kind::Unblocked => phase == Phase::Ready,
     };
-    if valid {
+    if valid
+        && (!matches!(
+            kind,
+            conn::Kind::Start | conn::Kind::Secure | conn::Kind::Tune | conn::Kind::Open
+        ) || receipt == phase)
+    {
         return Ok(true);
     }
+    let phase = if valid { receipt } else { phase };
     let method = match kind {
         conn::Kind::Start => wire::ConnMethod::Start,
         conn::Kind::Secure => wire::ConnMethod::Secure,

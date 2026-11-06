@@ -1,6 +1,6 @@
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub(crate) enum Phase {
+pub enum Phase {
     #[default]
     NeedsHello = 1,
     Start,

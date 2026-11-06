@@ -145,7 +145,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Map<'r, 'c, 'b, 'd, ID> {
         &mut self,
         key: Lease<'d, ID>,
     ) -> Option<Occupied<'_, 'r, 'c, 'b, 'd, ID>> {
-        let row = bitmap::Access::get(self, usize::from(key.id()))?;
+        let row = entry::Row::try_new(self, usize::from(key.id())).ok()?;
         let memory = &row.source().store.memory;
         let index = (unsafe { *memory.map().add(row.index()) })?;
         if unsafe { memory.entry(index).key } != Some(key) {
@@ -185,15 +185,13 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Map<'r, 'c, 'b, 'd, ID> {
 impl<'r, 'c, 'b, 'd, const ID: u8> Occupied<'_, 'r, 'c, 'b, 'd, ID> {
     pub(super) fn get_mut(&mut self) -> &mut Slot<'r, 'c, 'b, 'd, ID> {
         // SAFETY: the slot value cannot change the retained table's bitmap storage or domain.
-        unsafe { depot::raw::Rows::source_mut(&mut self.row) }
-            .store
-            .value_mut(self.index)
+        unsafe { self.row.source_mut() }.store.value_mut(self.index)
     }
 
     pub(super) fn vacate(mut self) {
         let id = self.row.index();
         // SAFETY: this exclusive entry changes only its own mapping and free-list membership.
-        let table = unsafe { depot::raw::Rows::source_mut(&mut self.row) };
+        let table = unsafe { self.row.source_mut() };
         unsafe {
             table.store.memory.map_mut().add(id).write(None);
             let entry = table.store.memory.entry_mut(self.index);
@@ -220,10 +218,7 @@ unsafe impl<const ID: u8> depot::raw::Words for Map<'_, '_, '_, '_, ID> {
 
     fn row(entry: entry::Row<&Self>, (): ()) -> &[bitmap::Word] {
         // SAFETY: project the exact retained Map into its original Store without changing its domain.
-        Store::row(
-            unsafe { depot::raw::Rows::map_row(entry, |table| &table.store) },
-            (),
-        )
+        Store::row(unsafe { entry.map(|table| &table.store) }, ())
     }
 }
 

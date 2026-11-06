@@ -236,7 +236,7 @@ impl<'c, T, K: Key> Store<'c, T, K> {
                 // SAFETY: the retained hold, or the Existing admission above,
                 // proves len < limit. Construction reserved at least limit;
                 // this exclusive store preserves that capacity and length.
-                unsafe { alloc::raw::VecExt::vacancy(&mut self.values) }.insert(value);
+                (unsafe { alloc::raw::VecExt::vacancy(&mut self.values) })(value);
             }
             None => return Err((value, plan, wire::Capacity::TopologyMetadata)),
         }

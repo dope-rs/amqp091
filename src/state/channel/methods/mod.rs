@@ -141,7 +141,7 @@ impl<'c, 'b, 'd, const ID: u8> Methods<'c, 'b, 'd, ID> {
         // Both callers retain a validated key from this channel's fixed consumer capacity.
         // Limits admitted user + consumers + 1 before allocating these slots.
         let index = self.user_capacity.raw() + key.index();
-        let entry = slab::Slots::new(&mut self.pending).vacant_at(index)?;
+        let entry = self.pending.vacant_at(index)?;
         Some(Vacant::new(entry, &mut self.order))
     }
 
@@ -172,7 +172,7 @@ impl<'c, 'b, 'd, const ID: u8> Methods<'c, 'b, 'd, ID> {
 
     pub(crate) fn vacant(&mut self) -> Option<Vacant<'_, 'c, 'b, 'd>> {
         let index = self.storage_capacity.get() - 1;
-        let entry = slab::Slots::new(&mut self.pending).vacant_at(index)?;
+        let entry = self.pending.vacant_at(index)?;
         Some(Vacant::new(entry, &mut self.order))
     }
 
@@ -182,7 +182,8 @@ impl<'c, 'b, 'd, const ID: u8> Methods<'c, 'b, 'd, ID> {
     ) -> Result<Permit<'_, 'c, 'b, 'd, ID>, failure::Error> {
         let front = Slot::first(self);
         let index = self.storage_capacity.get() - 1;
-        let entry = slab::Slots::new(&mut self.pending)
+        let entry = self
+            .pending
             .vacant_at(index)
             .ok_or_else(|| failure::Error::Capacity(wire::Capacity::MethodReplay))?;
         let staged = entry.stage_with(|key| Entry::new(key, entry::Pending::replay(expect)));
@@ -214,7 +215,8 @@ impl<'c, 'b, 'd, const ID: u8> Methods<'c, 'b, 'd, ID> {
             (channel::Phase::Open, _) => None,
             _ => return Err(failure::Error::Closed),
         };
-        let entry = slab::Slots::new(&mut self.pending)
+        let entry = self
+            .pending
             .vacant_in(0..self.user_capacity.raw())
             .ok_or_else(|| failure::Error::Capacity(wire::Capacity::Method))?;
         let staged = entry.stage_with(|key| Entry::new(key, entry::Pending::user(expect)));

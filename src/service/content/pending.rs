@@ -11,8 +11,8 @@ use crate::message::{content, property};
 use crate::protocol::method::basic;
 use crate::protocol::wire::schema;
 use crate::protocol::wire::text::fields;
+use crate::service::content::wait::resource;
 use crate::service::content::wait::wake::Wake;
-use crate::service::content::wait::{resource, wake};
 use crate::service::content::{entry, payload};
 use crate::state::channel::consumer::delivery;
 use crate::state::channel::returns;
@@ -40,35 +40,19 @@ impl From<failure::Error> for Error {
 }
 
 pub(crate) struct Pending<'r, 'c, 'b, 'd> {
-    slot: Unique<
-        'c,
-        entry::Entry<'b, 'd>,
-        release::Header<entry::Entry<'b, 'd>, wake::Wake<'b, 'd>>,
-        release::Notify<'c>,
-    >,
+    slot: Unique<'c, entry::Entry<'b, 'd>, Wake<'b, 'd>, release::Notify<'c>>,
     route: Route<'r, 'c, 'b, 'd>,
 }
 
 /// Complete content retained under its matching route and frozen slot ownership.
 pub(crate) struct Lease<'c, 'b, 'd, K>(
-    Unique<
-        'c,
-        entry::Entry<'b, 'd>,
-        release::Header<entry::Entry<'b, 'd>, wake::Wake<'b, 'd>>,
-        release::Notify<'c>,
-        release::Frozen,
-    >,
+    Unique<'c, entry::Entry<'b, 'd>, Wake<'b, 'd>, release::Notify<'c>, release::Frozen>,
     marker::PhantomData<K>,
 );
 
 impl<'r, 'c, 'b, 'd> Pending<'r, 'c, 'b, 'd> {
     pub(super) fn delivery<'input>(
-        mut slot: Unique<
-            'c,
-            entry::Entry<'b, 'd>,
-            release::Header<entry::Entry<'b, 'd>, wake::Wake<'b, 'd>>,
-            release::Notify<'c>,
-        >,
+        mut slot: Unique<'c, entry::Entry<'b, 'd>, Wake<'b, 'd>, release::Notify<'c>>,
         method: basic::Deliver<'input>,
         route: delivery::Route<'r, 'c, 'b, 'd>,
     ) -> Self {
@@ -89,12 +73,7 @@ impl<'r, 'c, 'b, 'd> Pending<'r, 'c, 'b, 'd> {
     }
 
     pub(super) fn returned<'input>(
-        mut slot: Unique<
-            'c,
-            entry::Entry<'b, 'd>,
-            release::Header<entry::Entry<'b, 'd>, wake::Wake<'b, 'd>>,
-            release::Notify<'c>,
-        >,
+        mut slot: Unique<'c, entry::Entry<'b, 'd>, Wake<'b, 'd>, release::Notify<'c>>,
         method: basic::Return<'input>,
         route: returns::Vacant<'r, 'c, 'b, 'd>,
     ) -> Self {

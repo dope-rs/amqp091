@@ -172,7 +172,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Vacancy<'_, 'r, 'c, 'b, 'd, ID> {
         let mut removed = self.entry.remove();
         let id = removed.index();
         // SAFETY: only the matching map and physical entry change; the bitmap owner stays fixed.
-        let store = unsafe { depot::raw::Rows::source_mut(&mut removed) };
+        let store = unsafe { removed.source_mut() };
         unsafe {
             store.memory.map_mut().add(id).write(Some(index));
             let entry = store.memory.entry_mut(index);

@@ -3,8 +3,8 @@ use std::convert::Infallible;
 use dope::core::driver::life::recovery;
 use dope_test::alloc;
 
-use crate::common::amqp::Peer;
 use crate::common::amqp::wire::Method;
+use crate::common::amqp::{Greeting, Peer};
 pub mod common;
 
 use std::task;
@@ -24,12 +24,19 @@ use crate::common::publish::{TUNE, with_client};
 fn keeps_reason_exact() {
     TcpScript::with(
         move |stream| {
-            Peer::new(stream).open(TUNE).expect("AMQP broker handshake");
-            stream
-                .write_all(
-                    &Method::try_encode(0, 10, 60, b"\x08pressure").expect("AMQP frame fixture"),
-                )
-                .expect("connection.blocked");
+            Peer::new(stream)
+                .preface()
+                .and_then(|peer| peer.start(Greeting::PLAIN))
+                .and_then(|peer| peer.recv())
+                .and_then(|peer| peer.tune(TUNE))
+                .and_then(|peer| peer.recv())
+                .and_then(|peer| peer.recv())
+                .expect("connection open");
+            let mut frames = Method::try_encode(0, 10, 41, &[0]).expect("open ok");
+            frames.extend_from_slice(
+                &Method::try_encode(0, 10, 60, b"\x08pressure").expect("blocked"),
+            );
+            stream.write_all(&frames).expect("open and blocked");
             assert_eq!(stream.read(&mut [0]).expect("blocked probe teardown"), 0);
         },
         |broker| {

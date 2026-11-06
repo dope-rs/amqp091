@@ -80,24 +80,24 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Write<'a, 'r, 'c, 'b, 'd, ID> {
                 Reserve::Item(slot) => slot,
                 Reserve::Unknown(frame) | Reserve::Inactive(frame) => {
                     let (frame, _) = frame.into_parts();
-                    frame.recycle();
+                    drop(frame);
                     return Admission::Missing(freed);
                 }
                 Reserve::Rejected(cause) => {
                     let (frame, _) = cause.load.into_inner().into_parts();
-                    frame.recycle();
+                    drop(frame);
                     return Admission::Pending(freed);
                 }
                 Reserve::Invalid(cause) => {
                     let (load, cause) = Rejected::<_>::from(cause).into_parts();
                     let (frame, _) = load.into_inner().into_parts();
-                    frame.recycle();
+                    drop(frame);
                     return Admission::Failed(failure::Error::Egress(cause));
                 }
                 Reserve::Empty(cause) => {
                     let (load, cause) = cause.into_parts();
                     let (frame, _) = load.into_inner().into_parts();
-                    frame.recycle();
+                    drop(frame);
                     return Admission::Failed(failure::Error::Egress(Rejection::Empty(cause)));
                 }
             };
@@ -105,7 +105,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Write<'a, 'r, 'c, 'b, 'd, ID> {
                 Ok(slot) => slot,
                 Err(frame) => {
                     let (frame, _) = frame.into_inner().into_parts();
-                    frame.recycle();
+                    drop(frame);
                     return Admission::Pending(freed);
                 }
             };
@@ -123,7 +123,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Write<'a, 'r, 'c, 'b, 'd, ID> {
                 Err(rejected) => {
                     let (frame, cause) = rejected.into_parts();
                     let (frame, _) = frame.into_inner().into_parts();
-                    frame.recycle();
+                    drop(frame);
                     Admission::Failed(cause)
                 }
             }

@@ -70,13 +70,14 @@ where
         &self,
         budget: &buffer::resident::Budget<'d>,
         phase: Phase,
+        receipt: Phase,
         admitted_close: bool,
         closing: bool,
     ) -> Result<Option<conn::Event<'input, 'd>>, failure::Error> {
         if closing && !matches!(self.kind, conn::Kind::Close | conn::Kind::CloseOk) {
             return Ok(None);
         }
-        if !gates::connection(self.kind, phase, admitted_close)? {
+        if !gates::connection(self.kind, phase, receipt, admitted_close)? {
             return Ok(None);
         }
         conn::Event::decode(&self.arguments, self.kind, budget).map(Some)

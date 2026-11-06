@@ -69,7 +69,7 @@ impl<'a, 'c, 'b, 'd, const ID: u8> Graph<'a, 'c, 'b, 'd, ID> {
         while cursor.next < self.values.capacity() {
             let index = cursor.next;
             cursor.next += 1;
-            let Some(entry) = slab::Slots::new(self.values).entry_at(index as u32) else {
+            let Some(entry) = self.values.entry_at(index as u32) else {
                 continue;
             };
             let key = queue::Key::from_parts(entry.key(), self.topology.queues.owner);

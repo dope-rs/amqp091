@@ -47,7 +47,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Admission<'a, 'r, 'c, 'b, 'd, ID> {
         cause: error::Capacity<compose::Tagged<pool::Cursor, Authority<'d, ID>>>,
     ) -> service::Admit<R> {
         let (frame, _) = cause.load.into_inner().into_parts();
-        frame.recycle();
+        drop(frame);
         service::Admit::Unavailable
     }
 
@@ -56,7 +56,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Admission<'a, 'r, 'c, 'b, 'd, ID> {
         cause: Rejection,
     ) -> service::Admit<R> {
         let (frame, _) = frame.into_parts();
-        frame.recycle();
+        drop(frame);
         service::Admit::Error(failure::Error::Egress(cause))
     }
 
@@ -165,7 +165,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Admission<'a, 'r, 'c, 'b, 'd, ID> {
                 Reserve::Item(hold) => hold,
                 Reserve::Unknown(frame) | Reserve::Inactive(frame) => {
                     let (frame, _) = frame.into_parts();
-                    frame.recycle();
+                    drop(frame);
                     return Ok(service::Admit::Inactive);
                 }
                 Reserve::Rejected(cause) => return Ok(Self::rejected(cause)),
@@ -182,7 +182,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Admission<'a, 'r, 'c, 'b, 'd, ID> {
                 Ok(permit) => permit,
                 Err(frame) => {
                     let (frame, _) = frame.into_inner().into_parts();
-                    frame.recycle();
+                    drop(frame);
                     return Ok(service::Admit::Inactive);
                 }
             };
@@ -191,7 +191,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Admission<'a, 'r, 'c, 'b, 'd, ID> {
                 Err(rejected) => {
                     let (frame, cause) = rejected.into_parts();
                     let (frame, _) = frame.into_inner().into_parts();
-                    frame.recycle();
+                    drop(frame);
                     Err(cause)
                 }
             }

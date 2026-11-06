@@ -1,7 +1,6 @@
 use dope::core::driver::schedule::ready::wake;
 use dope::core::driver::{self};
 use o3::alloc;
-use o3::depot::arena::hash::runtime::entry;
 use wake::store;
 
 use crate::protocol::topology::records::consumer::Record;
@@ -167,10 +166,7 @@ impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
                     entry.get_mut().status = Status::Recovering;
                 }
                 Status::Untracked | Status::Replaying => {
-                    let mut staged = match entry {
-                        entry::Entry::Indexed(entry) => entry.unindex(),
-                        entry::Entry::Staged(staged) => staged,
-                    };
+                    let mut staged = entry.unindex();
                     staged.get_mut().status = Status::Canceled;
                     self.wakes.wake_once(&staged.get_mut().waker);
                     continue;
@@ -210,10 +206,7 @@ fn forget_if<'b, 'd, const ID: u8>(
                 entry.get_mut().status = Status::Untracked;
             }
             Status::Recovering | Status::Replaying => {
-                let mut staged = match entry {
-                    entry::Entry::Indexed(entry) => entry.unindex(),
-                    entry::Entry::Staged(staged) => staged,
-                };
+                let mut staged = entry.unindex();
                 staged.get_mut().status = Status::Canceled;
             }
             Status::Pending | Status::Untracked | Status::Canceled | Status::Retiring => {}

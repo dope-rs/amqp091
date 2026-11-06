@@ -36,7 +36,7 @@ pub(crate) enum Route<'r, 'c, 'b, 'd> {
 
 impl<'c, 'b, 'd> Store<'c, 'b, 'd> {
     pub(crate) fn try_new(capacity: capacity::Count) -> Result<Self, alloc::Error> {
-        Ok(Self(depot::raw::Arena::try_new(capacity)?))
+        Ok(Self(depot::raw::Arena::try_new(capacity.get())?))
     }
 
     pub(crate) fn vacant<'r>(&'r self) -> Option<Vacant<'r, 'c, 'b, 'd>> {

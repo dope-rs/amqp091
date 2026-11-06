@@ -79,12 +79,14 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
         match pending::Pending::inspect(channel, payload)? {
             pending::Pending::Connection(pending) => {
                 let region = parts.driver.region_token();
-                let (phase, admitted_close) =
+                let (receipt, admitted_close) =
                     self.with_shared(region, |shared| match shared.connection.input.owner() {
                         Some(Owner::Connection { phase, closing }) => (phase, closing),
                         _ => unreachable!("input"),
                     });
-                let Some(event) = pending.admit(budget, phase, admitted_close, closing)? else {
+                let Some(event) =
+                    pending.admit(budget, parts.state.phase, receipt, admitted_close, closing)?
+                else {
                     return Ok(ops::Input::Committed);
                 };
                 let mut close = |next| parts.close.request(next);

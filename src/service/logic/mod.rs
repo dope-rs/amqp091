@@ -74,12 +74,48 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
     type Mode = mode::Discard;
     type Requests = request::Enabled;
     type Response = response::Immediate;
+    type Receipt = conn::phase::Phase;
     type Send = pool::Cursor;
 
     fn codec<'a>(
         owner: &'a State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
     ) -> &'a Self::Codec {
         &owner.logic().codec
+    }
+
+    fn receipt(
+        _: &State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        _: Id<'d, KeyTag<ID>>,
+        state: &Self::ConnState,
+        _: &region::Token<region::Identity<'d>>,
+    ) -> Self::Receipt {
+        state.phase
+    }
+
+    fn received<'e>(
+        owner: &mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        receipt: Self::Receipt,
+        has_prefix: bool,
+        context: &mut turns::Context<'_, 'e, 'd, Self::ConnState, Self::Send, KeyTag<ID>>,
+    ) {
+        if receipt == conn::phase::Phase::Ready {
+            return;
+        }
+        context.state.received = receipt;
+        if !has_prefix {
+            let epoch = epoch::Id::new(context.conn_id);
+            owner.with_shared(context.region(), |shared| {
+                if let conn::Input::Unbound(_, phase) = &mut shared.connection.input
+                    && shared
+                        .connection
+                        .lifecycle
+                        .status()
+                        .can_accept(epoch, conn::status::Input::Frame)
+                {
+                    *phase = receipt;
+                }
+            });
+        }
     }
 
     fn stalled<'e>(
@@ -129,17 +165,21 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
                 conn::Input::Partial(bound) => bound,
                 input => {
                     let generation = match input {
-                        conn::Input::Unbound(generation) => generation,
+                        conn::Input::Unbound(generation, _) => generation,
                         _ => shared.routes.generation(),
                     };
+                    let phase = match &shared.connection.input {
+                        conn::Input::Unbound(_, phase) => phase,
+                        _ => &parts.state.received,
+                    };
                     let Some([tag, high, low]) = bytes.first_chunk::<3>().copied() else {
-                        shared.connection.input = conn::Input::Unbound(generation);
+                        shared.connection.input = conn::Input::Unbound(generation, *phase);
                         return;
                     };
                     let channel = u16::from_be_bytes([high, low]);
                     if channel == 0 {
                         conn::Owner::Connection {
-                            phase: parts.state.phase,
+                            phase: *phase,
                             closing: status.is_closing(),
                         }
                     } else {
@@ -214,6 +254,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
             },
         };
         if delivery == response::Direct::Committed {
+            let received = context.state.received;
             owner.with_shared(context.region(), |shared| {
                 if shared
                     .connection
@@ -221,7 +262,8 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
                     .status()
                     .can_accept(epoch::Id::new(conn), conn::status::Input::Frame)
                 {
-                    shared.connection.input = conn::Input::Unbound(shared.routes.generation());
+                    shared.connection.input =
+                        conn::Input::Unbound(shared.routes.generation(), received);
                 }
             });
         }
@@ -315,6 +357,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
                 1,
             >| {
                 let epoch = epoch::Id::new(context.conn_id);
+                let received = context.state.received;
                 let ready = owner.with_shared(context.region(), |shared| {
                     if !shared
                         .connection
@@ -327,7 +370,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
                     shared
                         .connection
                         .input
-                        .settle(input, shared.routes.generation())
+                        .settle(input, shared.routes.generation(), received)
                 });
                 if ready {
                     owner.port().admission().wake_credit();
@@ -348,7 +391,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
                 &State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
                 Self::Send,
             )| {
-                payload.recycle();
+                drop(payload);
                 service::Admission::new(owner.root().domain()).sync();
             },
         )
@@ -414,11 +457,14 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
         owner: &State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
         conn: Id<'d, KeyTag<ID>>,
         failure: Transmit,
-        region: &mut region::Token<region::Identity<'d>>,
+        regions: &mut (
+            region::Token<region::Identity<'d>>,
+            region::Token<region::Identity<'d, 1>>,
+        ),
     ) -> Option<Transmit> {
         let source = epoch::Id::new(conn);
         let stores = owner.port().content.stores();
-        let change = owner.with_shared(region, |shared| {
+        let change = owner.with_shared(&mut regions.0, |shared| {
             shared.fail(
                 source,
                 recovery::Fault::session(failure::Error::Transmit(failure)),
@@ -465,7 +511,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
             .transport
             .retire(conn, work, region, |tagged| {
                 let (frame, _) = tagged.into_parts();
-                frame.recycle();
+                drop(frame);
             })
     }
 
@@ -547,7 +593,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
             },
             |rejected| {
                 let (frame, _) = rejected.into_parts();
-                frame.recycle();
+                drop(frame);
             },
         );
         service::Admission::new(endpoint.port()).sync();

@@ -57,7 +57,7 @@ pub(crate) trait SessionOps<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> {
             egress::Enqueue::Committed => Ok(()),
             egress::Enqueue::Rejected(reject) => {
                 let (load, error) = reject.into_parts();
-                load.into_inner().recycle();
+                drop(load.into_inner());
                 service::Admission::new(self.port()).sync();
                 Err(failure::Error::Egress(error))
             }

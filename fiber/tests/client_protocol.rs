@@ -221,6 +221,70 @@ fn rejects_server_version() {
 }
 
 #[test]
+fn rejects_coalesced_handshake() {
+    for partial in [false, true] {
+        TcpScript::with(
+            move |stream| {
+                Peer::new(stream).preface().expect("client preface");
+                let mut frames =
+                    Method::try_encode(0, 10, 10, b"\0\x09\0\0\0\0\0\0\0\x05PLAIN\0\0\0\x05en_US")
+                        .expect("start");
+                let prefix = frames.len() + 2;
+                frames.extend_from_slice(
+                    &Method::try_encode(0, 10, 30, b"\0\x10\0\x02\0\0\0\0").expect("tune"),
+                );
+                frames.extend_from_slice(&Method::try_encode(0, 10, 41, &[0]).expect("open ok"));
+                let end = if partial { prefix } else { frames.len() };
+                stream
+                    .write_all(&frames[..end])
+                    .expect("coalesced handshake");
+                if partial {
+                    Method::read(stream)
+                        .expect("start ok")
+                        .check(0, 10, 11)
+                        .expect("start ok route");
+                    stream.write_all(&frames[end..]).expect("handshake tail");
+                }
+                let _ = stream.read(&mut [0; 128]);
+            },
+            |broker| {
+                with(
+                    broker.addr(),
+                    config::Config::new("guest", "guest").expect("config"),
+                    |rt| {
+                        let conn = rt.connection();
+                        rt.block_on(dope_fiber::fiber!('_ => async move {
+                            let result = conn.observe().epoch().await;
+                            assert!(
+                                matches!(result, Err(ref error) if matches!(
+                                    error.error(),
+                                    failure::Error::Protocol(failure::wire::Fault::ConnMethod {
+                                        method: failure::wire::ConnMethod::Tune,
+                                        phase: failure::wire::ConnPhase::Start,
+                                        closing: false,
+                                    })
+                                )),
+                                "premature Tune: {result:?}"
+                            );
+                        }))
+                        .expect("AMQP fiber");
+                    },
+                    recover,
+                    |result| {
+                        result
+                            .as_ref()
+                            .map_err(|error| error.kind())
+                            .expect("endpoint completion");
+                    },
+                );
+                broker.finish().expect("broker");
+            },
+        )
+        .expect("spawn handshake broker");
+    }
+}
+
+#[test]
 fn rejects_retained_method() {
     illegal(0, 10, 60, &[1, b'x'], |broker| {
         Endpoint::new(

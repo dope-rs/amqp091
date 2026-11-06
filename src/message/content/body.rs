@@ -44,6 +44,6 @@ impl<'a, 'b, 'd> Body<'a, 'b, 'd> {
 
 const _: () = assert!(size_of::<Body<'static, 'static, 'static>>() == size_of::<usize>());
 const _: () = assert!(
-    size_of::<scatter::Reader<'static, payload::Chunks<'static, 'static>, [u8]>>()
+    size_of::<scatter::Reader<'static, payload::Chunks<'static, 'static>>>()
         == size_of::<payload::Chunks<'static, 'static>>() + size_of::<&'static [u8]>()
 );

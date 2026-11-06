@@ -40,7 +40,7 @@ pub(crate) enum Owner<'d, const ID: u8> {
 #[derive(Clone, Copy)]
 pub(crate) enum Input<'d, const ID: u8> {
     Empty,
-    Unbound(Option<channels::Generation>),
+    Unbound(Option<channels::Generation>, phase::Phase),
     Held(Owner<'d, ID>),
     Partial(Owner<'d, ID>),
 }
@@ -53,7 +53,7 @@ impl<'d, const ID: u8> Input<'d, ID> {
     pub(crate) const fn owner(self) -> Option<Owner<'d, ID>> {
         match self {
             Self::Held(owner) | Self::Partial(owner) => Some(owner),
-            Self::Empty | Self::Unbound(_) => None,
+            Self::Empty | Self::Unbound(..) => None,
         }
     }
 
@@ -68,6 +68,7 @@ impl<'d, const ID: u8> Input<'d, ID> {
         &mut self,
         input: dope::manifold::client::session::Input,
         generation: Option<channels::Generation>,
+        phase: phase::Phase,
     ) -> bool {
         use dope::manifold::client::session::Input;
 
@@ -76,7 +77,7 @@ impl<'d, const ID: u8> Input<'d, ID> {
             (Input::Empty, _) => Self::Empty,
             (Input::Partial, Self::Held(owner)) => Self::Partial(owner),
             (Input::Partial, owner) => owner,
-            (Input::Yield | Input::Blocked, Self::Empty) => Self::Unbound(generation),
+            (Input::Yield | Input::Blocked, Self::Empty) => Self::Unbound(generation, phase),
             (Input::Yield | Input::Blocked, Self::Partial(owner)) => Self::Held(owner),
             (Input::Yield | Input::Blocked, owner) => owner,
         };
@@ -87,6 +88,7 @@ impl<'d, const ID: u8> Input<'d, ID> {
 #[derive(Default)]
 pub struct Transport {
     pub(crate) phase: phase::Phase,
+    pub(crate) received: phase::Phase,
     pub negotiated: protocol::Negotiated,
 }
 
