@@ -9,22 +9,20 @@ fn enforces_name_limit() {
     let rejected = "x".repeat(128);
 
     assert!(Short::resource(&accepted, Resource::Queue).is_ok());
-    assert!(matches!(
-        Short::resource(&rejected, Resource::Queue),
-        Err(failure::Error::Encoding(wire::Encode::Length {
-            kind: wire::Encoding::Queue,
-            actual: 128,
-            max: 127,
-        }))
-    ));
-    assert!(matches!(
-        Short::resource(&rejected, Resource::Exchange),
-        Err(failure::Error::Encoding(wire::Encode::Length {
-            kind: wire::Encoding::Exchange,
-            actual: 128,
-            max: 127,
-        }))
-    ));
+    for (resource, kind) in [
+        (Resource::Queue, wire::Encoding::Queue),
+        (Resource::Exchange, wire::Encoding::Exchange),
+        (Resource::Short, wire::Encoding::Short),
+    ] {
+        assert!(matches!(
+            Short::resource(&rejected, resource),
+            Err(failure::Error::Encoding(wire::Encode::Length {
+                kind: found,
+                actual: 128,
+                max: 127,
+            })) if found == kind
+        ));
+    }
     let config = (Config::new("guest", "guest")).expect("valid credentials");
     assert!(config.vhost(&accepted).is_ok());
     let config = (Config::new("guest", "guest")).expect("valid credentials");

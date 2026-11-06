@@ -281,24 +281,39 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
         output::Sent::<_>::Ready(
             |owner: &mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>| {
                 service::Admission::new(owner.root().domain()).sync();
-                owner.port().coordination().waiters().wake_flow();
             },
         )
     }
 
     fn flush() -> Option<
-        impl for<'a, 'x, 'y, 'z> Call<(
-            &'a mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
-            &'x mut turns::Context<'y, 'z, 'd, Self::ConnState, Self::Send, KeyTag<ID>>,
-            dope::manifold::client::session::Input,
-        )>,
+        impl for<'a, 'x, 'y, 'z> Call<
+            output::BoundArgs<
+                'a,
+                'x,
+                'y,
+                'z,
+                'o,
+                'd,
+                Port<'r, 'c, 'b, 'd, ID>,
+                Self,
+                KeyTag<ID>,
+                1,
+            >,
+        >,
     > {
-        Some(output::Flush::<Infallible, _>::Context(
-            |(owner, context, input): (
-                &mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
-                &mut turns::Context<'_, '_, 'd, Self::ConnState, Self::Send, KeyTag<ID>>,
-                dope::manifold::client::session::Input,
-            )| {
+        Some(
+            |(owner, context, input): output::BoundArgs<
+                '_,
+                '_,
+                '_,
+                '_,
+                'o,
+                'd,
+                Port<'r, 'c, 'b, 'd, ID>,
+                Self,
+                KeyTag<ID>,
+                1,
+            >| {
                 let epoch = epoch::Id::new(context.conn_id);
                 let ready = owner.with_shared(context.region(), |shared| {
                     if !shared
@@ -320,7 +335,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
                 }
                 service::Admission::new(owner.root().domain()).sync();
             },
-        ))
+        )
     }
 
     fn cancel() -> impl for<'a, 'x> Call<(
@@ -387,6 +402,13 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
     policy::Lifecycle<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, KeyTag<ID>, 1> for Logic<'o, 'd, ID>
 {
     type Drain = Ready;
+
+    fn take_close(
+        owner: &State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        conn: Id<'d, KeyTag<ID>>,
+    ) -> Option<close::Directive> {
+        owner.root().domain().transport.take_close(conn)
+    }
 
     fn transmit_failed(
         owner: &State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
@@ -505,7 +527,6 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
         _: &mut region::Token<region::Identity<'d, 1>>,
     ) {
         let endpoint = owner;
-        endpoint.port().coordination().waiters().wake_flow();
         owner.root().domain().transport.drain_tagged(
             requests,
             |region, auth| match auth {
@@ -571,7 +592,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
         let coord = endpoint.port().coordination();
         if coord.waiters().has_pending()
             || endpoint.port().admission().has_pending()
-            || coord.is_runnable()
+            || coord.cancellations.has_pending()
         {
             return schedule::Progress::Runnable;
         }
@@ -579,8 +600,9 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
             .port()
             .session
             .read(local::Read::new(region), |shared| {
-                shared.connection.input.is_ready() && shared.recovery.is_runnable()
+                shared.recovery.runnable().is_some() && shared.connection.input.is_ready()
             })
+            && endpoint.port().replay_available()
         {
             return schedule::Progress::Runnable;
         }

@@ -31,7 +31,7 @@ fn rejects_without_budget() {
                 let conn = rt.connection();
                 assert!(
                     rt.block_on(dope_fiber::fiber!('_ => async move {
-                        wait_ready(conn).await.expect("ready");
+                        conn.observe().ready().await.expect("ready");
                         let channel = conn.channels().open(1).await.expect("open channel");
                         let args = Table::new();
                         for exchange in ["retained-a", "retained-b"] {
@@ -53,6 +53,7 @@ fn rejects_without_budget() {
                                 })
                             );
                         }
+                        channel.queue().purge("admission").await.expect("admission remains open");
                     }))
                     .is_ok(),
                     "AMQP fiber must complete"
@@ -83,7 +84,7 @@ fn rejects_without_records() {
                 let conn = rt.connection();
                 assert!(
                     rt.block_on(dope_fiber::fiber!('_ => async move {
-                        wait_ready(conn).await.expect("ready");
+                        conn.observe().ready().await.expect("ready");
                         let channel = conn.channels().open(1).await.expect("open channel");
                         let args = Table::new();
                         let result = channel.exchange().declare(exchange::Declare {
@@ -99,6 +100,7 @@ fn rejects_without_records() {
                                 failure::wire::Capacity::TopologyMetadata
                             ))
                         );
+                        channel.queue().purge("admission").await.expect("admission remains open");
                     }))
                     .is_ok(),
                     "AMQP fiber must complete"
@@ -129,7 +131,7 @@ fn rejects_without_identity() {
                 let conn = rt.connection();
                 assert!(
                     rt.block_on(dope_fiber::fiber!('_ => async move {
-                        wait_ready(conn).await.expect("ready");
+                        conn.observe().ready().await.expect("ready");
                         let channel = conn.channels().open(1).await.expect("open channel");
                         let args = Table::new();
                         let result = channel.queue().declare(queue::Declare {
@@ -144,6 +146,7 @@ fn rejects_without_identity() {
                                 failure::wire::Capacity::TopologyIdentity
                             ))
                         ));
+                        channel.queue().purge("admission").await.expect("admission remains open");
                     }))
                     .is_ok(),
                     "AMQP fiber must complete"
@@ -216,7 +219,7 @@ fn explicit_skips_identity() {
                     let conn = rt.connection();
                     assert!(
                         rt.block_on(dope_fiber::fiber!('_ => async move {
-                            let ready = wait_ready(conn).await.expect("ready");
+                            let ready = conn.observe().ready().await.expect("ready");
                             let channel = conn.channels().open(1).await.expect("open channel");
                             let args = Table::new();
                             let declared = channel
@@ -307,7 +310,7 @@ fn commits_generated_tag() {
                     let conn = rt.connection();
                     assert!(
                         rt.block_on(dope_fiber::fiber!('_ => async move {
-                            let ready = wait_ready(conn).await.expect("ready");
+                            let ready = conn.observe().ready().await.expect("ready");
                             let channel = conn.channels().open(1).await.expect("open channel");
                             let args = Table::new();
                             let consumer = channel
@@ -359,7 +362,7 @@ fn rejects_generated_tag() {
                 let conn = rt.connection();
                 assert!(
                     rt.block_on(dope_fiber::fiber!('_ => async move {
-                        wait_ready(conn).await.expect("ready");
+                        conn.observe().ready().await.expect("ready");
                         let channel = conn.channels().open(1).await.expect("open channel");
                         let args = Table::new();
                         let result = channel.basic().consume(basic::Consume {
@@ -375,6 +378,7 @@ fn rejects_generated_tag() {
                                 failure::wire::Capacity::TopologyIdentity
                             ))
                         ));
+                        channel.queue().purge("admission").await.expect("admission remains open");
                     }))
                     .is_ok(),
                     "AMQP fiber must complete"
@@ -409,7 +413,7 @@ fn rejects_consumer_limit() {
                 let conn = rt.connection();
                 assert!(
                     rt.block_on(dope_fiber::fiber!('_ => async move {
-                        wait_ready(conn).await.expect("ready");
+                        conn.observe().ready().await.expect("ready");
                         let channel = conn.channels().open(1).await.expect("open channel");
                         let args = Table::new();
                         let result = channel.basic().consume(basic::Consume {
@@ -425,6 +429,7 @@ fn rejects_consumer_limit() {
                                 failure::wire::Capacity::Consumer
                             ))
                         ));
+                        channel.queue().purge("admission").await.expect("admission remains open");
                     }))
                     .is_ok(),
                     "AMQP fiber must complete"
@@ -451,7 +456,7 @@ fn rejects_ambiguous_queue() {
                 let conn = rt.connection();
                 assert!(
                     rt.block_on(dope_fiber::fiber!('_ => async move {
-                        wait_ready(conn).await.expect("ready");
+                        conn.observe().ready().await.expect("ready");
                         let channel = conn.channels().open(1).await.expect("open channel");
                         let args = Table::new();
                         let result = channel.queue().declare(queue::Declare {
@@ -466,6 +471,7 @@ fn rejects_ambiguous_queue() {
                                 error.error(), failure::Error::ServerNamedQueueNotExclusive
                             )
                         ));
+                        channel.queue().purge("admission").await.expect("admission remains open");
                     }))
                     .is_ok(),
                     "AMQP fiber must complete"

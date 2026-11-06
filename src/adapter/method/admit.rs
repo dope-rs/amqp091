@@ -7,6 +7,7 @@ use crate::failure;
 use crate::protocol::method::queue;
 use crate::protocol::topology::need;
 use crate::protocol::wire::schema::queues;
+use crate::protocol::wire::text::short;
 use crate::protocol::{method, topology, wire};
 use crate::service::cancel;
 use crate::state::channel::cancel::lanes;
@@ -39,12 +40,10 @@ where
         let id = route.lease().id();
         route.try_frame(
             access,
-            |output| method::Encode::write(method, output, id),
+            |output, _| method::Encode::write(method, output, id),
             |route, _, ()| {
-                commit(core, ticket, route, |topo| {
-                    let needs = need::Need::direct(M::RETAIN);
-                    let id = topo.resolve(&needs).0;
-                    Ok(work::Admit::Direct(id))
+                commit::<M, ID>(core, ticket, route, |_| {
+                    Ok(work::Admit::Direct(need::IdentityPlan::None))
                 })
             },
         )
@@ -65,9 +64,9 @@ where
         let id = route.lease().id();
         route.try_frame(
             access,
-            |output| method::Encode::write(method, output, id),
+            |output, _| method::Encode::write(method, output, id),
             |route, _, ()| {
-                commit(core, ticket, route, |topo| {
+                commit::<M, ID>(core, ticket, route, |topo| {
                     requests::Prepare::prepare(method, topo)
                 })
             },
@@ -90,7 +89,7 @@ where
     ) -> Result<core::Admit<'c, 'b, 'd, fifo::Index<'c>, ID>, Defer> {
         let core = route.core();
         record(route, access, ticket, method, |view, topo| {
-            <M as requests::Capture<'d, ID>>::capture(view, core.budget(), topo)
+            <M as requests::Capture<'d, ID>>::capture(method, view, core.budget(), topo)
         })
     }
 }
@@ -108,7 +107,12 @@ impl<'a, 'd, const ID: u8> Admit<'d, queue::Declare<'a>, ID> for requests::Decla
             if name.is_empty() && !method.exclusive {
                 return Err(failure::Error::ServerNamedQueueNotExclusive);
             }
-            <queue::Declare<'a> as requests::Capture<'d, ID>>::capture(view, core.budget(), topo)
+            <queue::Declare<'a> as requests::Capture<'d, ID>>::capture(
+                method,
+                view,
+                core.budget(),
+                topo,
+            )
         })
     }
 }
@@ -132,16 +136,46 @@ where
     let id = route.lease().id();
     route.try_frame(
         access,
-        |output| {
-            wire::Encoded::<<M as requests::Capture<'d, ID>>::Schema>::method_frame(
-                output,
-                id,
-                <M as method::Spec>::ID.bytes(),
-                |output| method::Record::record(method, output),
-            )
+        |output, access| {
+            let mut encode = |queue: Option<short::Name<'_>>| {
+                wire::Encoded::<<M as requests::Capture<'d, ID>>::Schema>::method_frame(
+                    output,
+                    id,
+                    <M as method::Spec>::ID.bytes(),
+                    |output| match queue {
+                        Some(queue) => {
+                            <M as requests::Capture<'d, ID>>::record(method, output, queue)
+                        }
+                        None => method::Record::record(method, output),
+                    },
+                )
+            };
+            if !<M as requests::Capture<'d, ID>>::reference(method)
+                .is_some_and(|name| name.is_empty())
+            {
+                return encode(None);
+            }
+            core.shared().write(access, |state| {
+                if state.connection.lifecycle.status().ready() != Some(route.epoch().raw()) {
+                    return encode(None);
+                }
+                state
+                    .routes
+                    .project(route.lease().raw(), |view| {
+                        let graph = view.topology.graph();
+                        let queue = match graph.current_state() {
+                            topology::records::queue::Current::Named { name, live: false } => {
+                                Some(name.name())
+                            }
+                            _ => None,
+                        };
+                        encode(queue)
+                    })
+                    .unwrap_or_else(|| encode(None))
+            })
         },
         |route, frame, proof| {
-            commit(core, ticket, route, |topo| {
+            commit::<M, ID>(core, ticket, route, |topo| {
                 let view = proof.attach(frame).map_err(failure::Error::Protocol)?;
                 plan(view, topo)
             })
@@ -149,7 +183,7 @@ where
     )
 }
 
-fn commit<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>(
+fn commit<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, M: method::Op<'d>, const ID: u8>(
     core: core::Core<'o, 'r, 'c, 'b, 'd, ID, core::Methods>,
     ticket: &cancel::Ticket<'o, 'd, lanes::Method, ID>,
     route: route::View<'_, '_, '_, '_, 'r, 'c, 'b, 'd, ID>,
@@ -164,5 +198,8 @@ fn commit<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>(
     };
     let admit = plan(route.topology)?;
     permit.commit(route.topology, core.identities(), admit)?;
+    if matches!(<M::Response as method::Reply>::KIND, method::Kind::CloseOk) {
+        route.channel.close_sent(core.stores());
+    }
     Ok(route.index.lane())
 }

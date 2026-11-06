@@ -40,9 +40,10 @@ impl<'a, IO: Read> Input<'a, IO> {
     pub(super) fn compare(mut self, expected: &[&[u8]]) -> Result<(), Error> {
         let mut length = 0_usize;
         for part in expected {
-            length = length
-                .checked_add(part.len())
-                .ok_or_else(|| Error::Capacity { length: part.len() })?;
+            let Some(next) = length.checked_add(part.len()) else {
+                return Err(Error::Capacity { length: part.len() });
+            };
+            length = next;
         }
         if self.left as usize != length {
             return Err(Error::PayloadLength {

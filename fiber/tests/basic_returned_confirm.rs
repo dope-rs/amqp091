@@ -78,6 +78,8 @@ fn precedes_confirm() {
                     let channel = conn.channels().open(1).await.expect("channel open");
                     let confirms = channel.confirm().select().await.expect("confirm.select");
                     let properties = Builder::default()
+                        .content_type("obsolete")
+                        .expect("initial content type")
                         .content_type(returned::CONTENT_TYPE)
                         .expect("content type")
                         .build();

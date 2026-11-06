@@ -1,32 +1,22 @@
 use o3::buffer::pool;
 
-use crate::failure::{self, wire};
+use crate::failure;
 use crate::protocol::method::{self, basic, channel};
 use crate::protocol::wire::Writer;
 use crate::protocol::wire::text::short;
+use crate::service::port::domain::egress::frame::Frame;
 use crate::state::channel::methods::send;
 
-#[repr(transparent)]
-pub(in crate::service::port::domain) struct Frame {
-    output: Writer,
-}
-
-impl Frame {
-    pub(in crate::service::port::domain) const fn new(output: Writer) -> Self {
-        Self { output }
-    }
-
+impl Frame<(), Writer> {
     pub(super) fn write(
-        mut self,
+        self,
         channel: u16,
         command: send::Command<'_>,
     ) -> Result<pool::Cursor, failure::Error> {
-        match command {
-            send::Command::Cancel(tag) => method::Encode::write(
-                &basic::CancelRef { consumer_tag: tag },
-                &mut self.output,
-                channel,
-            ),
+        self.encode(|output| match command {
+            send::Command::Cancel(tag) => {
+                method::Encode::write(&basic::CancelRef { consumer_tag: tag }, output, channel)
+            }
             send::Command::Close => method::Encode::write(
                 &channel::CloseRef {
                     reply_code: 200,
@@ -34,16 +24,10 @@ impl Frame {
                     class_id: 0,
                     method_id: 0,
                 },
-                &mut self.output,
+                output,
                 channel,
             ),
-        }
-        let output = self
-            .output
-            .try_finish()
-            .map_err(|error| failure::Error::Capacity(wire::Capacity::Outbound(error)))?;
-        Ok(output)
+        })
+        .map(Frame::into_output)
     }
 }
-
-const _: () = assert!(std::mem::size_of::<Frame>() == std::mem::size_of::<Writer>());

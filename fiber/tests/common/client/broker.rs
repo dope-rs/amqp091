@@ -1,7 +1,6 @@
 use dope_test::harness::peer;
 use std::time::Duration;
 
-use dope::core::platform::wake;
 use dope_test::harness::peer::{AcceptScript, Spawn, TcpScript};
 
 use crate::common::amqp::wire::Method;
@@ -44,6 +43,17 @@ pub fn handshake<R>(
             Peer::new(&mut stream)
                 .preface()?
                 .start(Greeting::new(version.0, version.1, b"PLAIN", locales))?;
+            match stream.read(&mut [0]) {
+                Ok(0) => {}
+                Err(peer::Error::Syscall(error)) if error.is_reset() => {}
+                Err(error) => return Err(Error::Io(error)),
+                Ok(bytes) => {
+                    return Err(Error::UnexpectedRead {
+                        context: "rejected handshake".to_owned(),
+                        bytes,
+                    });
+                }
+            }
             drop(stream);
 
             Redial::observe(acceptor).map_err(Error::Io)
@@ -57,7 +67,6 @@ pub fn illegal<R>(
     class: u16,
     method: u16,
     args: &[u8],
-    done: wake::Notify,
     run: impl for<'scope> FnOnce(AcceptScript<'scope, Result<(bool, bool, Redial), Error>>) -> R,
 ) -> Result<R, Spawn> {
     AcceptScript::with(
@@ -83,7 +92,6 @@ pub fn illegal<R>(
             };
             drop(stream);
             let redial = Redial::observe(acceptor)?;
-            done.notify().map_err(Error::Notify)?;
             Ok((sent, closed, redial))
         },
         run,
@@ -98,7 +106,9 @@ pub fn rejection<R>(
             Peer::new(stream).open(TUNE)?;
             Method::read(stream)?.check(1, 20, 10)?;
             stream.write_all(&Method::try_encode(1, 20, 11, &[0, 0, 0, 0])?)?;
-            check_no_frame(stream, "exhausted topology retention")
+            Method::read(stream)?.check(1, 50, 30)?;
+            check_no_frame(stream, "exhausted topology retention")?;
+            Method::write(stream, 1, 50, 31, &[0; 4])
         },
         run,
     )

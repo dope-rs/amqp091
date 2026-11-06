@@ -106,11 +106,8 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Store<'r, 'c, 'b, 'd, ID> {
             return Err(pending::Error::Failure(failure::Error::Capacity(error)));
         }
         source
-            .try_admit(&self.wait.resident())
-            .map_err(|(source, error)| {
-                drop(source);
-                self.admission(wire::Allocation::Content, error)
-            })
+            .try_into()
+            .map_err(|error| self.admission(wire::Allocation::Content, error))
     }
 
     pub(crate) fn discard(&self, body: payload::Payload<'b, 'd>) {

@@ -1,4 +1,4 @@
-use std::slice;
+use std::{num, slice};
 
 use o3::alloc::VecExt as _;
 
@@ -36,11 +36,11 @@ impl Table {
         {
             Ok(index) => {
                 let old = &mut self.entries[index].1;
-                let old_len = 1 + u32::from(key.len()) + old.encoded_len();
+                let old_len = 1 + u32::from(key.len()) + old.encoded_len().get();
                 let base = self.encoded_len - old_len;
                 let total = field::sum(Encoding::FieldTable, base, new_len)?;
                 *old = value;
-                self.encoded_len = total;
+                self.encoded_len = total.get();
             }
             Err(index) => {
                 let total = field::sum(Encoding::FieldTable, self.encoded_len, new_len)?;
@@ -55,7 +55,7 @@ impl Table {
                 }
                 let key = short::Buf::try_copy(key, short::Resource::Short)?;
                 self.entries.insert(index, (key, value));
-                self.encoded_len = total;
+                self.encoded_len = total.get();
             }
         }
         Ok(self)
@@ -78,7 +78,7 @@ impl Table {
     }
 }
 
-fn entry_len(key_len: u8, value: &field::Value) -> Result<u32, failure::Error> {
+fn entry_len(key_len: u8, value: &field::Value) -> Result<num::NonZero<u32>, failure::Error> {
     field::sum(
         Encoding::FieldTable,
         1 + u32::from(key_len),

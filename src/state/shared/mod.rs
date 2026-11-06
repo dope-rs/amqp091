@@ -6,7 +6,7 @@ use dope::net::link::pool::change::opening;
 
 use crate::failure;
 use crate::failure::{recovery, terminal};
-use crate::state::channel::{self, change};
+use crate::state::channel;
 use crate::state::conn::core::Core;
 use crate::state::conn::recovery::Recovery;
 use crate::state::conn::status::Retirement;
@@ -167,10 +167,7 @@ fn finish<'r, 'c, 'b, 'd, const ID: u8>(
     stores: channel::Stores<'r, 'c, 'b, 'd>,
 ) -> channel::Freed {
     recovery.reset();
-    let mut freed = channel::Freed::Available;
-    routes.for_each(|chan, topo| {
-        freed = freed.merge(chan.change(topo, stores, change::Event::TransportEnded { cause }));
-    });
+    let freed = routes.transport_ended(cause, stores);
     routes.sweep();
     freed
 }

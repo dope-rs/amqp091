@@ -139,6 +139,9 @@ pub enum Config {
         control_frames: u32,
         control_bytes: u32,
     },
+    AuthenticationNul {
+        offset: num::NonZero<usize>,
+    },
 }
 
 const _: () = assert!(mem::size_of::<Config>() == 6 * mem::size_of::<usize>());

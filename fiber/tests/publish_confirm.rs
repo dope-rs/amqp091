@@ -8,7 +8,6 @@ use crate::common::amqp::wire::Method;
 use crate::common::client::{check_publish, confirm_ack, confirm_select};
 pub mod common;
 
-use std::sync::mpsc;
 use std::time::Duration;
 
 use dope_amqp091::adapter::publish;
@@ -23,10 +22,6 @@ use crate::common::publish::{TUNE, with_client, with_config};
 
 #[test]
 fn rejects_plain_after_select() {
-    use dope::core::platform::wake;
-
-    let (selected, signal) = wake::Ends::blocking().expect("select observation").split();
-    let (release, proceed) = wake::Ends::blocking().expect("select reply gate").split();
     TcpScript::with(
         move |stream| {
             Peer::new(stream).open(TUNE).expect("handshake");
@@ -35,10 +30,6 @@ fn rejects_plain_after_select() {
                 .expect("confirm.select")
                 .check(channel, 85, 10)
                 .expect("confirm method");
-            signal.notify().expect("select observed");
-            release
-                .wait_timeout(Duration::from_secs(10))
-                .expect("select reply released");
             Method::write(stream, channel, 85, 11, &[]).expect("confirm.select-ok");
             check_publish(stream, channel, "confirmed", b"b").expect("only confirmed publish");
             confirm_ack(stream, channel, 1).expect("first confirmation");
@@ -61,10 +52,9 @@ fn rejects_plain_after_select() {
                             body: b"a",
                         }));
                         let mut select = Pinned::new(channel.confirm().select());
+                        // Both polls complete locally before this outer fiber yields.
                         assert!(poll_once(select.as_pin()).await.is_pending());
-                        common::fiber::wait(&selected).await.expect("select sent");
                         assert!(poll_once(plain.as_pin()).await.is_pending());
-                        proceed.notify().expect("allow select reply");
                         let confirms = select.await.expect("confirm.select");
                         let error = plain.await.expect_err("plain publish after confirm selection");
                         assert!(matches!(error, failure::Runtime::Local(failure::Error::Protocol(
@@ -98,14 +88,23 @@ fn rejects_plain_after_select() {
 
 #[test]
 fn keeps_partial_ack_before_later_publish() {
-    use dope::core::platform::wake;
+    use dope_amqp091::message::{ack, field::Table};
+    use dope_amqp091_fiber::channel::basic;
 
     for short_prefix in [true, false] {
-        let (suffix, complete) = wake::Ends::blocking().expect("ACK suffix gate").split();
         TcpScript::with(
             move |stream| {
                 Peer::new(stream).open(TUNE).expect("handshake");
                 let channel = common::basic::returned::open_channel(stream).expect("channel");
+                common::cancel::check_client_consume(
+                    &Method::read(stream).expect("receipt consumer"), "receipt",
+                ).expect("consumer tag");
+                let tag = common::cancel::consume_ok_arguments("receipt").expect("consumer tag");
+                Method::write(stream, channel, 60, 21, &tag).expect("consume-ok");
+                stream.write_all(
+                    &common::cancel::delivery_frames_with_tag(channel, "receipt", 1)
+                        .expect("delivery fixture"),
+                ).expect("receipt delivery");
                 confirm_select(stream, channel).expect("confirm.select");
                 check_publish(stream, channel, "first", b"first").expect("first publish");
                 Method::read(stream)
@@ -120,11 +119,17 @@ fn keeps_partial_ack_before_later_publish() {
                     .expect("barrier reply");
                 prefix.extend_from_slice(&ack[..split]);
                 stream.write_all(&prefix).expect("barrier and partial ACK");
-                suffix
-                    .wait_timeout(Duration::from_secs(10))
-                    .expect("later publish polled");
+                // A bound prefix permits later publication under its retained watermark.
+                if !short_prefix {
+                    check_publish(stream, channel, "second", b"second").expect("second publish");
+                }
+                let receipt = Method::read(stream).expect("settlement after later publish poll");
+                receipt.check(channel, 60, 80).expect("basic.ack");
+                assert_eq!(receipt.arguments(), &[0, 0, 0, 0, 0, 0, 0, 1, 0]);
                 stream.write_all(&ack[split..]).expect("ACK suffix");
-                check_publish(stream, channel, "second", b"second").expect("second publish");
+                if short_prefix {
+                    check_publish(stream, channel, "second", b"second").expect("second publish");
+                }
                 Method::write_parts(stream, channel, 60, 120, &[&2u64.to_be_bytes(), &[0]])
                     .expect("second publish NACK");
                 common::basic::returned::close_connection(stream).expect("connection close");
@@ -138,6 +143,17 @@ fn keeps_partial_ack_before_later_publish() {
                         rt.block_on(dope_fiber::fiber!('_ => async move {
                             let ready = conn.observe().ready().await.expect("ready");
                             let channel = conn.channels().open(1).await.expect("channel");
+                            let arguments = Table::new();
+                            let mut consumer = channel.basic().consume(basic::Consume {
+                                queue: "q",
+                                consumer_tag: "receipt",
+                                no_local: false,
+                                ack: ack::Manual,
+                                exclusive: false,
+                                arguments: &arguments,
+                            }).await.expect("receipt consumer");
+                            let receipt = consumer.recv().await.expect("consumer active")
+                                .expect("receipt delivery");
                             let confirms = channel.confirm().select().await.expect("confirm.select");
                             let props = Properties::default();
                             let mut first = Pinned::new(confirms.publish(
@@ -149,7 +165,7 @@ fn keeps_partial_ack_before_later_publish() {
                                 common::client::channel::request("", "second", &props, b"second"),
                             ));
                             assert!(poll_once(second.as_pin()).await.is_pending());
-                            complete.notify().expect("complete earlier ACK");
+                            receipt.settle(ack::Disposition::Ack).await.expect("receipt ACK");
                             let first = first.await.expect("first confirmation");
                             let second = second.await.expect("second confirmation");
                             conn.control().close(ready, 200, "done").await.expect("close");
@@ -351,9 +367,6 @@ fn keeps_first_settlement() {
 #[test]
 fn stale_drop_keeps_current() {
     for poll_old in [false, true] {
-        let (sent, seen) = mpsc::channel();
-        let (dropped, drop_rx) = mpsc::channel();
-        let (done_tx, done_rx) = mpsc::channel();
         AcceptScript::with(
         move |acceptor| {
             let mut first = acceptor.accept().expect("first connection");
@@ -399,10 +412,14 @@ fn stale_drop_keeps_current() {
             confirm_select(&mut second, 1).expect("AMQP fixture");
 
             check_publish(&mut second, 1, "current", b"new").expect("AMQP fixture");
-            sent.send(()).expect("publish current observation");
-            drop_rx.recv().expect("stale confirm future drop");
+            Method::read(&mut second).expect("current publication barrier")
+                .check(1, 50, 30).expect("queue.purge");
+            Method::write(&mut second, 1, 50, 31, &[0; 4]).expect("current publication observed");
+            Method::read(&mut second).expect("stale drop barrier")
+                .check(1, 50, 30).expect("queue.purge");
             confirm_ack(&mut second, 1, 1).expect("AMQP fixture");
-            done_rx.recv().expect("current confirmation");
+            Method::write(&mut second, 1, 50, 31, &[0; 4]).expect("stale drop observed");
+            assert_eq!(second.read(&mut [0]).expect("confirm probe teardown"), 0);
         },
         |broker| {
             let chan = config::Channel::default().confirms(1);
@@ -447,9 +464,7 @@ fn stale_drop_keeps_current() {
                     body: b"new",
                 }));
                 assert!(poll_once(current.as_pin()).await.is_pending());
-                loop {
-                    match seen.try_recv() { Ok(()) => break, Err(mpsc::TryRecvError::Empty) => Yield::new().await, outcome => outcome.expect("broker ended before observing current publish"), }
-                }
+                channel.queue().purge("current").await.expect("current publication sent");
                 if poll_old {
                     assert!(matches!(
                         poll_once(stale.as_pin()).await,
@@ -458,10 +473,9 @@ fn stale_drop_keeps_current() {
                 }
                 let (_, alloc) = Tracker::usage(|| drop(stale));
                 assert_eq!(alloc, (0, 0));
-                dropped.send(()).expect("publish stale confirm drop");
+                channel.queue().purge("dropped").await.expect("stale confirm dropped");
                 let outcome = current.await.expect("current confirm");
                 assert_eq!(outcome, protocol::Confirmation::Ack);
-                done_tx.send(()).expect("publish current confirmation");
                 })).is_ok(), "AMQP fiber must complete");
                 }, recover,
                 |result| {
@@ -480,7 +494,6 @@ fn stale_drop_keeps_current() {
 #[test]
 fn rejects_single_tag() {
     for tag in [0, 2] {
-        let (done, wait) = mpsc::channel();
         TcpScript::with(
             move |stream| {
                 Peer::new(stream).open(TUNE).expect("AMQP broker handshake");
@@ -492,8 +505,7 @@ fn rejects_single_tag() {
                 confirm_select(stream, 1).expect("AMQP fixture");
                 check_publish(stream, 1, "first", b"first").expect("AMQP fixture");
                 confirm_ack(stream, 1, tag).expect("invalid single ACK");
-                wait.recv_timeout(Duration::from_secs(10))
-                    .expect("invalid single confirmation observation");
+                while stream.read(&mut [0; 256]).expect("invalid confirmation teardown") != 0 {}
             },
             |broker| {
                 with_client(
@@ -523,7 +535,6 @@ fn rejects_single_tag() {
                                     multiple: false,
                                 }) if *actual == tag
                             ));
-                            done.send(()).expect("publish invalid confirmation observation");
                         }))
                         .expect("AMQP fiber must complete");
                     },

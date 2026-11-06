@@ -2,7 +2,7 @@ use std::{marker, mem};
 
 use o3::buffer::resident::{Budget, Exact};
 use o3::mem::rc;
-use schema::{Proof as _, Stored as _, Suffixed as _};
+use schema::{Proof as _, Suffixed as _};
 
 use crate::failure::wire::Allocation;
 use crate::failure::{self};
@@ -11,8 +11,8 @@ use crate::protocol::wire::{self, schema};
 
 /// One exact, driver-accounted ownership island for a replayable method.
 pub(crate) struct Bytes<'d, L: schema::Layout> {
-    pub(in crate::protocol) bytes: Exact<'d>,
-    proof: <L::Proof as schema::Proof>::Retained,
+    bytes: Exact<'d>,
+    proof: L::Proof,
     layout: marker::PhantomData<fn() -> L>,
 }
 
@@ -48,14 +48,67 @@ impl<'a, L: schema::Layout> Patch<'a, L> {
 }
 
 impl<'d, L: schema::Layout> Bytes<'d, L> {
+    pub(in crate::protocol) fn as_slice(&self) -> &[u8] {
+        self.bytes.as_slice()
+    }
+
     pub(crate) fn capture(
         budget: &Budget<'d>,
         encoded: wire::Encoded<'_, L>,
     ) -> Result<Self, failure::Error> {
-        let proof = encoded.proof().retained();
+        let proof = encoded.proof();
         let encoded = encoded.as_slice();
         let bytes = Exact::try_copy(budget, encoded)
             .map_err(|error| failure::Error::resident(Allocation::Topology, error))?;
+        Ok(Self {
+            bytes,
+            proof,
+            layout: marker::PhantomData,
+        })
+    }
+
+    fn capture_patched(
+        budget: &Budget<'d>,
+        encoded: wire::Encoded<'_, L>,
+        patch: Patch<'_, L>,
+    ) -> Result<Self, failure::Error> {
+        let source = encoded.as_slice();
+        let mut proof = encoded.proof();
+        let lengths = patch
+            .fields
+            .map(|value| [value.map_or(0, short::Short::len)]);
+        let mut slices = [&[][..]; schema::MAX_FIELDS * 3 + 1];
+        let mut copied = 0;
+        let mut shift = 0i64;
+        // Binding and Consume place at most three short fields before the
+        // table; their patched prefixes and suffix stay within 771 bytes.
+        for ((index, offset), value) in proof
+            .offsets_mut()
+            .iter_mut()
+            .enumerate()
+            .zip(&patch.fields)
+        {
+            let original = *offset;
+            *offset = schema::Offset::new((i64::from(original.get()) + shift) as u32);
+            let Some(value) = value else {
+                continue;
+            };
+            let range = Range::new(source, original);
+            // SAFETY: admitted fields are ordered and disjoint, so the prior
+            // patched end is no later than this prefix in the same source.
+            slices[index * 3] = unsafe { source.get_unchecked(copied..range.prefix()) };
+            slices[index * 3 + 1] = &lengths[index];
+            slices[index * 3 + 2] = value.value().as_bytes();
+            copied = range.end();
+            shift += i64::from(value.len()) - i64::from(range.len);
+        }
+        // SAFETY: copied is zero or an admitted field's end in this source.
+        slices[schema::MAX_FIELDS * 3] = unsafe { source.get_unchecked(copied..) };
+        let bytes = Exact::try_slices(budget, slices)
+            .map_err(|error| failure::Error::resident(Allocation::Topology, error))?;
+        // Successful exact allocation admits the complete replacement extent;
+        // every shifted field and suffix remains inside that same owner.
+        proof.shift_suffix(shift);
         Ok(Self {
             bytes,
             proof,
@@ -110,14 +163,41 @@ impl<'d, L: schema::Layout> Bytes<'d, L> {
     }
 }
 
+impl<'d> Bytes<'d, schema::queues::Binding> {
+    pub(crate) fn capture_with(
+        budget: &Budget<'d>,
+        encoded: wire::Encoded<'_, schema::queues::Binding>,
+        patch: Patch<'_, schema::queues::Binding>,
+    ) -> Result<Self, failure::Error> {
+        Self::capture_patched(budget, encoded, patch)
+    }
+}
+
+impl<'d> Bytes<'d, schema::consume::Layout> {
+    pub(crate) fn capture_with(
+        budget: &Budget<'d>,
+        encoded: wire::Encoded<'_, schema::consume::Layout>,
+        patch: Patch<'_, schema::consume::Layout>,
+    ) -> Result<Self, failure::Error> {
+        Self::capture_patched(budget, encoded, patch)
+    }
+}
+
 impl<'d, L: schema::Layout> Bytes<'d, L>
 where
-    <L::Proof as schema::Proof>::Retained: schema::Suffixed,
+    L::Proof: schema::Suffixed,
 {
     pub(crate) fn suffix(&self) -> &[u8] {
         let start = self.proof.start().get() as usize;
         // SAFETY: capture copied the validated owner and its suffix proof together.
         unsafe { self.bytes.as_slice().get_unchecked(start..) }
+    }
+}
+
+impl Bytes<'_, schema::queues::Declaration> {
+    pub(crate) fn name(&self) -> short::Name<'_> {
+        // SAFETY: capture retains the sealed declaration's Name field unchanged.
+        unsafe { short::raw::name(self.field(schema::queues::Declaration::QUEUE)) }
     }
 }
 
@@ -128,7 +208,7 @@ pub(crate) struct Field<'d> {
 impl<'d> Field<'d> {
     pub(crate) fn capture(
         budget: &Budget<'d>,
-        field: short::Short<'_>,
+        field: short::Name<'_>,
     ) -> Result<Self, failure::Error> {
         let len = field.len();
         let bytes = Exact::try_slices(budget, [&[len], field.value().as_bytes()])
@@ -136,11 +216,11 @@ impl<'d> Field<'d> {
         Ok(Self { bytes })
     }
 
-    pub(crate) fn value(&self) -> short::Short<'_> {
+    pub(crate) fn value(&self) -> short::Name<'_> {
         let range = Range::new(self.bytes.as_slice(), schema::Offset::default());
         let bytes = range.as_slice();
-        // SAFETY: Field copied these exact value bytes from a live Short.
-        unsafe { short::raw::Encoded::new(bytes) }.bind()
+        // SAFETY: Field copied these exact value bytes from a live Name.
+        unsafe { short::raw::name(short::raw::Encoded::new(bytes).bind()) }
     }
 }
 

@@ -2,16 +2,13 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use dope::core::driver::life::recovery;
-use dope::core::platform::wake;
 use dope_amqp091::config;
 use dope_amqp091::message::ack;
 use dope_amqp091::message::field::Table;
 use dope_amqp091_fiber::channel::basic;
-use dope_fiber::task::time::sleep::TimerExt as _;
 
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::Method;
-use crate::common::fiber::wait;
 
 pub mod common;
 use dope_test::harness::peer::AcceptScript;
@@ -21,8 +18,6 @@ use crate::common::client::check_no_frame;
 
 #[test]
 fn is_terminal() {
-    let (observed, notify) = wake::Ends::blocking().expect("broker observations").split();
-    let (terminal, release) = wake::Ends::blocking().expect("cancel barrier").split();
     const TAG: &str = "server-root";
 
     AcceptScript::with(
@@ -61,9 +56,12 @@ fn is_terminal() {
                 .write_all(&delivery_frames(1, TAG).expect("AMQP fixture"))
                 .expect("late basic.deliver");
 
-            terminal
-                .wait_timeout(Duration::from_secs(10))
-                .expect("consumer terminal");
+            Method::read(&mut first)
+                .expect("terminal consumer purge")
+                .check(1, 50, 30)
+                .expect("terminal consumer route");
+            Method::write(&mut first, 1, 50, 31, &0u32.to_be_bytes())
+                .expect("terminal consumer reply");
             check_no_frame(&first, "server cancel reply or duplicate client cancel")
                 .expect("AMQP fixture");
             drop(first);
@@ -87,8 +85,12 @@ fn is_terminal() {
                     &Method::try_encode(1, 20, 11, &[0, 0, 0, 0]).expect("AMQP frame fixture"),
                 )
                 .expect("recovered channel.open-ok");
-            check_no_frame(&second, "canceled consumer replay").expect("AMQP fixture");
-            notify.notify().expect("replay observation");
+            Method::read(&mut second)
+                .expect("post-replay purge")
+                .check(1, 50, 30)
+                .expect("canceled consumer was not replayed");
+            Method::write(&mut second, 1, 50, 31, &0u32.to_be_bytes())
+                .expect("post-replay reply");
             Method::read(&mut second)
                 .expect("AMQP method")
                 .check(1, 60, 20)
@@ -103,7 +105,12 @@ fn is_terminal() {
             second
                 .write_all(&Method::try_encode(1, 60, 31, &ok).expect("AMQP frame fixture"))
                 .expect("replacement basic.cancel-ok");
-            notify.notify().expect("replacement cancel-ok written");
+            Method::write(&mut second, 0, 10, 50, &[0, 200, 0, 0, 0, 0, 0])
+                .expect("retirement after replacement cancel-ok");
+            Method::read(&mut second)
+                .expect("connection.close-ok")
+                .check(0, 10, 51)
+                .expect("replacement cancellation processed");
         },
         move |broker| {
             let chan = config::Channel::default()
@@ -125,11 +132,9 @@ fn is_terminal() {
                 cfg,
                 |rt| {
                     let conn = rt.connection();
-                    let timer = rt.timer();
                     assert!(
                         rt.block_on(dope_fiber::fiber!('_ => async move {
                             let target = conn.observe().ready().await.expect("first ready");
-                            let epoch = conn.observe().read(|view| view.generation()).await;
                             let channel = conn
                                 .channels().open_in(target, 1)
                                 .await
@@ -151,15 +156,10 @@ fn is_terminal() {
                             let canceled = consumer.recv().await.expect("server cancellation");
                             assert!(canceled.is_none());
                             drop(consumer);
-                            release.notify().expect("consumer terminal");
-
-                            while conn.observe().read(|view| view.generation()).await == epoch {
-                                timer
-                                    .sleep(Duration::from_millis(10))
-                                    .expect("generation wait")
-                                    .await;
-                            }
-                            wait(&observed).await.expect("replay observation wait");
+                            channel.queue().purge("terminal").await.expect("terminal consumer reply");
+                            conn.observe().retired(target.epoch()).await.expect("first retirement");
+                            let recovered = conn.observe().ready().await.expect("topology replay");
+                            channel.queue().purge("replayed").await.expect("no consumer replay");
                             let replacement = channel
                                 .basic()
                                 .consume(basic::Consume {
@@ -173,9 +173,7 @@ fn is_terminal() {
                                 .await
                                 .expect("replacement consumer capacity");
                             drop(replacement);
-                            wait(&observed)
-                                .await
-                                .expect("replacement cancel-ok written");
+                            conn.observe().retired(recovered.epoch()).await.expect("replacement cancellation retired");
                         }))
                         .is_ok(),
                         "AMQP fiber must complete"

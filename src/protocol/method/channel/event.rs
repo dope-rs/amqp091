@@ -9,7 +9,6 @@ use crate::protocol::wire::text::fields;
 pub(crate) enum Event<'input, 'd> {
     Open(channel::OpenOk),
     Flow(channel::Flow),
-    FlowOk(channel::FlowOk),
     Close(channel::Close<'d>),
     CloseOk(channel::CloseOk),
     ExchangeDeclare(exchange::DeclareOk),
@@ -49,9 +48,7 @@ impl<'input, 'd> Event<'input, 'd> {
             method::Kind::Flow => fields::Args::new(args)
                 .decode(channel::Flow::read)
                 .map(Self::Flow),
-            method::Kind::FlowOk => fields::Args::new(args)
-                .decode(channel::FlowOk::read)
-                .map(Self::FlowOk),
+            method::Kind::FlowOk => unreachable!("flowok"),
             method::Kind::Close => channel::Close::retain(args, budget).map(Self::Close),
             method::Kind::CloseOk => fields::Args::new(args)
                 .empty()

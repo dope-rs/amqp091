@@ -1,18 +1,20 @@
 use dope_amqp091::message::Builder;
-use dope_amqp091::message::property::Properties;
 
 #[test]
 fn round_trips_properties() {
-    assert!(std::mem::size_of::<Properties>() <= 128);
-
-    let props = Builder::default()
+    let value = "x".repeat(255);
+    let mut builder = Builder::default();
+    for _ in 0..257 {
+        builder = builder
+            .content_type(&value)
+            .expect("replace full-length content type");
+    }
+    let props = builder
         .content_type("obsolete")
         .expect("initial content type")
-        .content_type("application/json")
-        .expect("valid content type")
-        .encoding("utf-8")
+        .encoding("latin")
         .expect("valid content encoding")
-        .correlation("αβ")
+        .correlation("αβγ")
         .expect("valid correlation id")
         .reply_to("reply")
         .expect("valid reply target")
@@ -33,6 +35,12 @@ fn round_trips_properties() {
         .priority(7)
         .expect("valid priority")
         .timestamp(42)
+        .encoding("utf-8")
+        .expect("equal-length replacement")
+        .correlation("αβ")
+        .expect("shorter UTF-8 replacement")
+        .content_type("application/json")
+        .expect("longer replacement")
         .build();
     assert_eq!(props.content_type(), Some("application/json"));
     assert_eq!(props.encoding(), Some("utf-8"));

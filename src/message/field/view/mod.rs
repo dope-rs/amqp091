@@ -5,7 +5,7 @@ use o3::depot::array::copy;
 
 use crate::failure;
 use crate::failure::wire::field::Fault;
-use crate::failure::wire::{self, Encoding};
+use crate::message::field::MAX_DEPTH;
 use crate::message::field::view::tag::Tag;
 use crate::message::{field, property};
 use crate::protocol::wire::text::short;
@@ -14,7 +14,6 @@ use crate::protocol::wire::{Put, reader};
 mod raw;
 mod tag;
 
-const MAX_DEPTH: usize = 64;
 const MAX_NODES: usize = 65_536;
 
 /// A suffix of an immutable field body admitted through TableSpan. Only table
@@ -319,21 +318,6 @@ impl<'a> Frame<'a> {
         Ok(bytes)
     }
 
-    fn try_short(&mut self) -> Result<&'a str, failure::Error> {
-        let offset = self.offset();
-        let value = self
-            .reader
-            .short()
-            .map_err(|error| failure::Error::Field(Fault::Read(reader::Fault { offset, error })))?;
-        if let Some(at) = value.bytes().position(|byte| byte == 0) {
-            return Err(failure::Error::Protocol(wire::Fault::TextNul {
-                kind: Encoding::Short,
-                offset: offset + 1 + at,
-            }));
-        }
-        Ok(value)
-    }
-
     fn try_long(&mut self) -> Result<&'a [u8], failure::Error> {
         let offset = self.offset();
         self.reader
@@ -343,7 +327,8 @@ impl<'a> Frame<'a> {
 
     fn try_next(&mut self) -> Result<Option<Nested<'a>>, failure::Error> {
         if matches!(self.kind, Container::Table) {
-            self.try_short()?;
+            let offset = self.offset();
+            field::try_short(&mut self.reader, offset)?;
         }
         try_value(self)
     }

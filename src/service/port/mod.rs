@@ -188,7 +188,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Port<'r, 'c, 'b, 'd, ID> {
 const _: () = {
     assert!(
         std::mem::size_of::<Port<'static, 'static, 'static, 'static>>()
-            == 167 * std::mem::size_of::<usize>()
+            == 166 * std::mem::size_of::<usize>()
     );
     assert!(
         std::mem::align_of::<Port<'static, 'static, 'static, 'static>>()

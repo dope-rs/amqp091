@@ -16,20 +16,24 @@ use dope::runtime::executor;
 use dope::runtime::executor::session;
 use dope_amqp091::config;
 use dope_amqp091::service::{Port, Spec, app};
-use dope_test::fibers;
 
 use crate::common::amqp::app::error::Error;
 use crate::common::amqp::app::{Policy, Scope, vars};
 
 /// Address and protocol configuration for one AMQP integration-test endpoint.
-pub struct Endpoint {
+pub struct Endpoint<Q = ()> {
     address: net::SocketAddr,
     config: config::Config,
+    shutdown: Q,
 }
 
 impl Endpoint {
     pub const fn new(address: net::SocketAddr, config: config::Config) -> Self {
-        Self { address, config }
+        Self {
+            address,
+            config,
+            shutdown: (),
+        }
     }
 
     pub fn from_vars(values: [Result<String, env::VarError>; 5]) -> Result<Self, vars::Error> {
@@ -54,6 +58,16 @@ impl Endpoint {
         Ok(Self::new(net::SocketAddr::new(host, port), config))
     }
 
+    pub fn shutdown<Q>(self, source: Q) -> Endpoint<Q> {
+        Endpoint {
+            address: self.address,
+            config: self.config,
+            shutdown: source,
+        }
+    }
+}
+
+impl<Q: executor::Build> Endpoint<Q> {
     pub fn tune(mut self, tune: config::Tune) -> Self {
         self.config = self.config.tune(tune);
         self
@@ -63,10 +77,10 @@ impl Endpoint {
         self,
         policy: Policy,
         run: impl for<'app, 'life, 'q, 'h, 'p, 'o, 'r, 'c, 'b, 'd> FnOnce(
-            &mut Scope<'app, 'life, 'q, 'h, 'p, 'o, 'r, 'c, 'b, 'd, 0, P>,
+            &mut Scope<'app, 'life, 'q, 'h, 'p, 'o, 'r, 'c, 'b, 'd, 0, P, Q::Shutdown>,
         ),
         recover: impl recovery::Recover,
-        finish: impl for<'owner> FnOnce(Result<(), Error<'owner, ()>>) -> Done,
+        finish: impl for<'owner> FnOnce(Result<(), Error<'owner, (), Q::Shutdown>>) -> Done,
     ) -> Done
     where
         P: settings::Profile + timing::Policy,
@@ -98,11 +112,11 @@ impl Endpoint {
         self,
         policy: Policy,
         test: impl for<'app, 'life, 'q, 'h, 'p, 'o, 'r, 'c, 'b, 'd> FnOnce(
-            &mut Scope<'app, 'life, 'q, 'h, 'p, 'o, 'r, 'c, 'b, 'd, 0, P>,
+            &mut Scope<'app, 'life, 'q, 'h, 'p, 'o, 'r, 'c, 'b, 'd, 0, P, Q::Shutdown>,
         ) -> R,
         report: impl FnMut(Reclaimed),
         recover: impl recovery::Recover,
-        finish: impl for<'owner> FnOnce(Result<R, Error<'owner, R>>) -> Done,
+        finish: impl for<'owner> FnOnce(Result<R, Error<'owner, R, Q::Shutdown>>) -> Done,
     ) -> Done
     where
         P: settings::Profile + timing::Policy,
@@ -132,7 +146,7 @@ impl Endpoint {
             Err(error) => return finish(Err(error)),
         };
         let mut creation = Attempt::new();
-        let executor = match executor::Executor::new(&mut creation, config) {
+        let executor = match self.shutdown.try_build(&mut creation, config) {
             Ok(executor) => executor,
             Err(error) => return finish(Err(Error::Executor(error))),
         };
@@ -160,7 +174,7 @@ impl Endpoint {
                                         test(&mut Scope::new(
                                             app,
                                             &port,
-                                            fibers::Harness::new(policy.deadline),
+                                            policy.deadline,
                                         ))
                                     })
                                 },

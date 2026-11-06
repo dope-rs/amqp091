@@ -9,12 +9,12 @@ pub(crate) struct Delete<'d>(bytes::Field<'d>);
 impl<'d> Delete<'d> {
     pub(crate) fn capture(
         budget: &Budget<'d>,
-        name: short::Short<'_>,
+        name: short::Name<'_>,
     ) -> Result<Self, failure::Error> {
         Ok(Self(bytes::Field::capture(budget, name)?))
     }
 
     pub(in crate::protocol::topology) fn name(&self) -> short::Short<'_> {
-        self.0.value()
+        self.0.value().into()
     }
 }

@@ -55,25 +55,13 @@ impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
         }
     }
 
-    pub(crate) fn reopen(&mut self) {
-        for index in 0..self.registry.slots.capacity() {
-            let Some(mut entry) = self.registry.slots.entry_at(index) else {
-                continue;
-            };
-            let slot = entry.get_mut();
-            slot.waker.clear();
-            if slot.status == Status::Active {
-                slot.status = Status::Recovering;
-            }
-        }
-    }
-
     pub(crate) fn retire<'r, 'c>(
         &mut self,
         key: consumer::Key,
         store: &'r Store<'c, 'b, 'd>,
+        replay: impl FnOnce() -> bool,
     ) -> Retire {
-        let Some((slot, freed)) = self.registry.begin_retire(key, store) else {
+        let Some((slot, freed)) = self.registry.begin_retire(key, store, replay) else {
             return Retire::Missing;
         };
         slot.waker.clear();

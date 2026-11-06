@@ -33,7 +33,7 @@ impl Policy {
     }
 
     /// Retires transports after the supplied maximum age.
-    pub(crate) const fn retire_after(mut self, maximum: Positive) -> Self {
+    pub const fn retire_after(mut self, maximum: Positive) -> Self {
         self.transport_max_age = Some(maximum);
         self
     }

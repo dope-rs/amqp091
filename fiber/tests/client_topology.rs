@@ -6,24 +6,19 @@ use dope_amqp091::failure::wire::Fault;
 use dope_amqp091::message::field::Table;
 use dope_amqp091::{config, failure};
 use dope_amqp091_fiber::channel::{exchange, queue};
-use dope_fiber::abi::Join;
+use dope_fiber::abi::race::{Either, Race};
+use dope_fiber::abi::{Join, Task};
 
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::{Method, put_short};
-use crate::common::fiber::{Pinned, poll_once};
 pub mod common;
 
-use std::sync::mpsc;
-
-use dope_test::fibers::Yield;
 use dope_test::harness::peer::{AcceptScript, TcpScript};
 
 use crate::common::client::*;
 
 #[test]
 fn commits_dropped_ops() {
-    let (seen, events) = mpsc::channel();
-    let (next, steps) = mpsc::channel();
     AcceptScript::with(
         move |acceptor| {
             let mut first = acceptor.accept().expect("first connection");
@@ -39,7 +34,8 @@ fn commits_dropped_ops() {
 
             Method::read(&mut first)
                 .expect("AMQP method")
-                .check(1, 20, 10).expect("AMQP method route");
+                .check(1, 20, 10)
+                .expect("AMQP method route");
             first
                 .write_all(
                     &Method::try_encode(1, 20, 11, &[0, 0, 0, 0]).expect("AMQP frame fixture"),
@@ -48,18 +44,35 @@ fn commits_dropped_ops() {
 
             Method::read(&mut first)
                 .expect("AMQP method")
-                .check(1, 40, 10).expect("AMQP method route");
-            seen.send(()).expect("publish exchange request");
-            steps.recv().expect("dropped exchange request");
+                .check(1, 40, 10)
+                .expect("AMQP method route");
+            Method::read(&mut first)
+                .expect("exchange request fence")
+                .check(2, 20, 10)
+                .expect("channel.open");
+            Method::write(&mut first, 2, 20, 11, &[0; 4]).expect("channel.open-ok");
+            Method::read(&mut first)
+                .expect("dropped exchange fence")
+                .check(2, 50, 30)
+                .expect("queue.purge");
             first
                 .write_all(&Method::try_encode(1, 40, 11, &[]).expect("AMQP frame fixture"))
                 .expect("exchange.declare-ok");
+            Method::write(&mut first, 2, 50, 31, &[0; 4]).expect("queue.purge-ok");
 
             Method::read(&mut first)
                 .expect("AMQP method")
-                .check(1, 50, 10).expect("AMQP method route");
-            assert!(seen.send(()).is_ok(), "publish queue request");
-            assert!(steps.recv().is_ok(), "dropped queue request");
+                .check(1, 50, 10)
+                .expect("AMQP method route");
+            Method::read(&mut first)
+                .expect("queue request fence")
+                .check(2, 50, 30)
+                .expect("queue.purge");
+            Method::write(&mut first, 2, 50, 31, &[0; 4]).expect("queue.purge-ok");
+            Method::read(&mut first)
+                .expect("dropped queue fence")
+                .check(2, 50, 30)
+                .expect("queue.purge");
             let mut queue_ok = Vec::new();
             put_short(&mut queue_ok, b"q").expect("AMQP short string");
             queue_ok.extend_from_slice(&0u32.to_be_bytes());
@@ -67,32 +80,33 @@ fn commits_dropped_ops() {
             first
                 .write_all(&Method::try_encode(1, 50, 11, &queue_ok).expect("AMQP frame fixture"))
                 .expect("queue.declare-ok");
-            first
-                .write_all(
-                    &Method::try_encode(0, 10, 60, &[5, b'q', b'u', b'e', b'u', b'e'])
-                        .expect("AMQP frame fixture"),
-                )
-                .expect("queue response barrier");
+            Method::write(&mut first, 2, 50, 31, &[0; 4]).expect("queue.purge-ok");
 
             Method::read(&mut first)
                 .expect("AMQP method")
-                .check(1, 50, 20).expect("AMQP method route");
+                .check(1, 50, 20)
+                .expect("AMQP method route");
             first
                 .write_all(&Method::try_encode(1, 50, 21, &[]).expect("AMQP frame fixture"))
                 .expect("queue.bind-ok");
 
             Method::read(&mut first)
                 .expect("AMQP method")
-                .check(1, 50, 50).expect("AMQP method route");
-            seen.send(()).expect("publish unbind request");
-            steps.recv().expect("dropped unbind request");
+                .check(1, 50, 50)
+                .expect("AMQP method route");
+            Method::read(&mut first)
+                .expect("unbind request fence")
+                .check(2, 50, 30)
+                .expect("queue.purge");
+            Method::write(&mut first, 2, 50, 31, &[0; 4]).expect("queue.purge-ok");
+            Method::read(&mut first)
+                .expect("dropped unbind fence")
+                .check(2, 20, 40)
+                .expect("channel.close");
             first
                 .write_all(&Method::try_encode(1, 50, 51, &[]).expect("AMQP frame fixture"))
                 .expect("queue.unbind-ok");
-            first
-                .write_all(&Method::try_encode(0, 10, 61, &[]).expect("AMQP frame fixture"))
-                .expect("unbind response barrier");
-            steps.recv().expect("release first topology connection");
+            Method::write(&mut first, 2, 20, 41, &[]).expect("channel.close-ok");
             drop(first);
 
             let mut second = acceptor.accept().expect("recovered connection");
@@ -108,7 +122,8 @@ fn commits_dropped_ops() {
 
             Method::read(&mut second)
                 .expect("AMQP method")
-                .check(1, 20, 10).expect("AMQP method route");
+                .check(1, 20, 10)
+                .expect("AMQP method route");
             second
                 .write_all(
                     &Method::try_encode(1, 20, 11, &[0, 0, 0, 0]).expect("AMQP frame fixture"),
@@ -116,18 +131,23 @@ fn commits_dropped_ops() {
                 .expect("recovered channel.open-ok");
             Method::read(&mut second)
                 .expect("AMQP method")
-                .check(1, 40, 10).expect("AMQP method route");
+                .check(1, 40, 10)
+                .expect("AMQP method route");
             second
                 .write_all(&Method::try_encode(1, 40, 11, &[]).expect("AMQP frame fixture"))
                 .expect("recovered exchange.declare-ok");
             Method::read(&mut second)
                 .expect("AMQP method")
-                .check(1, 50, 10).expect("AMQP method route");
+                .check(1, 50, 10)
+                .expect("AMQP method route");
             second
                 .write_all(&Method::try_encode(1, 50, 11, &queue_ok).expect("AMQP frame fixture"))
                 .expect("recovered queue.declare-ok");
-            check_no_frame(&second, "removed queue binding replay").expect("AMQP fixture");
-            seen.send(()).expect("publish topology replay observation");
+            Method::read(&mut second)
+                .expect("connection close")
+                .check(0, 10, 50)
+                .expect("no removed binding before close");
+            Method::write(&mut second, 0, 10, 51, &[]).expect("connection.close-ok");
         },
         |broker| {
             with(
@@ -137,59 +157,36 @@ fn commits_dropped_ops() {
                     let conn = rt.connection();
                     assert!(rt.block_on(dope_fiber::fiber!('_ => async move {
                         let target = conn.observe().ready().await.expect("first ready");
-                        let epoch = conn.observe().read(|view| view.generation()).await;
                         let channel = conn
                             .channels().open_in(target, 1)
                             .await
                             .expect("first channel open");
                         let args = Table::new();
 
-                        let mut op = Pinned::new(channel.exchange().declare(
-                            exchange::Declare {
+                        let Either::Right(Ok(barrier)) = Race::new(
+                            channel.exchange().declare(exchange::Declare {
                                 exchange: "x",
                                 kind: "direct",
                                 durable: false,
                                 auto_delete: false,
                                 internal: false,
                                 arguments: &args,
-                            },
-                        ));
-                        assert!(poll_once(op.as_pin()).await.is_pending());
-                        loop {
-                            match events.try_recv() {
-                                Ok(()) => break,
-                                Err(mpsc::TryRecvError::Empty) => {
-                                    assert!(poll_once(op.as_pin()).await.is_pending());
-                                    Yield::new().await;
-                                }
-                                disconnected => { disconnected.expect("broker ended before exchange request observation"); }
-                            }
-                        }
-                        drop(op);
-                        next.send(()).expect("publish dropped exchange request");
+                            }),
+                            conn.channels().open_in(target, 2),
+                        ).await else { panic!("exchange completed before drop"); };
+                        barrier.queue().purge("q").await.expect("dropped exchange committed");
 
-                        let mut op = Pinned::new(channel.queue().declare(queue::Declare {
-                            queue: "q",
-                            durable: false,
-                            exclusive: false,
-                            auto_delete: false,
-                            arguments: &args,
-                        }));
-                        loop {
-                            match events.try_recv() {
-                                Ok(()) => break,
-                                Err(mpsc::TryRecvError::Empty) => {
-                                    assert!(poll_once(op.as_pin()).await.is_pending());
-                                    Yield::new().await;
-                                }
-                                disconnected => { disconnected.expect("broker ended before queue request observation"); }
-                            }
-                        }
-                        drop(op);
-                        assert!(next.send(()).is_ok(), "publish dropped queue request");
-                        while !conn.observe().read(|view| view.is_blocked()).await {
-                            Yield::new().await;
-                        }
+                        assert!(matches!(Race::new(
+                            channel.queue().declare(queue::Declare {
+                                queue: "q",
+                                durable: false,
+                                exclusive: false,
+                                auto_delete: false,
+                                arguments: &args,
+                            }),
+                            barrier.queue().purge("q"),
+                        ).await, Either::Right(Ok(_))));
+                        barrier.queue().purge("q").await.expect("dropped queue committed");
 
                         channel
                             .queue()
@@ -197,33 +194,17 @@ fn commits_dropped_ops() {
                             .await
                             .expect("queue bind");
 
-                        let mut op = Pinned::new(channel.queue().unbind("q", "x", "rk", &args));
-                        assert!(poll_once(op.as_pin()).await.is_pending());
-                        loop {
-                            match events.try_recv() {
-                                Ok(()) => break,
-                                Err(mpsc::TryRecvError::Empty) => {
-                                    assert!(poll_once(op.as_pin()).await.is_pending());
-                                    Yield::new().await;
-                                }
-                                disconnected => { disconnected.expect("broker ended before unbind request observation"); }
-                            }
-                        }
-                        drop(op);
-                        next.send(()).expect("publish dropped unbind request");
-                        while conn.observe().read(|view| view.is_blocked()).await {
-                            Yield::new().await;
-                        }
-                        next.send(()).expect("release first topology connection");
-
-                        while conn.observe().read(|view| view.generation()).await == epoch {
-                            Yield::new().await;
-                        }
-                        loop {
-                            match events.try_recv() { Ok(()) => break, Err(mpsc::TryRecvError::Empty) => Yield::new().await, outcome => outcome.expect("broker ended before topology replay observation"), }
-                        }
+                        assert!(matches!(Race::new(
+                            channel.queue().unbind("q", "x", "rk", &args),
+                            barrier.queue().purge("q"),
+                        ).await, Either::Right(Ok(_))));
+                        barrier.close(200, "done").await.expect("dropped unbind committed");
+                        conn.observe().retired(target.epoch()).await.expect("first retirement");
+                        let ready = conn.observe().ready().await.expect("complete topology replay");
+                        conn.control().close(ready, 200, "done").await.expect("close");
                     })).is_ok(), "AMQP fiber must complete");
-                }, recover,
+                },
+                recover,
                 |result| {
                     result
                         .as_ref()
@@ -239,7 +220,6 @@ fn commits_dropped_ops() {
 
 #[test]
 fn rejects_deleted_binding() {
-    let (seen, events) = mpsc::channel();
     TcpScript::with(
         move |stream| {
             Peer::new(stream).open(TUNE).expect("AMQP broker handshake");
@@ -258,7 +238,6 @@ fn rejects_deleted_binding() {
             Method::read(stream)
                 .expect("old generation bind")
                 .check(1, 50, 20).expect("AMQP method route");
-            seen.send(()).expect("publish old generation bind");
             Method::read(stream)
                 .expect("concurrent delete")
                 .check(2, 50, 40).expect("AMQP method route");
@@ -293,22 +272,15 @@ fn rejects_deleted_binding() {
                         };
                         channel.queue().declare(queue::Declare { ..options })
                             .await.expect("original queue");
-                        let mut bind = Pinned::new(channel.queue().bind("q", "amq.direct", "rk", &args));
-                        loop {
-                            match events.try_recv() {
-                                Ok(()) => break,
-                                Err(mpsc::TryRecvError::Empty) => {
-                                    assert!(poll_once(bind.as_pin()).await.is_pending());
-                                    Yield::new().await;
-                                }
-                                result => { result.expect("broker ended before old generation bind"); }
-                            }
-                        }
-                        second.queue().delete("q", false, false)
-                            .await.expect("delete original queue");
+                        let mut bind = Box::pin(Task::new(channel.queue().bind("q", "amq.direct", "rk", &args)));
+                        let Either::Right(deleted) = Race::new(
+                            bind.as_mut(),
+                            second.queue().delete("q", false, false),
+                        ).await else { panic!("binding completed before deletion"); };
+                        deleted.expect("delete original queue");
                         second.queue().declare(options)
                             .await.expect("reuse queue slot");
-                        let bound = bind.await;
+                        let bound = bind.as_mut().await;
                         assert!(matches!(bound, Err(ref error) if matches!(
                             error.error(), failure::Error::Protocol(Fault::TopologyQueue { .. })
                         )), "stale binding must preserve its generation error");
@@ -326,7 +298,6 @@ fn rejects_deleted_binding() {
 #[test]
 fn rejects_deleted_declare() {
     for retain in [true, false] {
-        let (seen, events) = mpsc::channel();
         TcpScript::with(
             move |stream| {
                 Peer::new(stream).open(TUNE).expect("AMQP broker handshake");
@@ -346,7 +317,6 @@ fn rejects_deleted_declare() {
                 let delete = Method::read(stream).expect("concurrent queue delete");
                 delete.check(2, 50, 40).expect("AMQP method route");
                 assert_eq!(queue_name(&delete).expect("queue name"), "q");
-                seen.send(()).expect("publish queue delete");
                 let declare = Method::read(stream).expect("named queue redeclare");
                 declare.check(1, 50, 10).expect("AMQP method route");
                 assert_eq!(queue_name(&declare).expect("queue name"), "q");
@@ -382,19 +352,8 @@ fn rejects_deleted_declare() {
                             assert!(initial.queue.identity().is_some());
                             let name = initial.queue.as_ref().to_owned();
                             let held = retain.then_some(initial.queue);
-                            let mut delete = Pinned::new(second.queue().delete(&name, false, false));
-                            loop {
-                                match events.try_recv() {
-                                    Ok(()) => break,
-                                    Err(mpsc::TryRecvError::Empty) => {
-                                        assert!(poll_once(delete.as_pin()).await.is_pending());
-                                        Yield::new().await;
-                                    }
-                                    result => { result.expect("broker ended before queue delete"); }
-                                }
-                            }
                             let (deleted, redecl) = Join::new(
-                                delete,
+                                second.queue().delete(&name, false, false),
                                 channel.queue().declare(queue::Declare { queue: &name, ..options }),
                             ).await;
                             deleted.expect("delete original queue");

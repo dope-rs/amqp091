@@ -1,12 +1,17 @@
+use std::num;
+
 use crate::failure;
-use crate::failure::wire::Encoding;
+use crate::failure::wire::{Encoding, field::Fault};
 use crate::message::field::{self, view};
 use crate::protocol::wire::Put;
 use crate::protocol::wire::text::long;
 
+const PREFIX: num::NonZero<u32> = num::NonZero::<u32>::MIN.saturating_add(4);
+
 pub struct Value {
     kind: Kind,
-    len: u32,
+    len: num::NonZero<u32>,
+    depth: u8,
 }
 
 pub(super) enum Kind {
@@ -30,11 +35,24 @@ pub(super) enum Kind {
     Bytes(long::Buf),
 }
 
+fn try_depth(child: u8) -> Result<u8, failure::Error> {
+    // Every value leaves room for its enclosing root table.
+    let actual = usize::from(child) + 2;
+    if actual > field::MAX_DEPTH {
+        return Err(failure::Error::Field(Fault::Depth {
+            actual,
+            max: field::MAX_DEPTH,
+        }));
+    }
+    Ok(child + 1)
+}
+
 impl Value {
-    fn fixed(kind: Kind, body: u32) -> Self {
+    fn fixed(kind: Kind, body: u8) -> Self {
         Self {
             kind,
-            len: 1 + body,
+            len: num::NonZero::<u32>::MIN.saturating_add(u32::from(body)),
+            depth: 0,
         }
     }
 
@@ -44,38 +62,50 @@ impl Value {
 
     pub fn string(value: Vec<u8>) -> Result<Self, failure::Error> {
         let value = long::Buf::new(value)?;
-        let len = field::sum(Encoding::Long, value.as_long().len(), 5)?;
+        let len = field::sum(Encoding::Long, value.as_long().len(), PREFIX)?;
         Ok(Self {
             kind: Kind::String(value),
             len,
+            depth: 0,
         })
     }
 
     pub fn bytes(value: Vec<u8>) -> Result<Self, failure::Error> {
         let value = long::Buf::new(value)?;
-        let len = field::sum(Encoding::Long, value.as_long().len(), 5)?;
+        let len = field::sum(Encoding::Long, value.as_long().len(), PREFIX)?;
         Ok(Self {
             kind: Kind::Bytes(value),
             len,
+            depth: 0,
         })
     }
 
     pub fn array(items: Vec<Self>) -> Result<Self, failure::Error> {
-        let body = items.iter().try_fold(0u32, |left, item| {
-            field::sum(Encoding::FieldArray, left, item.len)
-        })?;
-        let len = field::sum(Encoding::FieldArray, body, 5)?;
+        let mut body = 0;
+        let mut depth = 0u8;
+        for item in &items {
+            body = field::sum(Encoding::FieldArray, body, item.len)?.get();
+            depth = depth.max(item.depth);
+        }
+        let len = field::sum(Encoding::FieldArray, body, PREFIX)?;
+        let depth = try_depth(depth)?;
         Ok(Self {
             kind: Kind::Array(items),
             len,
+            depth,
         })
     }
 
     pub fn table(value: field::Table) -> Result<Self, failure::Error> {
-        let len = field::sum(Encoding::FieldTable, value.encoded_len(), 5)?;
+        let len = field::sum(Encoding::FieldTable, value.encoded_len(), PREFIX)?;
+        let depth = value
+            .entries()
+            .fold(0u8, |depth, (_, value)| depth.max(value.depth));
+        let depth = try_depth(depth)?;
         Ok(Self {
             kind: Kind::Table(value),
             len,
+            depth,
         })
     }
 
@@ -87,7 +117,7 @@ impl Value {
         Self::fixed(Kind::Void, 0)
     }
 
-    pub(crate) fn encoded_len(&self) -> u32 {
+    pub(crate) fn encoded_len(&self) -> num::NonZero<u32> {
         self.len
     }
 
@@ -148,7 +178,7 @@ impl Value {
             }
             Kind::Array(items) => {
                 output.put_u8(b'A');
-                output.put_u32(self.len - 5);
+                output.put_u32(self.len.get() - PREFIX.get());
                 for item in items {
                     item.encode(output);
                 }

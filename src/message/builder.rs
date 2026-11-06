@@ -1,14 +1,15 @@
 use std::num;
 
-use o3::buffer::{self, storage};
+use o3::buffer::storage;
 
 use crate::failure::wire::property::Fault;
 use crate::failure::{self, wire};
+use crate::message::property::Field;
 use crate::message::{field, property};
 
 #[derive(Default)]
 pub struct Builder {
-    text: property::Text<Option<storage::Owned<(), { buffer::BLOCK_CAPACITY }>>>,
+    text: property::Text<storage::Owned>,
     headers: Option<field::Table>,
     delivery_mode: Option<num::NonZero<u8>>,
     priority: Option<u8>,
@@ -17,61 +18,58 @@ pub struct Builder {
 
 impl Builder {
     pub fn content_type(mut self, value: impl AsRef<str>) -> Result<Self, failure::Error> {
-        self.text.set_text(property::CONTENT_TYPE, value.as_ref())?;
+        self.text.set_text(Field::ContentType, value.as_ref())?;
         Ok(self)
     }
 
     pub fn encoding(mut self, value: impl AsRef<str>) -> Result<Self, failure::Error> {
-        self.text
-            .set_text(property::CONTENT_ENCODING, value.as_ref())?;
+        self.text.set_text(Field::ContentEncoding, value.as_ref())?;
         Ok(self)
     }
 
     pub fn correlation(mut self, value: impl AsRef<str>) -> Result<Self, failure::Error> {
-        self.text
-            .set_text(property::CORRELATION_ID, value.as_ref())?;
+        self.text.set_text(Field::CorrelationId, value.as_ref())?;
         Ok(self)
     }
 
     pub fn reply_to(mut self, value: impl AsRef<str>) -> Result<Self, failure::Error> {
-        self.text.set_text(property::REPLY_TO, value.as_ref())?;
+        self.text.set_text(Field::ReplyTo, value.as_ref())?;
         Ok(self)
     }
 
     pub fn expiration(mut self, value: impl AsRef<str>) -> Result<Self, failure::Error> {
-        self.text.set_text(property::EXPIRATION, value.as_ref())?;
+        self.text.set_text(Field::Expiration, value.as_ref())?;
         Ok(self)
     }
 
     pub fn message_id(mut self, value: impl AsRef<str>) -> Result<Self, failure::Error> {
-        self.text.set_text(property::ID, value.as_ref())?;
+        self.text.set_text(Field::Id, value.as_ref())?;
         Ok(self)
     }
 
     pub fn kind(mut self, value: impl AsRef<str>) -> Result<Self, failure::Error> {
-        self.text.set_text(property::KIND, value.as_ref())?;
+        self.text.set_text(Field::Kind, value.as_ref())?;
         Ok(self)
     }
 
     pub fn user_id(mut self, value: impl AsRef<str>) -> Result<Self, failure::Error> {
-        self.text.set_text(property::USER_ID, value.as_ref())?;
+        self.text.set_text(Field::UserId, value.as_ref())?;
         Ok(self)
     }
 
     pub fn app_id(mut self, value: impl AsRef<str>) -> Result<Self, failure::Error> {
-        self.text.set_text(property::APP_ID, value.as_ref())?;
+        self.text.set_text(Field::AppId, value.as_ref())?;
         Ok(self)
     }
 
     pub fn reserved(mut self, value: impl AsRef<str>) -> Result<Self, failure::Error> {
-        if !value.as_ref().is_empty() {
+        let actual = value.as_ref().len();
+        if actual != 0 {
             return Err(failure::Error::Protocol(wire::Fault::Property(
-                Fault::Reserved {
-                    actual: value.as_ref().len(),
-                },
+                Fault::Reserved { actual },
             )));
         }
-        self.text.set_text(property::RESERVED, "")?;
+        self.text.set_text(Field::Reserved, "")?;
         Ok(self)
     }
 

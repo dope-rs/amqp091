@@ -188,6 +188,9 @@ impl<'input> View<'input> {
     }
 
     pub(crate) fn try_queue(&self) -> Result<short::Name<'input>, failure::Error> {
+        if self.queue.is_empty() {
+            return Err(failure::Error::Protocol(Fault::QueueNameEmpty));
+        }
         short::Name::new(self.queue, short::Resource::BrokerQueue)
     }
 

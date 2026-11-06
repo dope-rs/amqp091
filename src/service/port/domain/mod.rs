@@ -59,7 +59,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Domain<'r, 'c, 'b, 'd, ID> {
             .egress
             .regular
             .acquire()
-            .ok_or(failure::Error::Capacity(wire::Capacity::OutboundBuffer))?;
+            .ok_or_else(|| failure::Error::Capacity(wire::Capacity::OutboundBuffer))?;
         match frame.encode(f) {
             Ok(frame) => Ok(frame.into_output()),
             Err(error) => {
@@ -67,6 +67,10 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Domain<'r, 'c, 'b, 'd, ID> {
                 Err(error)
             }
         }
+    }
+
+    pub(in crate::service) fn replay_available(&self) -> bool {
+        self.egress.regular.is_available()
     }
 
     pub(crate) fn replay(
@@ -153,12 +157,12 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Domain<'r, 'c, 'b, 'd, ID> {
                 stores,
             )
         });
-        match change {
+        let retire = match change {
             shared::Failure::Ignored => return,
-            shared::Failure::Applied(_) => {}
-        }
+            shared::Failure::Applied(retire) => retire,
+        };
         self.transport
-            .close(target.token(), close::Reason::Protocol);
+            .close(target.token(), retire.abort(close::Reason::Protocol));
         self.coordination.waiters().wake_all();
         self.admission().wake_all();
     }

@@ -16,7 +16,10 @@ impl Limit {
         route: route::Route<'o, 'r, 'c, 'b, 'd, ID, core::Publish>,
         access: local::Read<'_, region::Identity<'d>>,
     ) -> Result<Self, failure::Runtime<'c, 'b, 'd, ID>> {
-        let tune = match route.read(access, |state| state.connection.negotiated()) {
+        let tune = match route
+            .gate
+            .read(access, |state| state.connection.negotiated())
+        {
             service::EpochAccess::Live(tune) => tune,
             service::EpochAccess::Terminal(cause) => {
                 return Err(cause.branded());

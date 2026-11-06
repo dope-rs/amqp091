@@ -3,7 +3,7 @@ use std::thread;
 
 use dope::core::driver::life::recovery;
 
-use crate::common::amqp::{Greeting, Peer};
+use crate::common::amqp::{Greeting, Peer, app::Endpoint};
 pub mod common;
 use std::time::Duration;
 
@@ -14,7 +14,7 @@ use dope_test::harness::peer::AcceptScript;
 use o3::base::time::Positive;
 
 use crate::common::recovery::TUNE;
-use crate::common::recovery::client::with_policy;
+use crate::common::recovery::client::POLICY;
 
 #[test]
 fn owns_deadline() {
@@ -62,10 +62,12 @@ fn owns_deadline() {
             while second.read(&mut [0; 256]).expect("endpoint teardown") != 0 {}
         },
         |broker| {
-            with_policy::<Profile>(
+            Endpoint::new(
                 broker.addr(),
                 config::Config::new("guest", "guest").expect("AMQP config"),
-                AGE,
+            )
+            .try_check::<Profile, _>(
+                POLICY.retire_after(AGE),
                 |rt| {
                     let conn = rt.connection();
                     assert!(

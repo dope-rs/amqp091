@@ -73,15 +73,16 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'text, 'd: 'b, const ID: u8> Start<'text, 'o, '
         ),
         ID,
     > {
-        let state = mem::replace(&mut self.state, State::Done);
-        let (gate, code, text, mut credit) = match state {
+        let (gate, code, text, credit) = match &mut self.state {
             State::Send {
                 gate,
                 reply_code: code,
                 reply_text: text,
                 credit,
-            } => (gate, code, text, credit),
+            } => (*gate, *code, *text, credit),
             State::Error(error) => {
+                let error = mem::replace(error, failure::Error::Polled);
+                self.state = State::Done;
                 return step::Step::Error(failure::Runtime::from(error));
             }
             State::Done => {
@@ -119,22 +120,13 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'text, 'd: 'b, const ID: u8> Start<'text, 'o, '
                 step::Step::Error(failure::Runtime::from(failure::Error::Closed))
             }
         };
-        match step {
-            step::Step::Pending => {
-                self.state = State::Send {
-                    gate,
-                    reply_code: code,
-                    reply_text: text,
-                    credit,
-                };
-                step::Step::Pending
-            }
-            step::Step::Ready(wait, done) => step::Step::Ready(wait, done),
-            step::Step::Error(error) => {
-                credit.cancel(gate.core().permits());
-                step::Step::Error(error)
-            }
+        match &step {
+            step::Step::Pending => return step,
+            step::Step::Ready(_, _) => gate.core().waiters().wake_flow(),
+            step::Step::Error(_) => credit.cancel(gate.core().permits()),
         }
+        self.state = State::Done;
+        step
     }
 }
 

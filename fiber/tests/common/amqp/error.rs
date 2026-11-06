@@ -1,6 +1,5 @@
 use std::{array, num, str};
 
-use dope::core::platform::wake;
 use dope_test::harness::peer;
 
 use crate::common::amqp::wire::route::Route;
@@ -19,8 +18,6 @@ pub enum Error {
     MethodLength(usize),
     PayloadRemaining(u32),
     Parts(usize),
-    Notify(wake::NotifyError),
-    Wait(wake::WaitError),
     Length(num::TryFromIntError),
     Preface([u8; 8]),
     Capacity {

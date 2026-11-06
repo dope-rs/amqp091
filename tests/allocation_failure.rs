@@ -137,14 +137,26 @@ fn text_storage_is_bounded() {
     let empty = Properties::default();
     assert!(empty.content_type().is_none());
 
-    let failed = Tracker::fail_after(0, || Builder::default().content_type("application/json"));
-    assert!(matches!(
-        failed,
-        Err(dope_amqp091::failure::Error::Allocation {
-            target: Allocation::Property,
-            error: alloc::Error::Exhausted,
-        })
-    ));
+    for initial in [None, Some("x")] {
+        let (failed, activity) = Tracker::activity(|| {
+            let mut builder = Builder::default();
+            if let Some(value) = initial {
+                builder = builder.content_type(value).expect("initial content type");
+            }
+            Tracker::fail_after(0, || builder.content_type("application/json")).err()
+        });
+        assert!(
+            matches!(
+                failed,
+                Some(dope_amqp091::failure::Error::Allocation {
+                    target: Allocation::Property,
+                    error: alloc::Error::Exhausted,
+                })
+            ),
+            "property allocation must fail after {initial:?}"
+        );
+        assert_eq!(activity.allocated_bytes, activity.deallocated_bytes);
+    }
 }
 
 #[test]

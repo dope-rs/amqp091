@@ -125,7 +125,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8, K: core::Capability>
         self,
         mut access: local::Access<'_, region::Identity<'d>>,
         lease: Option<channels::Lease<'d, ID>>,
-        encode: impl FnOnce(&mut Writer) -> P,
+        encode: impl FnOnce(&mut Writer, local::Access<'_, region::Identity<'d>>) -> P,
         commit: impl FnOnce(
             &mut shared::Edit<'_, 'r, 'c, 'b, 'd, ID>,
             &[u8],

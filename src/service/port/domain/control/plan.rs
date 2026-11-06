@@ -26,13 +26,17 @@ impl Plan<send::Next> {
         let Some(egress) = egress else {
             return Self::Pending(Some(next), freed);
         };
-        match method.preview(channel, &next, |command| {
-            egress.control().map(|frame| frame.write(channel, command))
-        }) {
-            Ok(Some(Some(Ok(frame)))) => Self::Send(frame, next, freed),
-            Ok(Some(Some(Err(cause)))) => Self::Failed(cause),
-            Ok(None | Some(None)) => Self::Pending(Some(next), freed),
-            Err(cause) => Self::Failed(failure::Error::Protocol(cause)),
+        let command = match method.preview(channel, &next) {
+            Ok(Some(command)) => command,
+            Ok(None) => return Self::Pending(Some(next), freed),
+            Err(cause) => return Self::Failed(failure::Error::Protocol(cause)),
+        };
+        let Some(frame) = egress.control() else {
+            return Self::Pending(Some(next), freed);
+        };
+        match frame.write(channel, command) {
+            Ok(frame) => Self::Send(frame, next, freed),
+            Err(cause) => Self::Failed(cause),
         }
     }
 }

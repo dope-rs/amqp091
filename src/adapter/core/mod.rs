@@ -99,11 +99,11 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8, K: Capability>
         self.domain.transport().is_active(target.token())
     }
 
-    pub(super) fn close(self, target: epoch::Id<'d, ID>, reason: close::Reason)
+    pub(super) fn close(self, target: epoch::Id<'d, ID>, rule: close::Directive)
     where
         K: Allows<State>,
     {
-        self.domain.transport().close(target.token(), reason);
+        self.domain.transport().close(target.token(), rule);
     }
 
     pub(super) fn waiters(self) -> &'o service::Waiters<'d>

@@ -7,7 +7,6 @@ use crate::common::amqp::Peer;
 use crate::common::amqp::wire::{Frame, Method};
 pub mod common;
 
-use std::sync::mpsc;
 use std::time::Duration;
 
 use dope_amqp091::adapter::publish;
@@ -22,10 +21,6 @@ use crate::common::publish::{TUNE, routing_key, with_config};
 
 #[test]
 fn stale_drop_keeps_stream() {
-    let (first_tx, first_rx) = mpsc::channel();
-    let (sent, seen) = mpsc::channel();
-    let (dropped, drop_rx) = mpsc::channel();
-    let (done_tx, done_rx) = mpsc::channel();
     AcceptScript::with(
         move |acceptor| {
             let mut first = acceptor.accept().expect("first connection");
@@ -49,7 +44,6 @@ fn stale_drop_keeps_stream() {
             let stale = Method::read(&mut first).expect("AMQP method");
             stale.check(1, 60, 40).expect("AMQP method route");
             assert_eq!(routing_key(&stale).expect("AMQP fixture"), "stale-stream");
-            first_tx.send(()).expect("publish first observation");
             drop(first);
 
             let mut second = acceptor.accept().expect("recovered connection");
@@ -77,8 +71,8 @@ fn stale_drop_keeps_stream() {
                 routing_key(&current).expect("AMQP fixture"),
                 "current-stream"
             );
-            sent.send(()).expect("publish current observation");
-            drop_rx.recv().expect("stale partial publish drop");
+            Method::write(&mut second, 0, 10, 60, b"\x05ready")
+                .expect("current publication observed");
 
             let Frame(kind, channel, header) = Frame::read(&mut second).expect("content header");
             assert_eq!((kind, channel), (2, 1));
@@ -98,7 +92,7 @@ fn stale_drop_keeps_stream() {
                         .expect("AMQP frame fixture"),
                 )
                 .expect("queue.purge-ok");
-            done_rx.recv().expect("post-drop barrier");
+            assert_eq!(second.read(&mut [0]).expect("stream probe teardown"), 0);
         },
         |broker| {
             let cap = config::Capacity::default().egress(config::Egress::new(1, 4096));
@@ -128,10 +122,6 @@ fn stale_drop_keeps_stream() {
                     body: &body,
                 }));
                 assert!(poll_once(stale.as_pin()).await.is_pending());
-                loop {
-                    match first_rx.try_recv() { Ok(()) => break, Err(mpsc::TryRecvError::Empty) => Yield::new().await, outcome => outcome.expect("broker ended before observing first publish"), }
-                }
-
                 let retired = conn.observe().retired(target.epoch()).await;
                 assert!(retired.is_ok(), "old transport must retire: {retired:?}");
                 let ready = conn.observe().ready().await.expect("replayed topology must become ready");
@@ -145,17 +135,15 @@ fn stale_drop_keeps_stream() {
                     body: b"new",
                 }));
                 assert!(poll_once(current.as_pin()).await.is_pending());
-                loop {
-                    match seen.try_recv() { Ok(()) => break, Err(mpsc::TryRecvError::Empty) => Yield::new().await, outcome => outcome.expect("broker ended before observing current publish"), }
+                while !conn.observe().read(|view| view.is_blocked()).await {
+                    Yield::new().await;
                 }
 
                 let (_, alloc) = Tracker::usage(|| drop(stale));
                 assert_eq!(alloc, (0, 0));
                 body.fill(0);
-                dropped.send(()).expect("publish stale stream drop");
                 current.await.expect("current publish");
                 channel.queue().purge("barrier").await.expect("post-drop barrier");
-                done_tx.send(()).expect("publish post-drop barrier");
                 })).is_ok(), "AMQP fiber must complete");
                 }, recover,
                 |result| {

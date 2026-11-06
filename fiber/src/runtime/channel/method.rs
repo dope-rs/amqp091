@@ -1,6 +1,6 @@
 use std::mem;
 
-use dope_amqp091::adapter::{channel, conn, consumer, method};
+use dope_amqp091::adapter::{channel, conn, method};
 use dope_amqp091::failure;
 use dope_amqp091::protocol::method::Op;
 use dope_amqp091::protocol::method::channel::Open;
@@ -24,7 +24,6 @@ impl<'o: 'app, 'r: 'o, 'c: 'r, 'b: 'c, 'app, 'd: 'app + 'b, B: ?Sized, const ID:
 where
     M: Op<'d>,
 {
-    type Output = M::Output<'b, consumer::Key<'o, 'd, ID>>;
     type Run = method::Call<'o, 'r, 'c, 'b, 'd, ID, M>;
 
     fn start(

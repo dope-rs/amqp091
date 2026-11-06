@@ -318,6 +318,7 @@ impl<'d, const ID: u8> requests::Capture<'d, ID> for Declare<'_> {
     type Schema = exchange::Declare;
 
     fn capture<'c, 'b>(
+        &self,
         view: wire::Encoded<'_, Self::Schema>,
         budget: &resident::Budget<'d>,
         topo: &mut topology::State<'_, 'c, 'b, 'd, ID>,
@@ -347,11 +348,12 @@ impl<'d, const ID: u8> requests::Capture<'d, ID> for Delete<'_> {
     type Schema = resource::Layout;
 
     fn capture<'c, 'b>(
+        &self,
         view: wire::Encoded<'_, Self::Schema>,
         budget: &resident::Budget<'d>,
         topo: &mut topology::State<'_, 'c, 'b, 'd, ID>,
     ) -> Result<work::Admit<'c, 'b, 'd, ID>, failure::Error> {
-        let name = view.field(resource::Layout::NAME);
+        let name = view.name();
         let needs = need::Need::none();
         let id = topo.resolve(&needs).0;
         let spec = {
@@ -376,6 +378,7 @@ impl<'d, const ID: u8> requests::Capture<'d, ID> for Bind<'_> {
     type Schema = exchange::Bind;
 
     fn capture<'c, 'b>(
+        &self,
         view: wire::Encoded<'_, Self::Schema>,
         budget: &resident::Budget<'d>,
         topo: &mut topology::State<'_, 'c, 'b, 'd, ID>,
@@ -408,6 +411,7 @@ impl<'d, const ID: u8> requests::Capture<'d, ID> for Unbind<'_> {
     type Schema = exchange::Bind;
 
     fn capture<'c, 'b>(
+        &self,
         view: wire::Encoded<'_, Self::Schema>,
         budget: &resident::Budget<'d>,
         topo: &mut topology::State<'_, 'c, 'b, 'd, ID>,

@@ -7,7 +7,6 @@ use crate::common::amqp::{Greeting, Peer};
 pub mod common;
 use std::time::Duration;
 
-use dope::core::platform::wake;
 use dope_amqp091::failure;
 use dope_amqp091::message::ack;
 use dope_amqp091::message::field::Table;
@@ -20,9 +19,6 @@ use crate::common::recovery::client::with;
 
 #[test]
 fn answers_empty_challenge() {
-    let (done, complete) = wake::Ends::blocking()
-        .expect("challenge completion")
-        .split();
     AcceptScript::with(
         move |acceptor| {
             let mut stream = acceptor.accept().expect("connection");
@@ -52,8 +48,7 @@ fn answers_empty_challenge() {
                 .expect("Connection.Open")
                 .send()
                 .expect("Connection.OpenOk");
-            done.wait_timeout(Duration::from_secs(10))
-                .expect("challenge completion");
+            assert_eq!(stream.read(&mut [0]).expect("endpoint teardown"), 0);
         },
         |broker| {
             with(
@@ -63,7 +58,6 @@ fn answers_empty_challenge() {
                     rt.block_on(conn.observe().epoch())
                         .expect("challenge drive")
                         .expect("challenge");
-                    complete.notify().expect("challenge completion");
                 },
                 recover,
                 |result| {

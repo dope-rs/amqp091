@@ -221,12 +221,12 @@ pub enum Fault {
         step: turn::Step,
     },
     ConsumerIndex {
-        consumer: u64,
+        consumer: num::NonZero<u64>,
         expected: turn::Index,
         actual: turn::Index,
     },
     ConsumerPhase {
-        consumer: u64,
+        consumer: num::NonZero<u64>,
         expected: turn::Consumer,
         actual: turn::Consumer,
     },
@@ -262,6 +262,7 @@ pub enum Fault {
     QueueIdentity {
         actual: usize,
     },
+    QueueNameEmpty,
     TopologyIdentity {
         queue: num::NonZero<u64>,
         expected: turn::Identity,
@@ -276,8 +277,8 @@ pub enum Fault {
         actual: method::Kind,
     },
     ReplayResponse {
-        expected: Option<u64>,
-        actual: u64,
+        expected: Option<num::NonZero<u64>>,
+        actual: num::NonZero<u64>,
     },
     ReplayPhase {
         method: method::Kind,
@@ -286,7 +287,7 @@ pub enum Fault {
     ReplayRoute {
         stage: Replay,
         channel: u16,
-        identity: u64,
+        identity: num::NonZero<u64>,
     },
     ConfirmPublishDisabled,
     ConfirmPublishRequired,

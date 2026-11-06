@@ -22,7 +22,6 @@ struct Waiting<'d> {
     generation: route::Epoch,
     resource: mem::Discriminant<Resource>,
     demand: num::NonZero<usize>,
-    spare: usize,
 }
 
 pub(in crate::service::content::wait) struct Store<'d> {
@@ -113,14 +112,14 @@ impl<'d> Store<'d> {
     ) -> Result<(), round::Bounds> {
         let index = lane.slot().index().get() as usize;
         let slot = self.waits.try_slot(index)?;
-        let (demand, spare) = match resource {
+        let demand = match resource {
             Resource::Body(error)
             | Resource::Resident(error)
             | Resource::Staging(error)
             | Resource::Copy(error)
-            | Resource::Account(error) => error.into_parts(),
+            | Resource::Account(error) => error.into_parts().0,
             Resource::Delivery | Resource::Returned | Resource::Fragment | Resource::Route => {
-                (num::NonZero::<usize>::MIN, 0)
+                num::NonZero::<usize>::MIN
             }
         };
         let waiting = Waiting {
@@ -128,7 +127,6 @@ impl<'d> Store<'d> {
             generation: epoch,
             resource: mem::discriminant(&resource),
             demand,
-            spare,
         };
         if slot.get() == Some(waiting) {
             return Ok(());
@@ -251,6 +249,6 @@ impl<'d> Store<'d> {
 
 const _: () = assert!(mem::size_of::<route::Epoch>() == mem::size_of::<usize>());
 const _: () = assert!(mem::align_of::<route::Epoch>() == mem::align_of::<usize>());
-const _: () = assert!(mem::size_of::<Waiting<'static>>() == 5 * mem::size_of::<usize>());
+const _: () = assert!(mem::size_of::<Waiting<'static>>() == 4 * mem::size_of::<usize>());
 const _: () =
     assert!(mem::size_of::<Option<Waiting<'static>>>() == mem::size_of::<Waiting<'static>>());

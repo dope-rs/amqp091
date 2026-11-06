@@ -27,6 +27,14 @@ impl<'a, 'c, 'b, 'd, const ID: u8> Graph<'a, 'c, 'b, 'd, ID> {
         (self.local.head.confirms, self.local.head.qos)
     }
 
+    pub(crate) const fn current_state(&self) -> &queue::Current<'d, ID> {
+        &self.local.current
+    }
+
+    pub(crate) fn has_queues(&self) -> bool {
+        !self.values.is_empty()
+    }
+
     pub(crate) fn has_replay(&self) -> bool {
         let (confirms, qos) = self.head();
         confirms
@@ -54,7 +62,7 @@ impl<'a, 'c, 'b, 'd, const ID: u8> Graph<'a, 'c, 'b, 'd, ID> {
             Some(cursor) => cursor,
             None => queue::Cursor {
                 next: 0,
-                current: self.local.current,
+                current: self.local.current.key(),
                 current_replayed: false,
             },
         };
@@ -80,7 +88,7 @@ impl<'a, 'c, 'b, 'd, const ID: u8> Graph<'a, 'c, 'b, 'd, ID> {
     }
 
     pub(crate) fn current(&self) -> Option<(queue::Key<'d, ID>, Record<'c, 'b, 'd>)> {
-        let key = self.local.current?;
+        let key = self.local.current.key()?;
         Some((key, self.values.entry(key.into_parts().0.parts())?))
     }
 
@@ -105,10 +113,15 @@ impl<'a, 'c, 'b, 'd, const ID: u8> Graph<'a, 'c, 'b, 'd, ID> {
 
     pub(crate) fn queue_key(&self, name: short::Short<'_>) -> Option<queue::Key<'d, ID>> {
         if name.is_empty() {
-            return self
-                .local
-                .current
-                .filter(|key| self.values.entry(key.into_parts().0.parts()).is_some());
+            return match &self.local.current {
+                queue::Current::Tracked(key) => {
+                    self.values.entry(key.into_parts().0.parts()).map(|_| *key)
+                }
+                queue::Current::Named { name, .. } => {
+                    self.topology.queues.key(self.values, name.name().into())
+                }
+                queue::Current::None => None,
+            };
         }
         self.topology.queues.key(self.values, name)
     }

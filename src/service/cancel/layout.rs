@@ -15,28 +15,24 @@ impl Layout {
     pub(super) fn try_new(limits: limits::Limits) -> Result<Self, failure::Error> {
         let method = limits.methods.user.raw();
         let count = limits.consumers.raw();
-        let consumer = method
-            .checked_add(count)
-            .ok_or(failure::Error::InvalidConfig(
-                wire::Config::CancellationConsumer {
-                    methods: method,
-                    consumers: count,
-                },
-            ))?;
+        let consumer = method.checked_add(count).ok_or_else(|| {
+            failure::Error::InvalidConfig(wire::Config::CancellationConsumer {
+                methods: method,
+                consumers: count,
+            })
+        })?;
         let count = limits.confirms.raw();
-        let confirm = consumer
-            .checked_add(count)
-            .ok_or(failure::Error::InvalidConfig(
-                wire::Config::CancellationConfirm {
-                    consumer_end: consumer,
-                    confirms: count,
-                },
-            ))?;
-        confirm.checked_add(3).ok_or(failure::Error::InvalidConfig(
-            wire::Config::CancellationSlots {
+        let confirm = consumer.checked_add(count).ok_or_else(|| {
+            failure::Error::InvalidConfig(wire::Config::CancellationConfirm {
+                consumer_end: consumer,
+                confirms: count,
+            })
+        })?;
+        confirm.checked_add(3).ok_or_else(|| {
+            failure::Error::InvalidConfig(wire::Config::CancellationSlots {
                 confirm_end: confirm,
-            },
-        ))?;
+            })
+        })?;
         Ok(Self {
             method_end: method,
             consumer_end: consumer,

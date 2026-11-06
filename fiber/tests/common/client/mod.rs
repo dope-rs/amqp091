@@ -7,9 +7,7 @@ use std::time::Duration;
 
 use dope::core::driver::life::recovery;
 use dope::manifold::timing;
-use dope_amqp091::adapter::conn;
-use dope_amqp091::{config, failure};
-use dope_amqp091_fiber::conn::Connection;
+use dope_amqp091::config;
 use dope_test::harness::peer::Stream;
 
 use crate::common::amqp::app::{Endpoint, Policy, Scope, error};
@@ -34,13 +32,6 @@ pub fn with(
     finish: impl for<'owner> FnOnce(Result<(), error::Error<'owner, ()>>),
 ) {
     Endpoint::new(address, config).try_check::<timing::Throughput, _>(POLICY, test, recover, finish)
-}
-
-#[dope_fiber::fiber_fn('d)]
-pub async fn wait_ready<'o, 'r, 'c, 'b, 'app, 'd: 'app, B: ?Sized>(
-    conn: Connection<'app, 'o, 'r, 'c, 'b, 'd, B, 0>,
-) -> Result<conn::Ready<'d, 0>, failure::Runtime<'c, 'b, 'd, 0>> {
-    conn.observe().ready().await
 }
 
 pub fn queue_declare_ok_frame(channel: u16, name: &[u8]) -> Result<Vec<u8>, Error> {

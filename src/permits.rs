@@ -41,6 +41,7 @@ impl<'d> Registry<'_, 'd> {
             driver,
             plan.capacity,
             plan.lanes,
+            // The source's borrow carries 'd, bounding the fresh queue scope by its driver.
             (driver, source),
             |(_, source), queue| run(source, Registry(queue)),
         )

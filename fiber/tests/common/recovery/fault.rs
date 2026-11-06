@@ -1,11 +1,11 @@
 use dope_test::harness::peer;
 use std::time::Duration;
 
-use dope::core::platform::wake;
 use dope_test::harness::peer::{AcceptScript, Spawn};
 
-use crate::common::amqp::wire::Frame;
+use crate::common::amqp::wire::{Frame, Method};
 use crate::common::amqp::{Error, Peer, Tune};
+use crate::common::client::Redial;
 
 #[derive(Clone, Copy)]
 pub enum Violation {
@@ -15,20 +15,15 @@ pub enum Violation {
 
 pub fn raw_peer<R>(
     fault: Violation,
-    ready: wake::Wait,
-    done: Option<wake::Wait>,
-    run: impl for<'scope> FnOnce(AcceptScript<'scope, Result<(), Error>>, wake::Wait) -> R,
+    run: impl for<'scope> FnOnce(AcceptScript<'scope, Result<(), Error>>) -> R,
 ) -> Result<R, Spawn> {
-    let (observed, closed) = wake::Ends::blocking().map_err(Spawn::Wake)?.split();
     AcceptScript::with(
         move |acceptor| {
             let mut stream = acceptor.accept()?;
             stream.read_wait(Some(Duration::from_secs(5)))?;
             stream.write_wait(Some(Duration::from_secs(5)))?;
             Peer::new(&mut stream).open(Tune::new(16, 131_072, 0))?;
-            ready
-                .wait_timeout(Duration::from_secs(5))
-                .map_err(Error::Wait)?;
+            Method::read(&mut stream)?.check(1, 20, 10)?;
             stream.write_all(&match fault {
                 Violation::InvalidEnd => {
                     let mut wire = Frame::try_encode(8, 0, &[])?;
@@ -43,7 +38,7 @@ pub fn raw_peer<R>(
             let mut byte = [0_u8; 1];
             match stream.read(&mut byte) {
                 Ok(0) => {}
-                Err(error) if matches!(error, peer::Error::Syscall(error) if error.is_reset()) => {}
+                Err(peer::Error::Syscall(error)) if error.is_reset() => {}
                 Err(error) => return Err(Error::Io(error)),
                 Ok(bytes) => {
                     return Err(Error::UnexpectedRead {
@@ -52,16 +47,12 @@ pub fn raw_peer<R>(
                     });
                 }
             }
-            if let Some(done) = done {
-                done.wait_timeout(Duration::from_secs(5))
-                    .map_err(Error::Wait)?;
-                if acceptor.try_accept()?.is_some() {
-                    return Err(Error::Redial);
-                }
+            drop(stream);
+            match Redial::observe(acceptor)? {
+                Redial::Accepted => Err(Error::Redial),
+                Redial::Elapsed => Ok(()),
             }
-            closed.notify().map_err(Error::Notify)?;
-            Ok(())
         },
-        |broker| run(broker, observed),
+        run,
     )
 }

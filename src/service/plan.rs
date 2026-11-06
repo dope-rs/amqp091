@@ -194,14 +194,12 @@ impl Plan {
             failure::Error::InvalidConfig(wire::Config::ControlBytes { actual: cap, error })
         })?;
         let width = buffer.max(cap);
-        let resident = frames
-            .checked_mul(width)
-            .ok_or(failure::Error::InvalidConfig(
-                wire::Config::OutboundResident {
-                    frames,
-                    bytes: width,
-                },
-            ))?;
+        let resident = frames.checked_mul(width).ok_or_else(|| {
+            failure::Error::InvalidConfig(wire::Config::OutboundResident {
+                frames,
+                bytes: width,
+            })
+        })?;
         let layout = pool::Layout::new(frames as usize, buffer as usize).map_err(|error| {
             failure::Error::InvalidConfig(wire::Config::Pool {
                 slots: frames as usize,
@@ -221,12 +219,12 @@ impl Plan {
                 error,
             })
         })?;
-        let entries = frames
-            .checked_add(control)
-            .ok_or(failure::Error::InvalidConfig(wire::Config::SourceEntries {
+        let entries = frames.checked_add(control).ok_or_else(|| {
+            failure::Error::InvalidConfig(wire::Config::SourceEntries {
                 regular: frames,
                 control,
-            }))?;
+            })
+        })?;
         let source = wire::Config::SourceResident {
             regular_frames: frames,
             regular_bytes: buffer,
@@ -235,13 +233,13 @@ impl Plan {
         };
         let regular = frames
             .checked_mul(buffer)
-            .ok_or(failure::Error::InvalidConfig(source))?;
+            .ok_or_else(|| failure::Error::InvalidConfig(source))?;
         let control = control
             .checked_mul(cap)
-            .ok_or(failure::Error::InvalidConfig(source))?;
+            .ok_or_else(|| failure::Error::InvalidConfig(source))?;
         let resident = regular
             .checked_add(control)
-            .ok_or(failure::Error::InvalidConfig(source))?;
+            .ok_or_else(|| failure::Error::InvalidConfig(source))?;
         Ok((
             layout,
             retained,

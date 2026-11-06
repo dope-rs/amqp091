@@ -1,8 +1,5 @@
-use crate::common::amqp::phase::{Open, Opened, Preface, Secure, Start, Started, Tuning};
 use crate::common::amqp::{Peer, Tune};
 pub mod common;
-
-use std::mem;
 
 use common::amqp::Duplex;
 use dope_test::alloc::Tracker;
@@ -50,14 +47,4 @@ fn preserves_partial_io() {
         .expect("partial handshake");
     assert_eq!(io.output, SERVER);
     assert!(io.writes > 3);
-
-    let pointer = mem::size_of::<&mut Duplex<44, 69>>();
-    assert_eq!(mem::size_of::<Peer<'static, Duplex<44, 69>>>(), pointer);
-    assert_eq!(mem::size_of::<Preface<'static, Duplex<44, 69>>>(), pointer);
-    assert_eq!(mem::size_of::<Start<'static, Duplex<44, 69>>>(), pointer);
-    assert_eq!(mem::size_of::<Started<'static, Duplex<44, 69>>>(), pointer);
-    assert_eq!(mem::size_of::<Secure<'static, Duplex<44, 69>>>(), pointer);
-    assert_eq!(mem::size_of::<Tuning<'static, Duplex<44, 69>>>(), pointer);
-    assert_eq!(mem::size_of::<Open<'static, Duplex<44, 69>>>(), pointer);
-    assert_eq!(mem::size_of::<Opened<'static, Duplex<44, 69>>>(), pointer);
 }

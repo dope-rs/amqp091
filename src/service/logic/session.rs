@@ -15,7 +15,7 @@ use crate::service::content::ops::{FailureOwner, Input, Ops as _};
 use crate::service::content::wait::Attempt;
 use crate::service::method::Ops as _;
 use crate::service::{self, port};
-use crate::state::channel::{self, change};
+use crate::state::channel;
 use crate::state::conn::{self, phase, status};
 use crate::state::{channels, epoch, shared};
 
@@ -156,31 +156,24 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> SessionOps<'o, 'r, 'c, 'b
         sink: &mut egress::Queue<'_, '_, 'd, { client::IOV_CAP }, pool::Cursor>,
         region: &mut region::Token<region::Identity<'d>>,
     ) {
-        let cause =
-            match self.with_shared(region, |shared| shared.connection.try_fail(epoch, error)) {
-                Ok(cause) => cause,
-                Err(error) => {
-                    self.fail_session(
-                        close,
-                        FailureOwner::Immediate(epoch),
-                        recovery::Fault::terminal(error),
-                        region,
-                    );
-                    return;
-                }
-            };
         let stores = self.port().content.stores();
-        let freed = self.with_shared(region, |shared| {
-            let mut freed = channel::Freed::Available;
-            shared.routes.for_each(|chan, graph| {
-                freed = freed.merge(chan.change(
-                    graph,
-                    stores,
-                    change::Event::TransportEnded { cause: &cause },
-                ));
-            });
-            freed
-        });
+        let freed = match self.with_shared(region, |shared| {
+            shared.connection.try_fail(epoch, error).map(|cause| {
+                shared.recovery.reset();
+                shared.routes.transport_ended(cause, stores)
+            })
+        }) {
+            Ok(freed) => freed,
+            Err(error) => {
+                self.fail_session(
+                    close,
+                    FailureOwner::Immediate(epoch),
+                    recovery::Fault::terminal(error),
+                    region,
+                );
+                return;
+            }
+        };
         self.port().coordination().waiters().wake_all();
         self.port().admission().wake_all();
         if let Err(error) = self.wake_route(epoch, freed) {
@@ -260,6 +253,8 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> SessionOps<'o, 'r, 'c, 'b
                 }
             }
         }
+        let logic = self.logic();
+        logic.codec.set_max(logic.config.tune.frame.get());
         let admit = self
             .port()
             .encode(|frame| frame::Encoder::new(frame).preface())

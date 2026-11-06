@@ -102,7 +102,7 @@ pub fn open_tagged(mut stream: &Stream<'_>) -> Result<(), Error> {
     stream.read_wait(limit)?;
     stream.write_wait(limit)?;
     Peer::new(&mut stream).open(TUNE)?;
-    open_named(&mut stream, 1, "q", "tag")
+    open_named(stream, 1, "q", "tag")
 }
 
 pub fn ack_tag(method: &Method) -> Result<u64, Error> {

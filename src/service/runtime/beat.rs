@@ -1,4 +1,4 @@
-use std::{cell, num, time};
+use std::{num, time};
 
 use dope::core::driver::schedule::{self, app, clock};
 use o3::base::cell::{local, region};
@@ -9,7 +9,7 @@ use crate::service::{self, port};
 use crate::state::epoch;
 
 pub(in crate::service) struct Heartbeat<'d, const ID: u8> {
-    deadline: cell::Cell<Option<Deadline<'d, ID>>>,
+    deadline: Option<Deadline<'d, ID>>,
 }
 
 #[derive(Clone, Copy)]
@@ -20,9 +20,7 @@ struct Deadline<'d, const ID: u8> {
 
 impl<'d, const ID: u8> Heartbeat<'d, ID> {
     pub(in crate::service) const fn new() -> Self {
-        Self {
-            deadline: cell::Cell::new(None),
-        }
+        Self { deadline: None }
     }
 
     fn beat(
@@ -37,26 +35,27 @@ impl<'d, const ID: u8> Heartbeat<'d, ID> {
     }
 
     pub(in crate::service) fn emit(
-        &self,
+        &mut self,
         port: &port::Domain<'_, '_, '_, 'd, ID>,
         work: app::Work<'_, 'd>,
         region: &mut region::Token<region::Identity<'d>>,
     ) {
         let Some((target, secs)) = Self::beat(port, region) else {
-            self.deadline.set(None);
+            self.deadline = None;
             return;
         };
-        let period = time::Duration::from_millis(u64::from(secs.get()) * 500);
         let now = work.clock().now();
-        let next = now.clamp_add(period);
-        let Some(due) = self.deadline.get() else {
-            self.deadline.set(Some(Deadline { target, at: next }));
+        let next = || {
+            let period = time::Duration::from_millis(u64::from(secs.get()) * 500);
+            Some(Deadline {
+                target,
+                at: now.clamp_add(period),
+            })
+        };
+        let Some(due) = self.deadline.filter(|due| due.target == target) else {
+            self.deadline = next();
             return;
         };
-        if due.target != target {
-            self.deadline.set(Some(Deadline { target, at: next }));
-            return;
-        }
         if due.at > now {
             return;
         }
@@ -64,7 +63,7 @@ impl<'d, const ID: u8> Heartbeat<'d, ID> {
             return;
         };
         turn.run(|| {
-            self.deadline.set(Some(Deadline { target, at: next }));
+            self.deadline = next();
             if let service::Admit::Error(error) = service::Admission::new(port).admit(
                 local::Access::new(region),
                 target,
@@ -73,7 +72,7 @@ impl<'d, const ID: u8> Heartbeat<'d, ID> {
                 |shared| {
                     (shared.connection.lifecycle.status().epoch() == Some(target))
                         .then_some(())
-                        .ok_or(failure::Error::Closed)
+                        .ok_or_else(|| failure::Error::Closed)
                 },
             ) {
                 port.fail(local::Access::new(region), target, error);
@@ -87,10 +86,9 @@ impl<'d, const ID: u8> Heartbeat<'d, ID> {
         region: &region::Token<region::Identity<'d>>,
     ) -> schedule::Progress<'d> {
         let Some((target, _)) = Self::beat(port, region) else {
-            self.deadline.set(None);
             return schedule::Progress::Quiescent;
         };
-        match self.deadline.get() {
+        match self.deadline {
             Some(due) if due.target == target => schedule::Progress::until(due.at),
             _ => schedule::Progress::Runnable,
         }

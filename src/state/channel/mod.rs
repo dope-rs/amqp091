@@ -1,7 +1,8 @@
 use dope::core::driver;
 use o3::alloc;
 
-use crate::protocol::topology;
+use crate::protocol::{method, topology};
+use crate::service::Waiters;
 use crate::state::channel::methods::turn;
 use crate::state::{layout, limits};
 
@@ -129,14 +130,6 @@ struct Epoch<'r, 'c, 'b, 'd> {
 }
 
 impl<'r, 'c, 'b, 'd, const ID: u8> Session<'r, 'c, 'b, 'd, ID> {
-    fn clear(&mut self, stores: Stores<'r, 'c, 'b, 'd>) -> Freed {
-        self.epoch.inbound.clear();
-        self.stable
-            .consumers
-            .drain(stores.deliveries)
-            .merge(stores.returns.drain(&mut self.epoch.returns))
-    }
-
     pub(crate) fn try_new(
         position: std::num::NonZero<u16>,
         limits: limits::Limits,
@@ -209,7 +202,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Session<'r, 'c, 'b, 'd, ID> {
         stores: Stores<'r, 'c, 'b, 'd>,
     ) -> facets::Content<'_, 'r, 'c, 'b, 'd, ID> {
         facets::Content {
-            phase: self.epoch.control.phase,
+            phase: self.protocol().phase,
             inbound: &mut self.epoch.inbound,
             returns: &mut self.epoch.returns,
             consumers: &mut self.stable.consumers,
@@ -236,9 +229,28 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Session<'r, 'c, 'b, 'd, ID> {
 
     pub(crate) fn protocol(&self) -> facets::Protocol {
         facets::Protocol {
-            phase: self.epoch.control.phase,
+            phase: match self.epoch.control.phase {
+                Phase::Closing
+                    if !matches!(
+                        self.stable.methods.head(),
+                        methods::Head::Sent(method::Kind::CloseOk)
+                    ) =>
+                {
+                    Phase::Open
+                }
+                phase => phase,
+            },
             inbound_idle: self.epoch.inbound.is_idle(),
         }
+    }
+
+    pub(crate) fn begin_close(&mut self, waiters: &Waiters<'d>) {
+        self.epoch.control.phase = Phase::Closing;
+        waiters.wake_flow();
+    }
+
+    pub(crate) fn close_sent(&mut self, stores: Stores<'r, 'c, 'b, 'd>) {
+        self.epoch.returns.wake(stores.returns);
     }
 
     pub(crate) fn has_replay(&self, topo: &topology::State<'_, 'c, 'b, 'd, ID>) -> bool {
@@ -253,8 +265,8 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Session<'r, 'c, 'b, 'd, ID> {
     ) -> Freed {
         match event {
             change::Event::Reopened => {
-                let freed = self.clear(stores);
-                self.stable.consumers.reopen();
+                self.epoch.inbound.clear();
+                let freed = stores.returns.drain(&mut self.epoch.returns);
                 self.stable.confirm.retire_epoch();
                 self.stable.publishing.retire_epoch();
                 self.epoch.control.phase = Phase::Open;
@@ -265,10 +277,15 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Session<'r, 'c, 'b, 'd, ID> {
             event @ (change::Event::TransportEnded { .. } | change::Event::ChannelClosed) => {
                 self.epoch.control.phase = Phase::Closed;
                 self.stable.publishing.retire_epoch();
-                let mut freed = self.clear(stores);
+                self.epoch.inbound.clear();
+                let mut freed = self
+                    .stable
+                    .consumers
+                    .drain(stores.deliveries)
+                    .merge(stores.returns.drain(&mut self.epoch.returns));
                 if let change::Event::TransportEnded { cause } = event {
                     freed = freed.merge(self.method_turn(stores).fail(topo, cause));
-                    if self.epoch.control.has_confirms() {
+                    if !self.stable.confirm.is_empty() {
                         self.stable.confirm.fail_all(cause);
                     }
                 } else {

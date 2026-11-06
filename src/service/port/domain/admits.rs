@@ -71,12 +71,18 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Admission<'a, 'r, 'c, 'b, 'd, ID> {
         ) -> Result<R, failure::Error>,
     ) -> service::Admit<R> {
         let session = self.session;
-        self.try_frame(access, target, lease, encode, |region, bytes, ()| {
-            session.write(local::Access::new(region), |state| {
-                state.connection.try_frame(bytes.len())?;
-                commit(state)
-            })
-        })
+        self.try_frame(
+            access,
+            target,
+            lease,
+            |output, _| encode(output),
+            |region, bytes, ()| {
+                session.write(local::Access::new(region), |state| {
+                    state.connection.try_frame(bytes.len())?;
+                    commit(state)
+                })
+            },
+        )
         .unwrap_or_else(service::Admit::Error)
     }
 
@@ -89,24 +95,30 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Admission<'a, 'r, 'c, 'b, 'd, ID> {
         decide: impl FnOnce(&mut shared::Edit<'_, 'r, 'c, 'b, 'd, ID>) -> ops::ControlFlow<D, R>,
     ) -> Result<service::Admit<R>, D> {
         let session = self.session;
-        match self.try_frame(access, target, lease, encode, |region, bytes, ()| {
-            session.write(local::Access::new(region), |state| {
-                if state.connection.lifecycle.status().epoch() != Some(target) {
-                    return Err(Reject::Inactive);
-                }
-                state
-                    .connection
-                    .try_frame(bytes.len())
-                    .map_err(Reject::Error)?;
-                let output = match decide(state) {
-                    ops::ControlFlow::Continue(output) => output,
-                    ops::ControlFlow::Break(defer) => {
-                        return Err(Reject::Defer(defer));
+        match self.try_frame(
+            access,
+            target,
+            lease,
+            |output, _| encode(output),
+            |region, bytes, ()| {
+                session.write(local::Access::new(region), |state| {
+                    if state.connection.lifecycle.status().epoch() != Some(target) {
+                        return Err(Reject::Inactive);
                     }
-                };
-                Ok(output)
-            })
-        }) {
+                    state
+                        .connection
+                        .try_frame(bytes.len())
+                        .map_err(Reject::Error)?;
+                    let output = match decide(state) {
+                        ops::ControlFlow::Continue(output) => output,
+                        ops::ControlFlow::Break(defer) => {
+                            return Err(Reject::Defer(defer));
+                        }
+                    };
+                    Ok(output)
+                })
+            },
+        ) {
             Ok(admit) => Ok(admit),
             Err(Reject::Error(error)) => Ok(service::Admit::Error(error)),
             Err(Reject::Defer(defer)) => Err(defer),
@@ -116,16 +128,16 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Admission<'a, 'r, 'c, 'b, 'd, ID> {
 
     pub(crate) fn try_frame<P, R, E>(
         self,
-        access: local::Access<'_, region::Identity<'d>>,
+        mut access: local::Access<'_, region::Identity<'d>>,
         target: epoch::Id<'d, ID>,
         lease: Option<channels::Lease<'d, ID>>,
-        encode: impl FnOnce(&mut Writer) -> P,
+        encode: impl FnOnce(&mut Writer, local::Access<'_, region::Identity<'d>>) -> P,
         commit: impl FnOnce(&mut region::Token<region::Identity<'d>>, &[u8], P) -> Result<R, E>,
     ) -> Result<service::Admit<R>, E> {
         let Some(frame) = self.egress.regular.acquire() else {
             return Ok(service::Admit::Unavailable);
         };
-        let frame = match frame.encode(encode) {
+        let frame = match frame.encode(|output| encode(output, access.reborrow())) {
             Ok(frame) => frame,
             Err(error) => {
                 self.sync();

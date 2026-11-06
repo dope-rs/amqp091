@@ -1,29 +1,13 @@
-use dope::manifold::client::session::codec::staging::Policy;
-use dope::manifold::client::session::codec::{Codec, Input};
 use dope_amqp091::message::field::{Table, Value};
 use dope_amqp091::service::Spec;
 use dope_amqp091::{config, failure};
-use o3::buffer;
-use o3::buffer::resident::staging;
-use o3::buffer::{resident, storage};
+use o3::buffer::storage;
 
 pub mod check;
 pub mod settings;
 mod sink;
 
 pub use sink::Sink;
-
-pub fn input<'input, 'd, C: Codec, R: buffer::Cursor>(
-    codec: &C,
-    source: &'input R,
-    budget: &'input resident::Budget<'d>,
-    run: impl for<'id> FnOnce(Input<'id, 'input, 'd, R>),
-) -> Result<(), staging::Error> {
-    let plan = <C::Staging as Policy>::plan(codec.staging())?;
-    let limit = <C::Staging as Policy>::limit(plan);
-    Input::with(source, budget, limit, run);
-    Ok(())
-}
 
 pub fn plan(capacity: config::Capacity) -> Result<Spec, failure::Error> {
     let config = config::Config::new("guest", "guest")?.capacity(capacity);

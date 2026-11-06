@@ -68,21 +68,20 @@ impl<'r, 'c, 'b, 'd> Inbound<'r, 'c, 'b, 'd> {
             E,
         >,
     ) -> Result<Option<pending::Complete<'r, 'c, 'b, 'd>>, E> {
-        let Some(entry) = self.0.take() else {
+        let Some(entry) = self.0.as_mut() else {
             return Err(E::from(failure::Error::Protocol(
                 wire::Fault::ContentHeaderIdle,
             )));
         };
         if size > maximum as u64 {
-            self.0 = Some(entry);
             return Err(E::from(failure::Error::MessageTooLarge {
                 size,
                 max: maximum,
             }));
         }
         let size = size as usize;
-        let progress = entry.bind(wake, || bind(size));
-        self.apply(progress)
+        entry.bind(|| bind(size))?;
+        Ok(pending::Pending::advance(&mut self.0, wake))
     }
 
     pub(crate) fn body<E: From<failure::Error>>(
@@ -91,29 +90,13 @@ impl<'r, 'c, 'b, 'd> Inbound<'r, 'c, 'b, 'd> {
         wake: Wake<'b, 'd>,
         store: impl FnOnce(&mut payload::Payload<'b, 'd>) -> Result<(), E>,
     ) -> Result<Option<pending::Complete<'r, 'c, 'b, 'd>>, E> {
-        let Some(entry) = self.0.take() else {
+        let Some(entry) = self.0.as_mut() else {
             return Err(E::from(failure::Error::Protocol(
                 wire::Fault::ContentBodyIdle,
             )));
         };
-        self.apply(entry.body(length, wake, store))
-    }
-
-    fn apply<E>(
-        &mut self,
-        progress: pending::Progress<'r, 'c, 'b, 'd, E>,
-    ) -> Result<Option<pending::Complete<'r, 'c, 'b, 'd>>, E> {
-        match progress {
-            pending::Progress::Pending(entry) => {
-                self.0 = Some(entry);
-                Ok(None)
-            }
-            pending::Progress::Complete(complete) => Ok(Some(complete)),
-            pending::Progress::Failed(entry, error) => {
-                self.0 = Some(entry);
-                Err(error)
-            }
-        }
+        entry.body(length, store)?;
+        Ok(pending::Pending::advance(&mut self.0, wake))
     }
 }
 

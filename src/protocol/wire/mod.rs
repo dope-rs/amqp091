@@ -124,14 +124,11 @@ pub(crate) struct Identity<'a> {
 }
 
 impl<'a> Identity<'a> {
+    #[inline]
     pub(crate) fn of(bytes: &'a [u8]) -> Self {
-        Self::new(bytes, Fingerprint::of(bytes))
-    }
-
-    pub(crate) const fn new(bytes: &'a [u8], hash: Fingerprint) -> Self {
         Self {
             bytes,
-            fingerprint: hash,
+            fingerprint: Fingerprint::of(bytes),
         }
     }
 

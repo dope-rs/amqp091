@@ -84,10 +84,7 @@ const _: () = assert!(
 pub(in crate::adapter) trait Source<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>:
     Copy
 {
-    type Kind: core::Capability
-        + core::Allows<core::State>
-        + core::Allows<core::Egress>
-        + core::Allows<core::Registry>;
+    type Kind: core::Capability + core::Allows<core::State> + core::Allows<core::Registry>;
 
     fn core(self) -> core::Core<'o, 'r, 'c, 'b, 'd, ID, Self::Kind>;
 
@@ -100,10 +97,7 @@ pub(in crate::adapter) trait Source<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID
 impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8, K> Source<'o, 'r, 'c, 'b, 'd, ID>
     for core::Gate<'o, 'r, 'c, 'b, 'd, ID, K>
 where
-    K: core::Capability
-        + core::Allows<core::State>
-        + core::Allows<core::Egress>
-        + core::Allows<core::Registry>,
+    K: core::Capability + core::Allows<core::State> + core::Allows<core::Registry>,
 {
     type Kind = K;
 
@@ -126,10 +120,7 @@ where
 impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8, K> Source<'o, 'r, 'c, 'b, 'd, ID>
     for route::Route<'o, 'r, 'c, 'b, 'd, ID, K>
 where
-    K: core::Capability
-        + core::Allows<core::State>
-        + core::Allows<core::Egress>
-        + core::Allows<core::Registry>,
+    K: core::Capability + core::Allows<core::State> + core::Allows<core::Registry>,
 {
     type Kind = K;
 
@@ -180,44 +171,13 @@ impl<'c, 'b: 'c, 'd: 'b, T, const ID: u8> Step<'c, 'b, 'd, T, ID> {
         'c: 'r,
     {
         match admit {
-            core::Admit::Item(value) => Self::ready(source, value, credit, wake),
+            core::Admit::Item(value) => {
+                credit.clear();
+                Self::Ready(value, wake)
+            }
             core::Admit::Full => Self::full(source, cx, credit, wake),
             core::Admit::Error(error) => Self::Error(error),
         }
-    }
-
-    pub(in crate::adapter) fn channel<'o, 'r: 'o, K>(
-        route: route::Route<'o, 'r, 'c, 'b, 'd, ID, K>,
-        cx: local::Access<'_, region::Identity<'d>>,
-        index: fifo::Index<'c>,
-        credit: &mut queue::Registration<'o, 'd, fifo::Scope<'c>>,
-        wake: wake::Waker<'d>,
-    ) -> Self
-    where
-        K: core::Capability
-            + core::Allows<core::State>
-            + core::Allows<core::Egress>
-            + core::Allows<core::Registry>,
-    {
-        if let Err(error) = route.core().permits().wait_channel(index, credit, &wake) {
-            return Self::Error(failure::Runtime::from(error));
-        }
-        Self::pending(route, cx, credit)
-    }
-
-    fn ready<'o, 'r: 'o, S>(
-        source: S,
-        value: T,
-        credit: &mut queue::Registration<'o, 'd, fifo::Scope<'c>>,
-        wake: wake::Waker<'d>,
-    ) -> Self
-    where
-        S: Source<'o, 'r, 'c, 'b, 'd, ID>,
-        'c: 'r,
-    {
-        source.core().outbound().sync();
-        credit.clear();
-        Self::Ready(value, wake)
     }
 
     fn full<'o, 'r: 'o, S>(

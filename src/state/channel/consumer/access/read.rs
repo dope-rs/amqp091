@@ -79,7 +79,7 @@ impl<'b, 'a, 'd, const ID: u8> Read<'a, 'b, 'd, ID> {
         };
         if slot.status != Status::Retiring {
             return Err(failure::Error::Protocol(wire::Fault::ConsumerPhase {
-                consumer: num::NonZero::from(key).get(),
+                consumer: num::NonZero::from(key),
                 expected: turn::Consumer::Retiring,
                 actual: slot.status.phase(),
             }));

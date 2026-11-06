@@ -8,9 +8,6 @@ use o3::depot::index::bitmap::entry;
 
 use crate::failure::{self, wire};
 use crate::permits;
-use crate::protocol::topology;
-use crate::state::channel;
-use crate::state::channels::layout::Layout;
 use crate::state::channels::store::Store;
 use crate::state::channels::table::Slot;
 use crate::state::channels::{Error, Index, Lease, Plan};
@@ -84,19 +81,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Map<'r, 'c, 'b, 'd, ID> {
         driver: driver::Reference<'d>,
         permits: &permits::Registry<'c, 'd>,
     ) -> Result<Self, Error> {
-        let layout = Layout::new::<ID>(plan.id_capacity, plan.slot_capacity)
-            .map_err(|error| Error::Allocation(error.into()))?;
-        let store = Store::try_new(layout, permits, |index| {
-            Ok(Slot {
-                channel: channel::Session::try_new(
-                    index.position(),
-                    plan.limits,
-                    plan.consumers,
-                    driver,
-                )?,
-                local: topology::Local::new(),
-            })
-        })?;
+        let store = Store::try_new(plan, driver, permits)?;
         let free = store.last();
         let table = Self {
             store,

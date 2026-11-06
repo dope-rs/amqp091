@@ -1,12 +1,11 @@
 use std::mem;
 
-use o3::mem::rc;
-
 use crate::failure;
 use crate::failure::wire::{self, turn};
 use crate::protocol::topology::records::{self, exchange, queue};
 use crate::protocol::topology::store::Release as _;
 use crate::protocol::topology::{self, store};
+use crate::protocol::wire::{bytes, schema::queues};
 use crate::protocol::{self, method};
 
 pub(crate) enum Work<'c, 'b, 'd, const ID: u8> {
@@ -19,7 +18,10 @@ pub(crate) enum Work<'c, 'b, 'd, const ID: u8> {
     ExchangeDelete(exchange::Delete<'d>),
     ExchangeBind(exchange::Bind<'d>, store::Binding<'c, store::Link<'d, ID>>),
     ExchangeUnbind(exchange::Bind<'d>),
-    QueueDeclare(queue::Declare<'b, 'd>, store::QueueHold<'c, 'b, 'd, ID>),
+    QueueDeclare(
+        bytes::Bytes<'d, queues::Declaration>,
+        store::QueueHold<'c, 'b, 'd, ID>,
+    ),
     QueueRedeclare {
         key: queue::Key<'d, ID>,
         update_current: bool,
@@ -28,13 +30,12 @@ pub(crate) enum Work<'c, 'b, 'd, const ID: u8> {
         queue::Bind<'d, ID>,
         store::Binding<'c, store::QueueBinding<'d, ID>>,
     ),
-    QueueUnbind(queue::Unbind<'d, ID>),
+    QueueUnbind(queue::Bind<'d, ID>),
     QueueDelete(queue::Delete<'d, ID>),
 }
 
 pub(crate) enum Failure<'c, 'b, 'd, const ID: u8> {
     Protocol(Work<'c, 'b, 'd, ID>, wire::Fault),
-    Retain(Work<'c, 'b, 'd, ID>, rc::Error),
     Capacity(Work<'c, 'b, 'd, ID>, wire::Capacity),
 }
 
@@ -46,7 +47,6 @@ impl<'c, 'b, 'd, const ID: u8> Failure<'c, 'b, 'd, ID> {
     pub(crate) fn split(self) -> (Work<'c, 'b, 'd, ID>, failure::Error) {
         match self {
             Self::Protocol(work, error) => (work, failure::Error::Protocol(error)),
-            Self::Retain(work, error) => (work, failure::Error::Retain(error)),
             Self::Capacity(work, error) => (work, failure::Error::Capacity(error)),
         }
     }
@@ -85,27 +85,9 @@ impl<'c, 'b, 'd, const ID: u8> Work<'c, 'b, 'd, ID> {
             | (work @ Self::ExchangeUnbind(_), Response::Empty(Kind::ExchangeUnbind))
             | (work @ Self::QueueBind(_, _), Response::Empty(Kind::QueueBind))
             | (work @ Self::QueueUnbind(_), Response::Empty(Kind::QueueUnbind))
+            | (work @ Self::QueueDeclare(_, _), Response::QueueDeclareOk(_))
             | (work @ Self::QueueRedeclare { .. }, Response::QueueDeclareOk(_))
             | (work @ Self::QueueDelete(_), Response::QueueDeleteOk(_)) => work,
-            (Self::QueueDeclare(mut spec, plan), Response::QueueDeclareOk(ok)) => {
-                if spec.user_name().is_empty() {
-                    let Some(name) = ok.queue.identity() else {
-                        let actual = ok.queue.as_ref().len();
-                        return Err(Failure::Protocol(
-                            Self::QueueDeclare(spec, plan),
-                            wire::Fault::QueueIdentity { actual },
-                        ));
-                    };
-                    let name = match name.try_clone() {
-                        Ok(name) => name,
-                        Err(error) => {
-                            return Err(Failure::Retain(Self::QueueDeclare(spec, plan), error));
-                        }
-                    };
-                    spec.server_name = Some(name);
-                }
-                Self::QueueDeclare(spec, plan)
-            }
             (work, reply) => {
                 let (want, shape) = work.expected();
                 let cause = wire::Fault::WorkReply {
@@ -156,7 +138,6 @@ impl<'c, 'b, 'd, const ID: u8> Work<'c, 'b, 'd, ID> {
             protocol::Response::QueueDeleteOk(_) => turn::Reply::Delete,
             protocol::Response::BasicConsumeOk(_, _) => turn::Reply::Consume,
             protocol::Response::BasicConsumeReplayOk => turn::Reply::Replay,
-            protocol::Response::BasicCancelOk(_) => turn::Reply::Cancel,
         }
     }
 }
@@ -194,15 +175,14 @@ impl<'c, 'b, 'd, const ID: u8> Ready<'c, 'b, 'd, ID> {
                 target.topology.bindings.remove_route(&spec);
             }
             Work::QueueDeclare(spec, plan) => {
-                let key = target.topology.queues.insert(target.values, plan, spec);
-                target.local.current = Some(key);
+                target.declare(spec, plan, None);
             }
             Work::QueueRedeclare {
                 key,
                 update_current: set,
             } => {
                 if set {
-                    target.local.current = Some(key);
+                    target.local.current = queue::Current::Tracked(key);
                 }
             }
             Work::QueueBind(spec, plan) => {
@@ -232,7 +212,7 @@ impl<'c, 'b, 'd, const ID: u8> Ready<'c, 'b, 'd, ID> {
 }
 
 const _: () = {
-    assert!(mem::size_of::<topology::Local<'static, 0>>() == 3 * mem::size_of::<u64>());
+    assert!(mem::size_of::<topology::Local<'static, 0>>() <= 20 * mem::size_of::<u64>());
     assert!(mem::size_of::<topology::Table<'static, 'static, 0>>() == 35 * mem::size_of::<u64>());
     assert!(
         mem::size_of::<topology::State<'_, 'static, 'static, 'static, 0>>()

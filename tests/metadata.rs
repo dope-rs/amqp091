@@ -1,6 +1,6 @@
 use dope_amqp091::failure;
 use dope_amqp091::failure::wire::field::Fault;
-use dope_amqp091::message::field::view;
+use dope_amqp091::message::field::{self, view};
 use dope_amqp091::protocol::wire::content::Header;
 use o3::buffer::storage;
 
@@ -100,6 +100,27 @@ fn rejects_nodes() {
         Err(failure::Error::Field(Fault::Nodes {
             actual: 65_537,
             max: 65_536
+        }))
+    ));
+}
+
+#[test]
+fn bounds_owned_depth() {
+    let mut value = field::Value::void();
+    for _ in 0..62 {
+        value = field::Value::array(vec![value]).expect("bounded array");
+    }
+    let mut table = field::Table::new();
+    table.insert("deep", value).expect("nested entry");
+    table
+        .insert("shallow", field::Value::void())
+        .expect("shallow entry");
+    let value = field::Value::table(table).expect("maximum nested depth");
+    assert!(matches!(
+        field::Value::array(vec![value, field::Value::void()]),
+        Err(failure::Error::Field(Fault::Depth {
+            actual: 65,
+            max: 64,
         }))
     ));
 }

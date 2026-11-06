@@ -1,5 +1,4 @@
 use std::convert::Infallible;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use dope::core::driver::life::recovery;
@@ -7,7 +6,6 @@ use dope_amqp091::config;
 use dope_amqp091::message::ack;
 use dope_amqp091::message::field::Table;
 use dope_amqp091_fiber::channel::basic;
-use dope_fiber::task::time::sleep::TimerExt as _;
 use dope_test::alloc;
 use dope_test::alloc::Tracker;
 
@@ -22,11 +20,8 @@ use crate::common::cancel::*;
 
 #[test]
 fn releases_lease() {
-    let done = AtomicBool::new(false);
     const TAG: &str = "retire-root";
 
-    let done = &done;
-    let peer = done;
     AcceptScript::with(
         move |broker| {
             let mut first = broker.accept().expect("first connection");
@@ -88,7 +83,16 @@ fn releases_lease() {
             second
                 .write_all(&Method::try_encode(1, 60, 31, &ok).expect("AMQP frame fixture"))
                 .expect("recovered basic.cancel-ok");
-            peer.store(true, Ordering::Release);
+            second
+                .write_all(
+                    &Method::try_encode(0, 10, 50, &[0, 200, 0, 0, 0, 0, 0])
+                        .expect("AMQP frame fixture"),
+                )
+                .expect("retirement after cancel-ok");
+            Method::read(&mut second)
+                .expect("connection.close-ok")
+                .check(0, 10, 51)
+                .expect("cancel-ok processed before retirement");
         },
         |broker| {
             let addr = broker.addr();
@@ -112,10 +116,8 @@ fn releases_lease() {
                 config,
                 |rt| {
                     let conn = rt.connection();
-                    let timer = rt.timer();
                     let run = dope_fiber::fiber!('_ => async move {
                         let target = conn.observe().ready().await.expect("first ready");
-                        let epoch = conn.observe().read(|view| view.generation()).await;
                         let channel = conn
                             .channels().open_in(target, 1)
                             .await
@@ -136,16 +138,8 @@ fn releases_lease() {
                         let channel = channel.into_auto();
                         drop(consumer);
 
-                        while conn.observe().read(|view| view.generation()).await == epoch {
-                            timer
-                                .sleep(Duration::from_millis(10))
-                                .expect("generation wait")
-                                .await;
-                        }
-                        timer
-                            .sleep(Duration::from_millis(50))
-                            .expect("topology replay wait")
-                            .await;
+                        conn.observe().retired(target.epoch()).await.expect("first retirement");
+                        let recovered = conn.observe().ready().await.expect("topology replay");
                         let next = channel
                             .basic()
                             .consume(basic::Consume {
@@ -159,12 +153,7 @@ fn releases_lease() {
                             .await
                             .expect("recovered consumer capacity");
                         drop(next);
-                        while !done.load(Ordering::Acquire) {
-                            timer
-                                .sleep(Duration::from_millis(10))
-                                .expect("second cancel wait")
-                                .await;
-                        }
+                        conn.observe().retired(recovered.epoch()).await.expect("second cancellation retirement");
                     });
                     assert!(rt.block_on(run).is_ok(), "AMQP fiber must complete");
                 },

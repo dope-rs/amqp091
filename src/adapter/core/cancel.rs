@@ -77,9 +77,9 @@ impl<'o, 'd: 'o, const ID: u8, K: core::Capability> Cancel<'o, 'd, ID, K> {
     where
         K: core::Allows<core::Reap<L>>,
     {
-        self.owner
-            .cancellations
-            .reap(index, lease, reap)
-            .map_err(failure::Error::Cancellation)
+        self.try_reap::<L, _>(index, lease, |pending| {
+            matches!(reap(pending), reap::Decision::Remove).then_some(())
+        })
+        .map(|_| ())
     }
 }

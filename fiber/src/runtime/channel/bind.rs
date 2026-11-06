@@ -41,12 +41,6 @@ impl<'o: 'app, 'r: 'o, 'c: 'r, 'b: 'c, 'app, 'd: 'app + 'b, B: ?Sized, const ID:
 where
     M: Op<'d>,
 {
-    type Output = (
-        runtime::Handle<'app, 'o, 'r, 'c, 'b, 'd, B, ID>,
-        conn::Ready<'d, ID>,
-        channel::Lease<'c, 'd, ID>,
-        M::Output<'b, consumer::Key<'o, 'd, ID>>,
-    );
     type Run = Run<'app, 'o, 'r, 'c, 'b, 'd, B, ID, M>;
 
     fn start(

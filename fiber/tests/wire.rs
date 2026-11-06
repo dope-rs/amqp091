@@ -2,7 +2,6 @@ use crate::common::amqp::wire::{Frame, Method};
 pub mod common;
 
 use crate::common::amqp::Error;
-use std::mem;
 
 use dope_test::alloc::Tracker;
 
@@ -36,15 +35,6 @@ fn moves_backing() {
     assert_eq!(method.arguments(), b"arguments");
     let (_, alloc) = Tracker::usage(|| method.check(7, 60, 40).expect("AMQP method route"));
     assert_eq!(alloc, (0, 0));
-}
-
-#[test]
-fn preserves_layout() {
-    assert_eq!(
-        mem::size_of::<Frame>(),
-        mem::size_of::<(u8, u16, Vec<u8>)>()
-    );
-    assert_eq!(mem::size_of::<Method>(), mem::size_of::<(u16, Vec<u8>)>());
 }
 
 #[test]

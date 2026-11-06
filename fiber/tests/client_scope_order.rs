@@ -11,17 +11,13 @@ use crate::common::amqp::wire::{Method, put_short};
 
 pub mod common;
 
-use std::sync::mpsc;
-
 use dope_amqp091::message::ack;
-use dope_test::fibers::Yield;
 use dope_test::harness::peer::AcceptScript;
 
 use crate::common::client::*;
 
 #[test]
 fn replays_dependency_first() {
-    let (done, finish) = mpsc::channel();
     AcceptScript::with(
         move |broker| {
             let mut first = broker.accept().expect("first connection");
@@ -37,7 +33,8 @@ fn replays_dependency_first() {
             for channel in [1, 2] {
                 Method::read(&mut first)
                     .expect("channel open")
-                    .check(channel, 20, 10).expect("AMQP method route");
+                    .check(channel, 20, 10)
+                    .expect("AMQP method route");
                 first
                     .write_all(
                         &Method::try_encode(channel, 20, 11, &[0, 0, 0, 0])
@@ -47,13 +44,15 @@ fn replays_dependency_first() {
             }
             Method::read(&mut first)
                 .expect("queue declare")
-                .check(2, 50, 10).expect("AMQP method route");
+                .check(2, 50, 10)
+                .expect("AMQP method route");
             first
                 .write_all(&queue_declare_ok_frame(2, b"shared").expect("AMQP fixture"))
                 .expect("queue declare-ok");
             Method::read(&mut first)
                 .expect("consumer")
-                .check(1, 60, 20).expect("AMQP method route");
+                .check(1, 60, 20)
+                .expect("AMQP method route");
             let mut consumed = Vec::new();
             put_short(&mut consumed, b"cross-channel").expect("AMQP short string");
             first
@@ -102,12 +101,16 @@ fn replays_dependency_first() {
                 .expect("recovered queue declare-ok");
             Method::read(&mut second)
                 .expect("recovered consumer")
-                .check(1, 60, 20).expect("AMQP method route");
+                .check(1, 60, 20)
+                .expect("AMQP method route");
             second
                 .write_all(&Method::try_encode(1, 60, 21, &consumed).expect("AMQP frame fixture"))
                 .expect("recovered consume-ok");
-            done.send(())
-                .expect("publish dependency replay observation");
+            Method::read(&mut second)
+                .expect("connection close")
+                .check(0, 10, 50)
+                .expect("close after complete replay");
+            Method::write(&mut second, 0, 10, 51, &[]).expect("connection.close-ok");
         },
         |broker| {
             with(
@@ -115,65 +118,54 @@ fn replays_dependency_first() {
                 config::Config::new("guest", "guest").expect("config"),
                 |rt| {
                     let conn = rt.connection();
-                    assert!(rt.block_on(dope_fiber::fiber!('_ => async move {
-                        let target = conn.observe().ready().await.expect("first ready");
-                        let epoch = conn
-                            .observe()
-                            .read(|view| view.generation())
-                            .await;
-                        let source = conn
-                            .channels()
-                            .open_in(target, 1)
-                            .await
-                            .expect("consumer channel");
-                        let resource = conn
-                            .channels()
-                            .open_in(target, 2)
-                            .await
-                            .expect("resource channel");
-                        let args = Table::new();
-                        resource
-                            .queue()
-                            .declare(queue::Declare {
-                                queue: "shared",
-                                durable: false,
-                                exclusive: false,
-                                auto_delete: false,
-                                arguments: &args,
-                            })
-                            .await
-                            .expect("queue declare");
-                        let sub = source
-                            .basic()
-                            .consume(basic::Consume {
-                                queue: "shared",
-                                consumer_tag: "cross-channel",
-                                no_local: false,
-                                ack: ack::Manual,
-                                exclusive: false,
-                                arguments: &args,
-                            })
-                            .await
-                            .expect("consumer");
+                    assert!(
+                        rt.block_on(dope_fiber::fiber!('_ => async move {
+                            let target = conn.observe().ready().await.expect("first ready");
+                            let source = conn
+                                .channels()
+                                .open_in(target, 1)
+                                .await
+                                .expect("consumer channel");
+                            let resource = conn
+                                .channels()
+                                .open_in(target, 2)
+                                .await
+                                .expect("resource channel");
+                            let args = Table::new();
+                            resource
+                                .queue()
+                                .declare(queue::Declare {
+                                    queue: "shared",
+                                    durable: false,
+                                    exclusive: false,
+                                    auto_delete: false,
+                                    arguments: &args,
+                                })
+                                .await
+                                .expect("queue declare");
+                            let sub = source
+                                .basic()
+                                .consume(basic::Consume {
+                                    queue: "shared",
+                                    consumer_tag: "cross-channel",
+                                    no_local: false,
+                                    ack: ack::Manual,
+                                    exclusive: false,
+                                    arguments: &args,
+                                })
+                                .await
+                                .expect("consumer");
 
-                        while conn
-                            .observe()
-                            .read(|view| view.generation())
-                            .await
-                            == epoch
-                        {
-                            Yield::new().await;
-                        }
-                        loop {
-                            match finish.try_recv() {
-                                Ok(()) => break,
-                                Err(mpsc::TryRecvError::Empty) => Yield::new().await,
-                                outcome => outcome.expect("broker ended before dependency replay observation"),
-                            }
-                        }
-                        drop(sub);
-                    })).is_ok(), "AMQP fiber must complete");
-                }, recover,
+                            conn.observe().retired(target.epoch()).await.expect("first retirement");
+                            let ready = conn.observe().ready().await.expect("complete replay");
+                            conn.control().close(ready, 200, "done").await.expect("close");
+                            drop(sub);
+                        }))
+                        .is_ok(),
+                        "AMQP fiber must complete"
+                    );
+                },
+                recover,
                 |result| {
                     result
                         .as_ref()

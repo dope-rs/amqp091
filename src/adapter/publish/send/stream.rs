@@ -7,22 +7,14 @@ use o3::base::cell::{local, region};
 use o3::depot::queue::resident::fifo;
 
 use crate::adapter::channel::route;
-use crate::adapter::publish::send::method::{Kind, Mode};
+use crate::adapter::publish::send::method::{Kind, Mode, Tickets};
 use crate::adapter::{core, step};
 use crate::protocol::wire::Writer;
 use crate::service::cancel;
 use crate::state::channel::cancel::lanes;
 use crate::state::channel::methods::send;
+use crate::state::conn::status::Retirement;
 use crate::{failure, service};
-
-pub(super) struct Started<'o, 'd: 'o, const CONFIRM: bool, const ID: u8>
-where
-    Kind<CONFIRM>: Mode<'o, 'd, ID>,
-{
-    publish: cancel::Ticket<'o, 'd, lanes::Publish, ID>,
-    confirm: <Kind<CONFIRM> as Mode<'o, 'd, ID>>::Ticket,
-    max: num::NonZero<u32>,
-}
 
 pub(super) struct Stream<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const CONFIRM: bool, const ID: u8>
 where
@@ -39,23 +31,6 @@ pub(super) struct Last<'c> {
     next: Option<send::Next>,
 }
 
-impl<'o, 'd: 'o, const CONFIRM: bool, const ID: u8> Started<'o, 'd, CONFIRM, ID>
-where
-    Kind<CONFIRM>: Mode<'o, 'd, ID>,
-{
-    pub(super) const fn new(
-        send: cancel::Ticket<'o, 'd, lanes::Publish, ID>,
-        ack: <Kind<CONFIRM> as Mode<'o, 'd, ID>>::Ticket,
-        max: num::NonZero<u32>,
-    ) -> Self {
-        Self {
-            publish: send,
-            confirm: ack,
-            max,
-        }
-    }
-}
-
 impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const CONFIRM: bool, const ID: u8>
     Stream<'o, 'r, 'c, 'b, 'd, CONFIRM, ID>
 where
@@ -63,13 +38,14 @@ where
 {
     pub(super) fn new(
         route: route::Route<'o, 'r, 'c, 'b, 'd, ID, core::Publish>,
-        start: Started<'o, 'd, CONFIRM, ID>,
+        (publish, confirm): Tickets<'o, 'd, <Kind<CONFIRM> as Mode<'o, 'd, ID>>::Ticket, ID>,
+        max: num::NonZero<u32>,
     ) -> Self {
         Self {
             route,
-            publish: start.publish,
-            confirm: start.confirm,
-            max: start.max,
+            publish,
+            confirm,
+            max,
         }
     }
 
@@ -111,8 +87,11 @@ where
         let key = self.publish.identity();
         let admit = route.admit(access.reborrow(), encode, |route| {
             let state = route.channel.publish();
-            let active = state.publishing.get(key).ok_or(failure::Error::Closed)?;
-            let next = state.methods.next();
+            let active = state
+                .publishing
+                .get(key)
+                .ok_or_else(|| failure::Error::Closed)?;
+            let next = state.methods.next::<false>().1;
             active.finish();
             Ok(Last {
                 wake: route.index.lane(),
@@ -138,7 +117,6 @@ where
             );
         }
         core.permits().wake_channel(last.wake);
-        core.waiters().wake_flow();
         self.confirm
     }
 
@@ -163,7 +141,10 @@ where
         );
         self.cancel();
         if close {
-            core.close(self.route.epoch().raw(), close::Reason::Protocol);
+            core.close(
+                self.route.epoch().raw(),
+                Retirement::Permanent.abort(close::Reason::Protocol),
+            );
             core.waiters().wake_all();
         }
     }

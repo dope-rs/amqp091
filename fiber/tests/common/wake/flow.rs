@@ -2,12 +2,11 @@ use std::task;
 
 use dope::core::driver::schedule::ready::wake::queue;
 use dope_amqp091::adapter::channel::Lease;
-use dope_amqp091::adapter::conn;
+use dope_amqp091::adapter::{Poll as _, conn, method};
 use dope_amqp091::protocol::method::channel;
 use dope_amqp091::{adapter, failure};
 use dope_fiber::abi::Fiber;
 use dope_fiber::context;
-use dope_test::harness::support::gates::Barrier;
 use o3::base::cell::local;
 use o3::depot::queue::resident::fifo;
 
@@ -18,7 +17,7 @@ pub struct Flow<'g, 'o, 'r, 'c, 'b, 'd> {
     pub(crate) target: conn::Epoch<'d, 0>,
     pub(crate) lease: Lease<'c, 'd, 0>,
     pub(crate) credit: queue::Registration<'o, 'd, fifo::Scope<'c>>,
-    pub(crate) gate: Option<&'g Barrier>,
+    pub(crate) head: Option<&'g mut method::Call<'o, 'r, 'c, 'b, 'd, 0, channel::Open>>,
 }
 
 impl<'o, 'r, 'c, 'b, 'd> Fiber<'d> for Flow<'_, 'o, 'r, 'c, 'b, 'd> {
@@ -38,9 +37,14 @@ impl<'o, 'r, 'c, 'b, 'd> Fiber<'d> for Flow<'_, 'o, 'r, 'c, 'b, 'd> {
             wake,
         );
         if poll.is_pending()
-            && let Some(gate) = this.gate.take()
+            && let Some(head) = this.head.take()
         {
-            gate.arrive().map_err(Fault::Notify)?;
+            let wake = cx.as_ref().completion();
+            let local = local::Access::new(cx.as_mut().region_token());
+            assert!(
+                head.poll(local, wake).is_pending(),
+                "head request awaits peer disconnect"
+            );
         }
         poll.map_err(Fault::Runtime)
     }

@@ -34,15 +34,10 @@ impl<'c, 'b, 'd, const ID: u8> Access<'_, 'c, 'b, 'd, ID> {
                 id,
             ))),
             lanes::Kind::Consumer => self.consumers.read().cancel_key(id).map(Outcome::Consumer),
-            lanes::Kind::Confirm => {
-                if !self.control.has_confirms() {
-                    return None;
-                }
-                match self.confirm.reap(id) {
-                    confirms::Reap::Removed => Some(Outcome::Confirm),
-                    confirms::Reap::Missing => None,
-                }
-            }
+            lanes::Kind::Confirm => match self.confirm.reap(id) {
+                confirms::Reap::Removed => Some(Outcome::Confirm),
+                confirms::Reap::Missing => None,
+            },
             lanes::Kind::Publish => {
                 let key = streams::Key::new(id);
                 self.publishing.get(key)?.finish();

@@ -1,5 +1,4 @@
 use std::convert::Infallible;
-use std::time::Duration;
 
 use dope::core::driver::life::recovery;
 
@@ -8,7 +7,6 @@ pub mod common;
 
 use common::wake::probe::{Phase, Probe};
 use dope::core::driver::schedule::ready::wake::fanout;
-use dope::core::platform::wake;
 use dope_amqp091::adapter;
 use dope_test::harness::peer::TcpScript;
 
@@ -16,12 +14,10 @@ use crate::common::wake::{Ready, TUNE, with_client};
 
 #[test]
 fn keeps_linear() {
-    let (end, done) = wake::Ends::blocking().expect("completion pipe").split();
     TcpScript::with(
-        move |stream| {
+        |stream| {
             Peer::new(stream).open(TUNE).expect("AMQP broker handshake");
-            end.wait_timeout(Duration::from_secs(10))
-                .expect("test gate");
+            assert_eq!(stream.read(&mut [0]).expect("connection retirement"), 0);
         },
         |broker| {
             let addr = broker.addr();
@@ -34,7 +30,6 @@ fn keeps_linear() {
                     let target = ((scope.block_on(Ready {
                         state: amqp.connection().observe(),
                         wait: fanout::Registration::new(),
-                        gate: None,
                     }))
                     .expect("AMQP operation must succeed"))
                     .expect("AMQP operation must succeed");
@@ -48,7 +43,6 @@ fn keeps_linear() {
                     }))
                     .expect("AMQP fiber must complete");
                     assert!(proof.is_ok(), "wake ownership: {proof:?}");
-                    done.notify().expect("release broker");
                 },
                 recover,
                 |result| {

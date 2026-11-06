@@ -61,7 +61,7 @@ fn reuses_id() {
                 |rt| {
                     let conn = rt.connection();
                     assert!(rt.block_on(dope_fiber::fiber!('_ => async move {
-                        let ready = wait_ready(conn).await.expect("ready");
+                        let ready = conn.observe().ready().await.expect("ready");
                         let first = conn.channels().open_auto().await.expect("first auto channel");
                         assert_eq!(first.id(), 1);
                         let late = first.queue().purge("late");

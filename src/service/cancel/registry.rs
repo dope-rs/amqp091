@@ -20,12 +20,6 @@ pub(crate) struct Registry<'d, const ID: u8> {
     entries: values::Values<Active<'d, ID>, { lanes::Kind::COUNT }>,
     layout: Layout,
     cursor: cell::Cell<lanes::Kind>,
-    pub(in crate::service) deferred_control: cell::Cell<bool>,
-}
-
-struct Front<'a, 'd, const ID: u8> {
-    inner: values::Snapshot<'a, Active<'d, ID>, { lanes::Kind::COUNT }, round::Front>,
-    active: Active<'d, ID>,
 }
 
 pub(crate) struct Retry<'a, 'd, const ID: u8> {
@@ -50,13 +44,6 @@ impl<'d, const ID: u8> Active<'d, ID> {
     }
 }
 
-impl<const ID: u8> Front<'_, '_, ID> {
-    fn pop(self) {
-        let active = self.active;
-        let _ = self.inner.pop_if(|current| current == active);
-    }
-}
-
 impl<'d, const ID: u8> Registry<'d, ID> {
     pub(crate) fn try_new(plan: Plan) -> Result<Self, alloc::Error> {
         let lanes = values::Values::try_new(plan.entries() as usize, plan.queues()?)?;
@@ -64,7 +51,6 @@ impl<'d, const ID: u8> Registry<'d, ID> {
             entries: lanes,
             layout: plan.layout(),
             cursor: cell::Cell::new(lanes::Kind::Reservation),
-            deferred_control: cell::Cell::new(false),
         })
     }
 
@@ -88,17 +74,6 @@ impl<'d, const ID: u8> Registry<'d, ID> {
             lease,
         });
         Ok(place)
-    }
-
-    fn front<L: Lane<'d, ID>>(
-        &self,
-        ch: channels::Index<'_, ID>,
-    ) -> Result<Option<Front<'_, 'd, ID>>, round::Bounds> {
-        let queue = self.lane(u32::from(ch.offset()), L::KIND);
-        let Some((inner, active)) = self.entries.try_lane(queue as usize)?.front() else {
-            return Ok(None);
-        };
-        Ok(Some(Front { inner, active }))
     }
 
     pub(crate) fn has_pending(&self) -> bool {
@@ -194,41 +169,22 @@ impl<'d, const ID: u8> Registry<'d, ID> {
         lease: channels::Lease<'d, ID>,
         reap: impl FnOnce(Pending<'d, L, ID>) -> Option<R>,
     ) -> Result<Option<R>, round::Bounds> {
-        let Some(front) = self.front::<L>(ch)? else {
+        let queue = self.lane(u32::from(ch.offset()), L::KIND);
+        let Some((front, active)) = self.entries.try_lane(queue as usize)?.front() else {
             return Ok(None);
         };
         let Active {
             lease: held,
             identity: id,
-        } = front.active;
+        } = active;
         if lease != held {
             return Ok(None);
         }
         let Some(result) = reap(Pending::new(held, id)) else {
             return Ok(None);
         };
-        front.pop();
+        let _ = front.pop_if(|current| current == active);
         Ok(Some(result))
-    }
-
-    pub(crate) fn reap<L: Lane<'d, ID>>(
-        &self,
-        ch: channels::Index<'_, ID>,
-        lease: channels::Lease<'d, ID>,
-        reap: impl FnOnce(Pending<'d, L, ID>) -> reap::Decision,
-    ) -> Result<(), round::Bounds> {
-        let Some(front) = self.front::<L>(ch)? else {
-            return Ok(());
-        };
-        let Active {
-            lease: held,
-            identity: id,
-        } = front.active;
-        if lease != held || matches!(reap(Pending::new(held, id)), reap::Decision::Keep) {
-            return Ok(());
-        }
-        front.pop();
-        Ok(())
     }
 
     const fn lane(&self, ch: u32, kind: lanes::Kind) -> u32 {

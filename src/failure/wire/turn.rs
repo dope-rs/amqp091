@@ -107,5 +107,4 @@ pub enum Reply {
     Delete,
     Consume,
     Replay,
-    Cancel,
 }

@@ -52,7 +52,10 @@ impl<'o, 'c: 'o, 'd: 'c, const ID: u8, M> Send<'o, 'c, 'd, ID, M> {
         M: method::Op<'d>,
     {
         let core = route.core();
-        let admit = match route.read(access.read(), |shared| shared.connection.input.is_ready()) {
+        let admit = match route
+            .gate
+            .read(access.read(), |shared| shared.connection.input.is_ready())
+        {
             service::EpochAccess::Live(true) => {
                 <<M as requests::Source<'d>>::Policy<ID> as Admit<'d, M, ID>>::admit(
                     route,

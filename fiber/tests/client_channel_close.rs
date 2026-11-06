@@ -1,5 +1,4 @@
 use std::convert::Infallible;
-use std::sync::mpsc;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -8,7 +7,8 @@ use dope_amqp091::config;
 use dope_fiber::abi::poll_fn;
 
 use crate::common::amqp::Peer;
-use crate::common::amqp::wire::{Method, put_short};
+use crate::common::amqp::wire::{Frame, Method, put_short};
+use crate::common::basic::{self, returned};
 use crate::common::fiber::{Pinned, poll_once};
 pub mod common;
 
@@ -24,7 +24,6 @@ const CLOSE_CHANNEL_COUNT: u16 = CLOSE_EGRESS_CAPACITY as u16 + 1;
 #[test]
 fn close_drains_or_releases_pending_rpc() {
     for cancel in [false, true] {
-        let (release, released) = mpsc::channel();
         TcpScript::with(
             move |stream| {
                 stream.read_wait(Some(Duration::from_secs(10))).expect("read deadline");
@@ -35,7 +34,6 @@ fn close_drains_or_releases_pending_rpc() {
                 let first = Method::read(stream).expect("first purge");
                 first.check(1, 50, 30).expect("queue.purge");
                 assert_eq!(queue_name(&first).expect("queue name"), "first");
-                released.recv_timeout(Duration::from_secs(10)).expect("close admission");
                 check_no_frame(stream, "RPC ahead of pending purge").expect("RPC ordering");
                 Method::write(stream, 1, 50, 31, &0_u32.to_be_bytes()).expect("first purge-ok");
                 let next = Method::read(stream).expect("operation after purge");
@@ -64,23 +62,37 @@ fn close_drains_or_releases_pending_rpc() {
                             let ready = conn.observe().ready().await.expect("ready");
                             let channel = conn.channels().open(1).await.expect("channel");
                             let mut first = Pinned::new(channel.queue().purge("first"));
-                            assert!(poll_once(first.as_pin()).await.is_pending());
-                            let mut close = Pinned::new(channel.close(200, "done"));
-                            assert!(poll_once(close.as_pin()).await.is_pending());
+                            let mut close = Some(Pinned::new(channel.close(200, "done")));
+                            let mut next = Pinned::new(channel.queue().purge("next"));
+                            poll_fn(|mut context| {
+                                assert!(matches!(
+                                    context.as_mut().try_poll(first.as_pin()),
+                                    context::PollResult::Polled(Poll::Pending)
+                                ));
+                                assert!(matches!(
+                                    context.as_mut().try_poll(close.as_mut().expect("close").as_pin()),
+                                    context::PollResult::Polled(Poll::Pending)
+                                ));
+                                if cancel {
+                                    drop(close.take());
+                                    assert!(matches!(
+                                        context.as_mut().try_poll(next.as_pin()),
+                                        context::PollResult::Polled(Poll::Pending)
+                                    ));
+                                } else {
+                                    assert!(matches!(
+                                        context.as_mut().try_poll(next.as_pin()),
+                                        context::PollResult::Polled(Poll::Ready(Err(error)))
+                                            if matches!(error.error(), failure::Error::Closed)
+                                    ));
+                                }
+                                Poll::Ready(())
+                            }).await;
+                            first.await.expect("first purge");
                             if cancel {
-                                drop(close);
-                                let mut next = Pinned::new(channel.queue().purge("next"));
-                                assert!(poll_once(next.as_pin()).await.is_pending());
-                                release.send(()).expect("publish close cancellation");
-                                first.await.expect("first purge");
                                 next.await.expect("purge after cancelled close");
                             } else {
-                                let error = channel.queue().purge("next").await
-                                    .expect_err("closing channel admitted a new RPC");
-                                assert!(matches!(error.error(), failure::Error::Closed));
-                                release.send(()).expect("publish retained close");
-                                first.await.expect("purge while closing");
-                                close.await.expect("close after purge");
+                                close.expect("retained close").await.expect("close after purge");
                             }
                             conn.control().close(ready, 200, "done").await.expect("close connection");
                         })).expect("fiber completion");
@@ -94,6 +106,83 @@ fn close_drains_or_releases_pending_rpc() {
             },
         ).expect("close ordering broker");
     }
+}
+
+#[test]
+fn cancelled_unsent_close_preserves_inbound_content() {
+    TcpScript::with(
+        |stream| {
+            stream.read_wait(Some(Duration::from_secs(10))).expect("read deadline");
+            Peer::new(stream).open(TUNE).expect("handshake");
+            let channel = returned::open_channel(stream).expect("channel");
+            let barrier = returned::open_channel(stream).expect("barrier channel");
+            Method::read(stream).expect("pending purge").check(channel, 50, 30)
+                .expect("purge method");
+            Method::read(stream).expect("partial barrier").check(barrier, 50, 30)
+                .expect("barrier method");
+            stream.write_all(&returned::method(channel, "", "").expect("return method"))
+                .expect("partial return");
+            stream.write_all(&basic::content_header(channel, 2).expect("return header"))
+                .expect("partial header");
+            stream.write_all(&Frame::try_encode(3, channel, b"a").expect("body frame"))
+                .expect("partial body");
+            Method::write(stream, barrier, 50, 31, &[0; 4]).expect("partial barrier reply");
+            Method::read(stream).expect("closing barrier").check(barrier, 50, 30)
+                .expect("unsent close barrier");
+            stream.write_all(&Frame::try_encode(3, channel, b"b").expect("body frame"))
+                .expect("remaining body");
+            stream.write_all(&returned::content(channel, "", "", &[b"c"], None)
+                .expect("return frames")).expect("next return");
+            Method::write(stream, channel, 50, 31, &[0; 4]).expect("pending purge reply");
+            Method::write(stream, barrier, 50, 31, &[0; 4]).expect("closing barrier reply");
+            Method::read(stream).expect("purge after cancellation").check(channel, 50, 30)
+                .expect("cancelled close emitted a frame");
+            Method::write(stream, channel, 50, 31, &[0; 4]).expect("next purge reply");
+            returned::close_connection(stream).expect("connection close");
+        },
+        |broker| {
+            with(
+                broker.addr(),
+                config::Config::new("guest", "guest").expect("config").capacity(
+                    config::Capacity::default().channels(2)
+                        .channel(config::Channel::default().methods(2).returns(2)),
+                ),
+                |rt| {
+                    let conn = rt.connection();
+                    rt.block_on(dope_fiber::fiber!('_ => async move {
+                        let ready = conn.observe().ready().await.expect("ready");
+                        let channel = conn.channels().open(1).await.expect("channel");
+                        let barrier = conn.channels().open(2).await.expect("barrier channel");
+                        let mut first = Pinned::new(channel.queue().purge("pending"));
+                        assert!(poll_once(first.as_pin()).await.is_pending());
+                        barrier.queue().purge("partial").await.expect("partial content barrier");
+                        let mut close = Pinned::new(channel.close(200, "done"));
+                        assert!(poll_once(close.as_pin()).await.is_pending());
+                        let mut content = Pinned::new(barrier.queue().purge("closing"));
+                        assert!(poll_once(content.as_pin()).await.is_pending());
+                        let message = channel.next_return().await.expect("return during unsent close")
+                            .expect("completed partial return");
+                        assert!(message.body().chunks().flatten().eq(b"ab"));
+                        message.release();
+                        content.await.expect("closing content barrier");
+                        drop(close);
+                        channel.queue().purge("next").await.expect("purge after cancelled close");
+                        first.await.expect("pending purge");
+                        let message = channel.next_return().await.expect("return after cancelled close")
+                            .expect("retained return");
+                        assert!(message.body().chunks().flatten().eq(b"c"));
+                        message.release();
+                        conn.control().close(ready, 200, "done").await.expect("connection close");
+                    })).expect("fiber completion");
+                },
+                recover,
+                |result| {
+                    result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
+                },
+            );
+            broker.finish().expect("broker");
+        },
+    ).expect("content close broker");
 }
 
 #[test]
@@ -157,7 +246,7 @@ fn waits_for_channel_credit() {
                 |rt| {
                     let conn = rt.connection();
                     assert!(rt.block_on(dope_fiber::fiber!('_ => async move {
-                        wait_ready(conn).await.expect("ready");
+                        conn.observe().ready().await.expect("ready");
                         let mut channels = Vec::with_capacity(usize::from(CLOSE_CHANNEL_COUNT));
                         for channel in 1..=CLOSE_CHANNEL_COUNT {
                             channels.push(
@@ -262,7 +351,7 @@ fn waits_for_conn_credit() {
                     let conn = rt.connection();
                     assert!(
                         rt.block_on(dope_fiber::fiber!('_ => async move {
-                            let ready = wait_ready(conn).await.expect("ready");
+                            let ready = conn.observe().ready().await.expect("ready");
                             let first = conn.channels().open(1).await.expect("open first channel");
                             let second = conn.channels().open(2).await.expect("open second channel");
                             let mut first_fill = Pinned::new(first.queue().purge("fill-1"));
@@ -347,7 +436,7 @@ fn server_is_terminal() {
                     let conn = rt.connection();
                     assert!(
                         rt.block_on(dope_fiber::fiber!('_ => async move {
-                            wait_ready(conn).await.expect("ready");
+                            conn.observe().ready().await.expect("ready");
                             let channel = conn.channels().open_auto().await.expect("open channel");
                             let error = channel.queue().purge("pending").await.expect_err("terminal channel accepted a purge");
                             assert!(matches!((error).error(), failure::Error::Server {

@@ -12,12 +12,12 @@ pub enum Error<'c, 'b: 'c, 'd: 'b, const ID: u8> {
 
 impl<'c, 'b: 'c, 'd: 'b, const ID: u8> Error<'c, 'b, 'd, ID> {
     pub(super) fn from_runtime(error: failure::Runtime<'c, 'b, 'd, ID>) -> Self {
-        if matches!(error, failure::Runtime::Terminal(_))
-            || matches!(error.error(), failure::Error::Closed)
-        {
-            Self::SourceUnavailable(error)
-        } else {
-            Self::Failed(error)
+        match error {
+            failure::Runtime::Terminal(_)
+            | failure::Runtime::Local(failure::Error::Closed | failure::Error::Retain(_)) => {
+                Self::SourceUnavailable(error)
+            }
+            _ => Self::Failed(error),
         }
     }
 }

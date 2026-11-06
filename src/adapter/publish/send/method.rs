@@ -144,7 +144,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'exchange, 'key, 'properties, 'body, 'd: 'b, co
         &mut self,
         mut access: local::Access<'_, region::Identity<'d>>,
         wake: wake::Waker<'d>,
-    ) -> step::Step<'c, 'b, 'd, stream::Started<'o, 'd, CONFIRM, ID>, ID>
+    ) -> step::Step<'c, 'b, 'd, Tickets<'o, 'd, <Kind<CONFIRM> as Mode<'o, 'd, ID>>::Ticket, ID>, ID>
     where
         Kind<CONFIRM>: Mode<'o, 'd, ID>,
     {
@@ -194,7 +194,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'exchange, 'key, 'properties, 'body, 'd: 'b, co
         }
         let admit = route.try_frame(
             access.reborrow(),
-            |output| {
+            |output, _| {
                 method::Encode::write(
                     &basic::Publish {
                         exchange: self.input.exchange.into(),
@@ -232,22 +232,24 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'exchange, 'key, 'properties, 'body, 'd: 'b, co
                 if state.is_waiting() {
                     return Err(core::Reject::Defer(view.index.lane()));
                 }
-                let Some((ticket, conf)) =
+                let Some(tickets) =
                     <Kind<CONFIRM> as Mode<'o, 'd, ID>>::begin(state, route, view.index, slot)?
                 else {
                     return Err(core::Reject::Defer(view.index.lane()));
                 };
-                Ok(stream::Started::<CONFIRM, ID>::new(
-                    ticket,
-                    conf,
-                    self.input.max(),
-                ))
+                Ok(tickets)
             },
         );
         let admit = match admit {
             Ok(admit) => admit,
             Err(index) => {
-                return step::Step::channel(route, access, index, self.credit.credit(), wake);
+                return match core
+                    .permits()
+                    .wait_channel(index, self.credit.credit(), &wake)
+                {
+                    Ok(()) => step::Step::Pending,
+                    Err(error) => step::Step::Error(failure::Runtime::from(error)),
+                };
             }
         };
         step::Step::admit(route, access, admit, self.credit.credit(), wake)
@@ -255,13 +257,13 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'exchange, 'key, 'properties, 'body, 'd: 'b, co
 
     pub(super) fn next<const CONFIRM: bool>(
         self,
-        start: stream::Started<'o, 'd, CONFIRM, ID>,
+        tickets: Tickets<'o, 'd, <Kind<CONFIRM> as Mode<'o, 'd, ID>>::Ticket, ID>,
     ) -> header::Header<'properties, 'body, 'o, 'r, 'c, 'b, 'd, CONFIRM, ID>
     where
         Kind<CONFIRM>: Mode<'o, 'd, ID>,
     {
         header::Header::new(
-            stream::Stream::new(self.route, start),
+            stream::Stream::new(self.route, tickets, self.input.max()),
             self.input.properties,
             self.input.body,
             self.credit.into_credit(),
@@ -290,4 +292,4 @@ const _: () = {
     );
 };
 
-type Tickets<'o, 'd, T, const ID: u8> = (cancel::Ticket<'o, 'd, lanes::Publish, ID>, T);
+pub(super) type Tickets<'o, 'd, T, const ID: u8> = (cancel::Ticket<'o, 'd, lanes::Publish, ID>, T);

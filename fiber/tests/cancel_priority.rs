@@ -2,7 +2,6 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use dope::core::driver::life::recovery;
-use dope::core::platform::wake;
 use dope_amqp091::config;
 use dope_amqp091::message::ack;
 use dope_amqp091::message::field::Table;
@@ -10,9 +9,9 @@ use dope_amqp091_fiber::channel::basic;
 use dope_test::alloc;
 use dope_test::alloc::Tracker;
 
-use crate::common::amqp::Peer;
 use crate::common::amqp::wire::Method;
-use crate::common::fiber::{Pinned, poll_once, wait};
+use crate::common::amqp::{Peer, Tune};
+use crate::common::fiber::{Pinned, poll_once};
 pub mod common;
 
 use dope_test::harness::peer::TcpScript;
@@ -21,17 +20,14 @@ use crate::common::cancel::*;
 
 #[test]
 fn orphan_preempts_owned() {
-    let (seen, notify) = wake::Ends::blocking().expect("request observation").split();
-    let (dropped, release) = wake::Ends::blocking().expect("drop barrier").split();
-    let (retired, finish) = wake::Ends::blocking()
-        .expect("retirement observation")
-        .split();
     const OWNED: &str = "owned-cancel";
     const ORPHAN: &str = "orphan-cancel";
 
     TcpScript::with(
         move |stream| {
-            Peer::new(stream).open(TUNE).expect("AMQP broker handshake");
+            Peer::new(stream)
+                .open(Tune::new(2, 4096, 0))
+                .expect("AMQP broker handshake");
             Method::read(stream)
                 .expect("AMQP method")
                 .check(1, 20, 10)
@@ -55,10 +51,15 @@ fn orphan_preempts_owned() {
                 .expect("AMQP method")
                 .check(1, 60, 20)
                 .expect("AMQP method route");
-            notify.notify().expect("orphan request");
-            dropped
-                .wait_timeout(Duration::from_secs(10))
-                .expect("consumer drop");
+            Method::read(stream)
+                .expect("orphan observation channel")
+                .check(2, 20, 10)
+                .expect("orphan observation route");
+            Method::write(stream, 2, 20, 11, &[0, 0, 0, 0]).expect("orphan observation reply");
+            Method::read(stream)
+                .expect("consumer drop close")
+                .check(2, 20, 40)
+                .expect("consumer drop route");
             let orphan = consume_ok_arguments(ORPHAN).expect("AMQP consumer tag");
             stream
                 .write_all(&Method::try_encode(1, 60, 21, &orphan).expect("AMQP frame fixture"))
@@ -72,7 +73,7 @@ fn orphan_preempts_owned() {
             stream
                 .write_all(&Method::try_encode(1, 60, 31, &owned_ok).expect("AMQP frame fixture"))
                 .expect("owned cancel-ok");
-            finish.notify().expect("consumers retired");
+            Method::write(stream, 2, 20, 41, &[]).expect("consumers retired reply");
         },
         |broker| {
             let addr = broker.addr();
@@ -84,7 +85,7 @@ fn orphan_preempts_owned() {
                 .deliveries(1)
                 .returns(1);
             let capacity = config::Capacity::default()
-                .channels(1)
+                .channels(2)
                 .channel(channel)
                 .egress(config::Egress::new(2, 4096));
             let config = config::Config::new("guest", "guest")
@@ -129,20 +130,19 @@ fn orphan_preempts_owned() {
                         ),
                         "AMQP fiber must complete"
                     );
-                    runtime
-                        .block_on(wait(&seen))
+                    let barrier = runtime
+                        .block_on(conn.channels().open(2))
                         .expect("fiber drive")
-                        .expect("orphan request wait");
+                        .expect("orphan request observed");
                     let (_, alloc) = Tracker::usage(|| {
                         drop(owned);
                         drop(orphan);
                     });
                     assert_eq!(alloc, (0, 0));
-                    release.notify().expect("consumers dropped");
                     runtime
-                        .block_on(wait(&retired))
+                        .block_on(barrier.close(200, ""))
                         .expect("fiber drive")
-                        .expect("retirement wait");
+                        .expect("consumers retired");
                 },
                 recover,
                 |result| {
@@ -178,22 +178,18 @@ fn resumes_cancellation_and_control_after_shared_quota() {
     use dope_amqp091::service::{Port, Spec, app};
     use dope_amqp091_fiber::conn::Connection;
     use dope_fiber::abi::poll_fn;
-    use dope_fiber::task::local::Once;
-    use dope_fiber::task::time::sleep::TimerExt as _;
+    use dope_fiber::task::{done, local::Once};
     use dope_test::fibers::TEST;
     use dope_test::fibers::Yield;
+    use dope_test::harness::GUARD;
     use o3::base::cell::local;
 
     const TAG: &str = "shared-quota";
     const CANCELLED: usize = dope::core::driver::schedule::LIMIT;
     for control in [false, true] {
-        let (observed, notify) = wake::Ends::blocking()
-            .expect("cancellation observation")
-            .split();
-        let (release, suffix) = wake::Ends::blocking().expect("input barrier").split();
         TcpScript::with(
         move |stream| {
-            Peer::new(stream).open(TUNE).expect("AMQP broker handshake");
+            Peer::new(stream).open(Tune::new(2, 4096, 0)).expect("AMQP broker handshake");
             Method::read(stream)
                 .expect("channel.open")
                 .check(1, 20, 10)
@@ -203,10 +199,14 @@ fn resumes_cancellation_and_control_after_shared_quota() {
                 .expect("channel.open-ok");
             check_client_consume(&Method::read(stream).expect("basic.consume"), TAG)
                 .expect("consumer route");
+            Method::read(stream)
+                .expect("consume observation channel")
+                .check(2, 20, 10)
+                .expect("consume observation route");
             let reply = consume_ok_arguments(TAG).expect("consumer tag");
             let mut response = Method::try_encode(1, 60, 21, &reply).expect("consume fixture");
             response.extend_from_slice(
-                &Method::try_encode(0, 10, 60, b"\x05ready").expect("barrier fixture"),
+                &Method::try_encode(2, 20, 11, &[0, 0, 0, 0]).expect("observation fixture"),
             );
             let heartbeat = crate::common::amqp::wire::Frame::try_encode(8, 0, &[])
                 .expect("heartbeat fixture");
@@ -215,7 +215,8 @@ fn resumes_cancellation_and_control_after_shared_quota() {
             }
             stream.write_all(&response).expect("consume response barrier");
             if control {
-                release.wait_timeout(Duration::from_secs(10)).expect("input release");
+                crate::common::client::check_publish(stream, 2, "suffix", &[])
+                    .expect("input release publish");
                 stream.write_all(&heartbeat[2..]).expect("heartbeat suffix");
             }
             check(&Method::read(stream).expect("basic.cancel after shared quota"), TAG)
@@ -223,15 +224,17 @@ fn resumes_cancellation_and_control_after_shared_quota() {
             stream
                 .write_all(&Method::try_encode(1, 60, 31, &reply).expect("cancel fixture"))
                 .expect("basic.cancel-ok");
-            notify.notify().expect("consumer cancelled");
-            stream
-                .shutdown(std::net::Shutdown::Both)
-                .expect("cancellation observation wake");
+            Method::write(stream, 0, 10, 50, &[0, 200, 0, 0, 0, 0, 0])
+                .expect("retirement after cancel-ok");
+            Method::read(stream)
+                .expect("connection.close-ok")
+                .check(0, 10, 51)
+                .expect("consumer cancellation processed");
         },
         |broker| {
             let config = config::Config::new("guest", "guest")
                 .expect("config")
-                .capacity(config::Capacity::default().channels(1).channel(
+                .capacity(config::Capacity::default().channels(2).channel(
                     config::Channel::default()
                         .methods(CANCELLED + 1)
                         .consumers(1),
@@ -280,7 +283,7 @@ fn resumes_cancellation_and_control_after_shared_quota() {
                                                 let target = TEST.try_run(&mut app, conn.observe().ready())
                                                     .expect("ready drive")
                                                     .expect("connection ready");
-                                                let channel = TEST.try_run(&mut app, conn.channels().open(1))
+                                                TEST.try_run(&mut app, conn.channels().open(1))
                                                     .expect("open drive")
                                                     .expect("channel open");
                                                 let table = Table::new();
@@ -305,14 +308,9 @@ fn resumes_cancellation_and_control_after_shared_quota() {
                                                     Poll::Ready(())
                                                 }))
                                                 .expect("consume send");
-                                                let timer = port.timer();
-                                                TEST.try_run(&mut app, dope_fiber::fiber!('_ => async move {
-                                                    while !conn.observe().read(|view| view.is_blocked()).await {
-                                                        timer.sleep(Duration::from_millis(1))
-                                                            .expect("response barrier timer").await;
-                                                    }
-                                                }))
-                                                .expect("completed consume barrier");
+                                                let barrier = TEST.try_run(&mut app, conn.channels().open(2))
+                                                    .expect("consume observation drive")
+                                                    .expect("completed consume observation");
                                                 let mut subscriptions = [const { fanout::Registration::new() }; CANCELLED];
                                                 TEST.try_run(&mut app, dope_fiber::fiber!('_ => async move {
                                                     Once::new(|mut access| {
@@ -348,16 +346,22 @@ fn resumes_cancellation_and_control_after_shared_quota() {
                                                         }
                                                         Poll::Ready(())
                                                     })).expect("retired wake targets");
-                                                    suffix.notify().expect("release held control write");
+                                                    let properties = dope_amqp091::message::property::Properties::default();
+                                                    TEST.try_run(&mut app, barrier.basic().publish(adapter::publish::Request {
+                                                        exchange: "",
+                                                        routing_key: "suffix",
+                                                        mandatory: false,
+                                                        properties: &properties,
+                                                        body: &[],
+                                                    }))
+                                                    .expect("input release drive")
+                                                    .expect("input release publish");
                                                 }
-                                                TEST.try_run(&mut app, dope_fiber::fiber!('_ => async move {
+                                                app.drive_for(GUARD, done::Once::new(dope_fiber::fiber!('_ => async move {
                                                     conn.observe().retired(target.epoch()).await
                                                         .expect("broker retirement wake");
-                                                    observed.wait_timeout(Duration::ZERO)
-                                                        .expect("consumer cancellation observation");
-                                                }))
+                                                })))
                                                 .unwrap_or_else(|error| panic!("shared quota control={control}: {error:?}"));
-                                                drop(channel);
                                             },
                                         ).unwrap_or_else(|_| panic!("application lifecycle"));
                                     },

@@ -102,14 +102,6 @@ impl method::Spec for FlowOk {
     const ID: method::Id = FLOW_OK;
 }
 
-impl FlowOk {
-    pub(crate) fn read(reader: &mut reader::Reader<'_>) -> Result<Self, fields::Decode> {
-        Ok(Self {
-            active: reader.read::<u8>()? & 1 == 1,
-        })
-    }
-}
-
 impl method::Args for FlowOk {
     fn write_args<S: wire::Put>(&self, out: &mut S) {
         out.push(u8::from(self.active));

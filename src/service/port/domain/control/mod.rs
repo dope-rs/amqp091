@@ -49,7 +49,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
         let stores = self.domain.content.stores();
         let chan = lease.id();
         let target = self.domain.session.write(access.reborrow(), |state| {
-            state.connection.lifecycle.status().ready()
+            state.connection.lifecycle.status().epoch()
         });
         let Some(target) = target else {
             let _ = self.detach(access.reborrow(), lease.raw(), key, stores);
@@ -62,22 +62,25 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
             .write(target, lease.raw())
             .admit(access.reborrow(), |state, egress| {
                 match state.routes.project(lease.raw(), |view| {
-                    if view.channel.is_retiring() {
+                    if view.channel.protocol().phase != Phase::Open {
                         return Plan::Missing(Freed::Available);
                     }
                     let mut method = view.channel.method_state();
                     let busy = method.publishing.is_active();
-                    let ready = matches!(method.methods.head(), methods::Head::Empty) && !busy;
                     let freed = match method.retire(key, stores) {
                         consumer::Retire::Started(freed) => freed,
                         consumer::Retire::Missing => {
                             return Plan::Missing(Freed::Available);
                         }
                     };
-                    let Some(vacant) = method.methods.vacant_user(key) else {
+                    let Some(next) =
+                        method
+                            .methods
+                            .retire(key, *method.phase == Phase::Closing, busy)
+                    else {
                         return Plan::Missing(freed);
                     };
-                    let Some(next) = vacant.retire(key, ready) else {
+                    let Some(next) = next else {
                         return Plan::Pending(None, freed);
                     };
                     Plan::encode(&mut method, egress, chan, next, freed)
@@ -161,13 +164,10 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
             .write(target, lease)
             .admit(access.reborrow(), |state, egress| {
                 match state.routes.project(lease, |view| {
-                    if view.channel.is_retiring() {
+                    if view.channel.protocol().phase != Phase::Open {
                         return Plan::Missing(Freed::Available);
                     }
                     let mut method = view.channel.method_state();
-                    if *method.phase != Phase::Open {
-                        return Plan::Missing(Freed::Available);
-                    }
                     let busy = method.publishing.is_active();
                     let next = match cancel {
                         consumer::Cancel::Tracked(key) => {
@@ -259,8 +259,13 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
                         return Plan::Missing(Freed::Available);
                     };
                     let next = vacant.close();
-                    *method.phase = Phase::Closing;
-                    Plan::encode(&mut method, egress, chan, next, Freed::Available)
+                    let plan = if method.publishing.is_active() {
+                        Plan::Pending(None, Freed::Available)
+                    } else {
+                        Plan::encode(&mut method, egress, chan, next, Freed::Available)
+                    };
+                    view.channel.begin_close(self.domain.coordination.waiters());
+                    plan
                 }) {
                     Some(plan) => plan,
                     None => Plan::Missing(Freed::Available),

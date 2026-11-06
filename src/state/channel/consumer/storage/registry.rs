@@ -98,17 +98,28 @@ impl<'b, 'd, const ID: u8> Registry<'b, 'd, ID> {
         &mut self,
         key: consumer::Key,
         store: &'r Store<'c, 'b, 'd>,
+        replay: impl FnOnce() -> bool,
     ) -> Option<(&mut Slot<'b, 'd, ID>, channel::Freed)> {
-        let entry = self.slots.indexed(key.raw())?;
-        if !matches!(
-            entry.get().status,
-            Status::Active | Status::Untracked | Status::Replaying
-        ) {
-            return None;
-        }
-        let slot = entry.unindex().into_mut();
+        let (slot, freed) = match self.slots.entry(key.raw())? {
+            entry::Entry::Indexed(entry) => {
+                if !matches!(
+                    entry.get().status,
+                    Status::Active | Status::Untracked | Status::Replaying
+                ) {
+                    return None;
+                }
+                let slot = entry.unindex().into_mut();
+                let freed = store.drain(&mut slot.queue);
+                (slot, freed)
+            }
+            entry::Entry::Staged(entry) => {
+                if entry.get().status != Status::Canceled || !replay() {
+                    return None;
+                }
+                (entry.into_mut(), channel::Freed::Available)
+            }
+        };
         slot.status = Status::Retiring;
-        let freed = store.drain(&mut slot.queue);
         Some((slot, freed))
     }
 

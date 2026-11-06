@@ -67,6 +67,7 @@ fn preserves_owners() {
                     let first = chan.next_return().await.expect("replacement receiver").expect("first body");
                     assert_eq!(first.body().as_slice(), Some(b"abcd".as_slice()));
                     assert_eq!(first.body().chunks().collect::<Vec<_>>(), [b"abcd".as_slice()]);
+                    assert!(first.body() == b"abcd"[..]);
                     let mut second = Pinned::new(chan.next_return());
                     assert!(poll_once(second.as_pin()).await.is_pending());
                     chan.queue().purge("second").await.expect("second barrier");
@@ -74,6 +75,10 @@ fn preserves_owners() {
                     assert_eq!(second.body().len(), 6);
                     assert_eq!(second.body().as_slice(), None);
                     assert_eq!(second.body().chunks().collect::<Vec<_>>(), [b"ef".as_slice(), b"gh".as_slice(), b"ij".as_slice()]);
+                    assert!(second.body() == b"efghij"[..]);
+                    assert!(second.body() != b"efgh"[..]);
+                    assert!(second.body() != b"efghXj"[..]);
+                    assert_eq!(second.body().try_to_vec().expect("copy body"), b"efghij");
                     assert_eq!(first.body().as_slice(), Some(b"abcd".as_slice()));
                     let ((), count) = Tracker::usage(|| { second.release(); first.release(); });
                     assert_eq!(count, (0, 0));
@@ -155,6 +160,8 @@ fn empty_needs_no_credit() {
                         assert!(body.body().is_empty());
                         assert_eq!(body.body().as_slice(), Some([].as_slice()));
                         assert_eq!(body.body().chunks().next(), None);
+                        assert!(body.body() == b""[..]);
+                        assert!(body.body().try_to_vec().expect("copy empty body").is_empty());
                         assert_eq!(body.properties().delivery(), Some(2));
                         assert_eq!(body.properties().priority(), Some(9));
                         assert_eq!(body.properties().timestamp, Some(42));

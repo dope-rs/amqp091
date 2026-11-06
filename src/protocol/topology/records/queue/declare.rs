@@ -1,7 +1,6 @@
-use o3::buffer::resident::Budget;
 use o3::mem::rc;
 
-use crate::failure;
+use crate::protocol::topology::{State, store};
 use crate::protocol::wire::schema::queues;
 use crate::protocol::wire::text::{resident, short};
 use crate::protocol::wire::{self, bytes};
@@ -11,36 +10,50 @@ pub(crate) struct Declare<'b, 'd> {
     pub(in crate::protocol::topology) server_name: Option<resident::Identity<'b>>,
 }
 
-impl<'b, 'd> Declare<'b, 'd> {
-    pub(crate) fn capture(
-        budget: &Budget<'d>,
-        encoded: wire::Encoded<'_, queues::Declaration>,
-    ) -> Result<Self, failure::Error> {
-        let record = bytes::Bytes::capture(budget, encoded)?;
-        Ok(Self {
+impl<'c, 'b, 'd, const ID: u8> State<'_, 'c, 'b, 'd, ID> {
+    pub(crate) fn declare(
+        &mut self,
+        record: bytes::Bytes<'d, queues::Declaration>,
+        plan: store::QueueHold<'c, 'b, 'd, ID>,
+        server_name: Option<resident::Identity<'b>>,
+    ) -> super::Key<'d, ID> {
+        let record = Declare {
             record,
-            server_name: None,
-        })
+            server_name,
+        };
+        let key = self.topology.queues.insert(self.values, plan, record);
+        self.local.current = super::Current::Tracked(key);
+        key
+    }
+}
+
+impl<'b, 'd> Declare<'b, 'd> {
+    pub(crate) fn user_name(&self) -> short::Name<'_> {
+        self.record.name()
     }
 
-    pub(crate) fn user_name(&self) -> short::Short<'_> {
-        self.record.field(queues::Declaration::QUEUE)
+    pub(crate) fn server_name(&self) -> short::Name<'_> {
+        match self.server_name.as_ref() {
+            Some(name) => {
+                // SAFETY: server_name is installed only from the admitted Name
+                // in Flight::retain_queue or Refresh::commit; retention preserves it.
+                unsafe { short::raw::name(short::Short::from(name)) }
+            }
+            None => self.user_name(),
+        }
     }
 
-    pub(crate) fn server_name(&self) -> short::Short<'_> {
-        self.server_name
-            .as_ref()
-            .map_or_else(|| self.user_name(), short::Short::from)
-    }
-
-    pub(crate) fn try_user(&self) -> Result<resident::Short<'b, 'd>, rc::Error> {
-        self.record.try_field(queues::Declaration::QUEUE)
+    pub(in crate::protocol::topology) fn hash(&self) -> u64 {
+        match self.server_name.as_ref() {
+            Some(name) => name.hash(),
+            None => wire::Fingerprint::of(self.user_name().value().as_bytes()).get(),
+        }
     }
 
     pub(crate) fn try_name(&self) -> Result<resident::Short<'b, 'd>, rc::Error> {
         match self.server_name.as_ref() {
             Some(name) => Ok(name.try_clone()?.into()),
-            None => self.try_user(),
+            None => self.record.try_field(queues::Declaration::QUEUE),
         }
     }
 

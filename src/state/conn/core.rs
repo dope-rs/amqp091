@@ -66,9 +66,9 @@ impl<'c, 'b, 'd, const ID: u8> Core<'c, 'b, 'd, ID> {
         &mut self,
         target: epoch::Id<'d, ID>,
         failure: failure::Error<resident::Short<'b, 'd>>,
-    ) -> Result<terminal::Lease<'c, 'b, 'd>, failure::Error<resident::Short<'b, 'd>>> {
+    ) -> Result<&terminal::Lease<'c, 'b, 'd>, failure::Error<resident::Short<'b, 'd>>> {
         let cause = self.lifecycle.try_fail(target, failure)?;
-        self.unblock();
+        self.blocked = None;
         Ok(cause)
     }
 
@@ -100,11 +100,14 @@ impl<'c, 'b, 'd, const ID: u8> Core<'c, 'b, 'd, ID> {
         reason: failure::Reason,
         finish: impl FnOnce(&terminal::Lease<'c, 'b, 'd>) -> R,
     ) -> Option<R> {
-        let next = self.lifecycle.disconnect(target, reason, finish);
-        if next.is_some() {
-            self.unblock();
+        if self.lifecycle.status.source() != Some(target) {
+            return None;
         }
-        next
+        self.lifecycle.retire(target, reason);
+        let cause = self.lifecycle.status.terminal(target)?;
+        let output = finish(cause);
+        self.unblock();
+        Some(output)
     }
 
     pub(crate) fn fail<P: recovery::Policy, R>(
@@ -282,18 +285,25 @@ impl<'c, 'b, 'd, const ID: u8> Lifecycle<'c, 'b, 'd, ID> {
         &mut self,
         target: epoch::Id<'d, ID>,
         failure: failure::Error<resident::Short<'b, 'd>>,
-    ) -> Result<terminal::Lease<'c, 'b, 'd>, failure::Error<resident::Short<'b, 'd>>> {
+    ) -> Result<&terminal::Lease<'c, 'b, 'd>, failure::Error<resident::Short<'b, 'd>>> {
         let hold = match mem::replace(&mut self.status, status::Status::AwaitingTransport) {
-            status::Status::Open(current, hold) if current == target => hold,
-            status::Status::Ready(current, hold) if current == target => hold,
-            status::Status::Handshaking(current, hold) if current == target => hold,
+            status::Status::Open(current, hold)
+            | status::Status::Ready(current, hold)
+            | status::Status::Handshaking(current, hold)
+                if current == target =>
+            {
+                hold
+            }
             status => {
                 self.status = status;
                 return Err(failure);
             }
         };
-        let (stored, cause) = hold.commit_pair(self.generation, failure);
-        self.status = status::Status::Closing(target, stored, status::CloseKind::Failure);
+        let cause = hold.commit(self.generation, failure);
+        self.status = status::Status::Closing(target, cause, status::CloseKind::Failure);
+        let status::Status::Closing(_, cause, _) = &self.status else {
+            unreachable!("closing");
+        };
         Ok(cause)
     }
 
@@ -378,20 +388,6 @@ impl<'c, 'b, 'd, const ID: u8> Lifecycle<'c, 'b, 'd, ID> {
                 status::Retirement::Permanent
             }
         }
-    }
-
-    fn disconnect<R>(
-        &mut self,
-        target: epoch::Id<'d, ID>,
-        reason: failure::Reason,
-        finish: impl FnOnce(&terminal::Lease<'c, 'b, 'd>) -> R,
-    ) -> Option<R> {
-        if self.status.source() != Some(target) {
-            return None;
-        }
-        self.retire(target, reason);
-        let cause = self.status.terminal(target)?;
-        Some(finish(cause))
     }
 
     fn fail<P: recovery::Policy, R>(

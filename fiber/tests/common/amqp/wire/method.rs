@@ -18,9 +18,7 @@ impl Method {
         method: u16,
         args: &[u8],
     ) -> Result<Vec<u8>, Error> {
-        let len = 4_usize
-            .checked_add(args.len())
-            .ok_or(Error::Capacity { length: args.len() })?;
+        let len = args.len() + 4;
         let mut encoded = Encoded::try_new(super::METHOD, channel, len)?;
         encoded.extend(&class.to_be_bytes());
         encoded.extend(&method.to_be_bytes());
@@ -36,9 +34,7 @@ impl Method {
         method: u16,
         args: &[u8],
     ) -> Result<(), Error> {
-        let len = 4_usize
-            .checked_add(args.len())
-            .ok_or_else(|| Error::Capacity { length: args.len() })?;
+        let len = args.len() + 4;
         let header = Header::new(wire::METHOD, channel, len)?;
         let class = class.to_be_bytes();
         let method = method.to_be_bytes();
@@ -59,9 +55,10 @@ impl Method {
         }
         let mut len = 4_usize;
         for arg in args {
-            len = len
-                .checked_add(arg.len())
-                .ok_or_else(|| Error::Capacity { length: arg.len() })?;
+            let Some(next) = len.checked_add(arg.len()) else {
+                return Err(Error::Capacity { length: arg.len() });
+            };
+            len = next;
         }
         let header = Header::new(wire::METHOD, channel, len)?;
         let class = class.to_be_bytes();

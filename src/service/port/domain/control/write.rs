@@ -113,12 +113,13 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Write<'a, 'r, 'c, 'b, 'd, ID> {
                 self.domain
                     .session
                     .write(local::Access::new(region), |state| {
-                        let prepared = state.routes.try_prepare(self.lease, next)?;
-                        Ok(prepared.commit())
+                        state
+                            .routes
+                            .try_commit(self.lease, next, self.domain.content.stores())
                     })
             });
             match effect {
-                Ok(send::Effect::Sent | send::Effect::Closing) => Admission::Continue(freed),
+                Ok(()) => Admission::Continue(freed),
                 Err(rejected) => {
                     let (frame, cause) = rejected.into_parts();
                     let (frame, _) = frame.into_inner().into_parts();

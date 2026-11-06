@@ -33,7 +33,7 @@ pub(crate) struct Queue<'a> {
 }
 
 pub(crate) struct Binding<'a> {
-    queue: short::Short<'a>,
+    queue: short::Name<'a>,
     source: short::Short<'a>,
     key: short::Short<'a>,
     args: wire::Identity<'a>,
@@ -80,6 +80,33 @@ impl<'d, const ID: u8> Resolution<'d, ID> {
     pub(crate) const fn queue(self) -> Option<queue::Key<'d, ID>> {
         self.queue
     }
+
+    pub(crate) fn name<'a>(
+        self,
+        input: short::Name<'a>,
+        current: &'a queue::Current<'d, ID>,
+    ) -> short::Name<'a> {
+        if self.queue.is_none() && input.is_empty() {
+            current.name().unwrap_or(input)
+        } else {
+            input
+        }
+    }
+
+    pub(crate) fn binding<'a>(
+        self,
+        input: short::Name<'a>,
+        route: short::Short<'a>,
+        current: &'a queue::Current<'d, ID>,
+    ) -> (short::Name<'a>, short::Short<'a>) {
+        let name = self.name(input, current);
+        let route = if input.is_empty() && route.is_empty() {
+            name.into()
+        } else {
+            route
+        };
+        (name, route)
+    }
 }
 
 impl<'c, 'd, const ID: u8> Plan<'c, 'd, ID> {
@@ -106,14 +133,6 @@ impl<'a> Need<'a, ()> {
             target: Target::None,
             identity: IdentityPlan::None,
         }
-    }
-
-    pub(crate) const fn direct(retain: bool) -> Self {
-        let mut need = Self::none();
-        if retain {
-            need.identity = IdentityPlan::Fresh;
-        }
-        need
     }
 
     pub(crate) const fn reference(queue: short::Short<'a>) -> Self {
@@ -170,8 +189,8 @@ impl<'a> Need<'a, Queue<'a>> {
 }
 
 impl<'a> Need<'a, Binding<'a>> {
-    pub(crate) const fn binding(
-        queue: short::Short<'a>,
+    pub(crate) fn binding(
+        queue: short::Name<'a>,
         source: short::Short<'a>,
         key: short::Short<'a>,
         args: wire::Identity<'a>,
@@ -183,7 +202,7 @@ impl<'a> Need<'a, Binding<'a>> {
                 key,
                 args,
             },
-            target: Target::Reference(queue),
+            target: Target::Reference(queue.into()),
             identity: IdentityPlan::None,
         }
     }
@@ -309,7 +328,7 @@ impl Binding<'_> {
         queue: Option<queue::Key<'d, ID>>,
         name: short::Short<'_>,
         source: short::Short<'_>,
-        key: short::Short<'_>,
+        key: Option<short::Short<'_>>,
         args: wire::Fingerprint,
     ) -> u64 {
         let mut hash = wire::Fingerprint::new();
@@ -325,7 +344,9 @@ impl Binding<'_> {
             }
         }
         write_short(&mut hash, source);
-        write_short(&mut hash, key);
+        if let Some(key) = key {
+            write_short(&mut hash, key);
+        }
         hash.write(&args.get().to_le_bytes());
         hash.get()
     }
@@ -339,21 +360,23 @@ impl<'c, 'b: 'c, 'd: 'c, const ID: u8> Reserve<'c, 'b, 'd, ID> for Binding<'_> {
         state: &mut State<'_, 'c, 'b, 'd, ID>,
         found: Resolution<'d, ID>,
     ) -> Result<Self::Plan, failure::Error> {
-        let table = &mut *state.topology;
         let queue = found.queue();
+        let (name, route) = found.binding(self.queue, self.key, &state.local.current);
+        let route = queue::routing_key(name.into(), route);
+        let table = &mut *state.topology;
         let hash = Self::hash(
             queue,
-            self.queue,
+            name.into(),
             self.source,
-            self.key,
+            route,
             self.args.fingerprint(),
         );
         let entry = if let Some(key) = table.bindings.queue_key_at(
             hash,
             queue,
-            self.queue,
+            name.into(),
             self.source,
-            self.key,
+            route,
             self.args.bytes(),
         ) {
             store::Upsert::Existing(key)

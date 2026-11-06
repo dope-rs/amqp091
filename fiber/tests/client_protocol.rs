@@ -1,16 +1,16 @@
 use std::convert::Infallible;
 
 use dope::core::driver::life::recovery;
-use dope::core::platform::wake;
+use dope::manifold::timing;
 use dope_amqp091::{config, protocol};
 use dope_test::alloc;
 use dope_test::alloc::Tracker;
 
 use crate::common::amqp::Peer;
+use crate::common::amqp::app::Endpoint;
 use crate::common::amqp::wire::{Frame, Method};
 
 pub mod common;
-use std::sync::mpsc;
 
 use common::client::Redial;
 use common::client::broker::{close, handshake, illegal};
@@ -18,7 +18,6 @@ use dope_amqp091::failure;
 use dope_test::harness::peer::TcpScript;
 
 use crate::common::client::*;
-use crate::common::fiber::wait;
 
 #[test]
 fn rejects_scoped_method() {
@@ -52,7 +51,7 @@ fn rejects_scoped_method() {
                     let conn = rt.connection();
                     assert!(
                         rt.block_on(dope_fiber::fiber!('_ => async move {
-                            wait_ready(conn).await.expect("ready");
+                            conn.observe().ready().await.expect("ready");
                             let channel = conn.channels().open(1).await.expect("open channel");
                             let result = channel.queue().purge("never").await;
                             assert!(matches!(result, Err(ref error) if matches!(error.error(), failure::Error::Protocol(failure::wire::Fault::ConnectionChannel {
@@ -78,7 +77,6 @@ fn rejects_scoped_method() {
 
 #[test]
 fn rejects_heartbeat() {
-    let (done, wait) = mpsc::channel();
     TcpScript::with(
         move |stream| {
             Peer::new(stream).open(TUNE).expect("AMQP broker handshake");
@@ -93,7 +91,7 @@ fn rejects_heartbeat() {
             stream
                 .write_all(&Frame::try_encode(8, 0, b"x").expect("AMQP frame fixture"))
                 .expect("malformed heartbeat");
-            wait.recv().expect("malformed heartbeat observation");
+            while stream.read(&mut [0; 256]).expect("endpoint teardown") != 0 {}
         },
         |broker| {
             with(
@@ -103,13 +101,12 @@ fn rejects_heartbeat() {
                     let conn = rt.connection();
                     assert!(
                         rt.block_on(dope_fiber::fiber!('_ => async move {
-                            wait_ready(conn).await.expect("ready");
+                            conn.observe().ready().await.expect("ready");
                             let channel = conn.channels().open(1).await.expect("open channel");
                             let result = channel.queue().purge("trigger").await;
                             assert!(matches!(result, Err(ref error) if matches!(error.error(), failure::Error::Frame(protocol::wire::frame::Fault::HeartbeatPayload {
                                     len: 1
                                 }))));
-                            done.send(()).expect("publish heartbeat observation");
                         }))
                         .is_ok(),
                         "AMQP fiber must complete"
@@ -185,30 +182,25 @@ fn rejects_unknown_channel() {
 #[test]
 fn rejects_server_version() {
     handshake((1, 0), b"en_US", |broker| {
-        with(
+        Endpoint::new(
             broker.addr(),
             config::Config::new("guest", "guest").expect("config"),
+        )
+        .shutdown(broker.completion())
+        .try_check::<timing::Throughput, _>(
+            POLICY,
             |rt| {
                 let conn = rt.connection();
-                assert!(
-                    rt.block_on(dope_fiber::fiber!('_ => async move {
-                        let handshake = conn.observe().epoch().await;
-                        assert!(matches!(handshake, Err(ref error) if matches!(error.error(), failure::Error::Version { major: 1, minor: 0 })));
-                        let failed = conn.observe().read(|view| view.is_failed()).await;
-                        assert!(failed);
-                    }))
-                    .is_ok(),
-                    "AMQP fiber must complete"
-                );
-                assert!(
-                    broker
-                        .finish()
-                        .expect("fatal handshake broker")
-                        .expect("broker protocol")
-                        == Redial::Elapsed,
-                    "connector redialed after an unsupported AMQP version"
-                );
-            }, recover,
+                rt.until_shutdown(dope_fiber::fiber!('_ => async move {
+                    let handshake = conn.observe().epoch().await;
+                    assert!(matches!(handshake, Err(ref error) if matches!(error.error(), failure::Error::Version { major: 1, minor: 0 })));
+                    let failed = conn.observe().read(|view| view.is_failed()).await;
+                    assert!(failed);
+                }))
+                .expect("broker completion")
+                .expect("AMQP fiber must complete");
+            },
+            recover,
             |result| {
                 result
                     .as_ref()
@@ -216,19 +208,31 @@ fn rejects_server_version() {
                     .expect("endpoint completion");
             },
         );
-    }).expect("bind broker");
+        assert!(
+            broker
+                .finish()
+                .expect("fatal handshake broker")
+                .expect("broker protocol")
+                == Redial::Elapsed,
+            "connector redialed after an unsupported AMQP version"
+        );
+    })
+    .expect("bind broker");
 }
 
 #[test]
 fn rejects_retained_method() {
-    let (finished, done) = wake::Ends::blocking().expect("completion pipe").split();
-    illegal(0, 10, 60, &[1, b'x'], done, |broker| {
-        with(
+    illegal(0, 10, 60, &[1, b'x'], |broker| {
+        Endpoint::new(
             broker.addr(),
             config::Config::new("guest", "guest").expect("config"),
+        )
+        .shutdown(broker.completion())
+        .try_check::<timing::Throughput, _>(
+            POLICY,
             |rt| {
                 let conn = rt.connection();
-                assert!(rt.block_on(dope_fiber::fiber!('_ => async move {
+                rt.until_shutdown(dope_fiber::fiber!('_ => async move {
                     let handshake = conn.observe().epoch().await;
                     assert!(matches!(handshake, Err(ref error) if matches!(error.error(), failure::Error::Protocol(failure::wire::Fault::ConnMethod {
                             method: failure::wire::ConnMethod::Blocked,
@@ -237,20 +241,11 @@ fn rejects_retained_method() {
                         }))));
                     let failed = conn.observe().read(|view| view.is_failed()).await;
                     assert!(failed);
-                    wait(&finished).await.expect("peer close observation");
-                })).is_ok(), "AMQP fiber must complete");
-                let (sent, closed, redial) = broker
-                    .finish()
-                    .expect("illegal handshake broker")
-                    .expect("broker protocol");
-                assert!(!sent, "client emitted a method after failed admission");
-                assert!(closed, "client kept the invalid transport alive");
-                assert_eq!(
-                    redial,
-                    Redial::Elapsed,
-                    "client redialed after a fatal phase violation"
-                );
-            }, recover,
+                }))
+                .expect("broker completion")
+                .expect("AMQP fiber must complete");
+            },
+            recover,
             |result| {
                 result
                     .as_ref()
@@ -258,19 +253,34 @@ fn rejects_retained_method() {
                     .expect("endpoint completion");
             },
         );
-    }).expect("bind broker");
+        let (sent, closed, redial) = broker
+            .finish()
+            .expect("illegal handshake broker")
+            .expect("broker protocol");
+        assert!(!sent, "client emitted a method after failed admission");
+        assert!(closed, "client kept the invalid transport alive");
+        assert_eq!(
+            redial,
+            Redial::Elapsed,
+            "client redialed after a fatal phase violation"
+        );
+    })
+    .expect("bind broker");
 }
 
 #[test]
 fn rejects_handshake_flow() {
-    let (finished, done) = wake::Ends::blocking().expect("completion pipe").split();
-    illegal(1, 20, 20, &[1], done, |broker| {
-        with(
+    illegal(1, 20, 20, &[1], |broker| {
+        Endpoint::new(
             broker.addr(),
             config::Config::new("guest", "guest").expect("config"),
+        )
+        .shutdown(broker.completion())
+        .try_check::<timing::Throughput, _>(
+            POLICY,
             |rt| {
                 let conn = rt.connection();
-                assert!(rt.block_on(dope_fiber::fiber!('_ => async move {
+                rt.until_shutdown(dope_fiber::fiber!('_ => async move {
                     let handshake = conn.observe().epoch().await;
                     assert!(matches!(handshake, Err(ref error) if matches!(error.error(), failure::Error::Protocol(failure::wire::Fault::ChannelNotReady {
                             channel: 1,
@@ -279,20 +289,11 @@ fn rejects_handshake_flow() {
                         }))));
                     let failed = conn.observe().read(|view| view.is_failed()).await;
                     assert!(failed);
-                    wait(&finished).await.expect("peer close observation");
-                })).is_ok(), "AMQP fiber must complete");
-                let (sent, closed, redial) = broker
-                    .finish()
-                    .expect("illegal handshake broker")
-                    .expect("broker protocol");
-                assert!(!sent, "client emitted Channel.FlowOk before readiness");
-                assert!(closed, "client kept the invalid transport alive");
-                assert_eq!(
-                    redial,
-                    Redial::Elapsed,
-                    "client redialed after a fatal phase violation"
-                );
-            }, recover,
+                }))
+                .expect("broker completion")
+                .expect("AMQP fiber must complete");
+            },
+            recover,
             |result| {
                 result
                     .as_ref()
@@ -300,36 +301,43 @@ fn rejects_handshake_flow() {
                     .expect("endpoint completion");
             },
         );
-    }).expect("bind broker");
+        let (sent, closed, redial) = broker
+            .finish()
+            .expect("illegal handshake broker")
+            .expect("broker protocol");
+        assert!(!sent, "client emitted Channel.FlowOk before readiness");
+        assert!(closed, "client kept the invalid transport alive");
+        assert_eq!(
+            redial,
+            Redial::Elapsed,
+            "client redialed after a fatal phase violation"
+        );
+    })
+    .expect("bind broker");
 }
 
 #[test]
 fn rejects_server_locale() {
     handshake((0, 9), b"fr_FR", |broker| {
-        with(
+        Endpoint::new(
             broker.addr(),
             config::Config::new("guest", "guest").expect("config"),
+        )
+        .shutdown(broker.completion())
+        .try_check::<timing::Throughput, _>(
+            POLICY,
             |rt| {
                 let conn = rt.connection();
-                assert!(
-                    rt.block_on(dope_fiber::fiber!('_ => async move {
-                        let handshake = conn.observe().epoch().await;
-                        assert!(matches!(handshake, Err(ref error) if matches!(error.error(), failure::Error::UnsupportedLocale)));
-                        let failed = conn.observe().read(|view| view.is_failed()).await;
-                        assert!(failed);
-                    }))
-                    .is_ok(),
-                    "AMQP fiber must complete"
-                );
-                assert!(
-                    broker
-                        .finish()
-                        .expect("fatal handshake broker")
-                        .expect("broker protocol")
-                        == Redial::Elapsed,
-                    "connector redialed after an unsupported AMQP locale"
-                );
-            }, recover,
+                rt.until_shutdown(dope_fiber::fiber!('_ => async move {
+                    let handshake = conn.observe().epoch().await;
+                    assert!(matches!(handshake, Err(ref error) if matches!(error.error(), failure::Error::UnsupportedLocale)));
+                    let failed = conn.observe().read(|view| view.is_failed()).await;
+                    assert!(failed);
+                }))
+                .expect("broker completion")
+                .expect("AMQP fiber must complete");
+            },
+            recover,
             |result| {
                 result
                     .as_ref()
@@ -337,48 +345,52 @@ fn rejects_server_locale() {
                     .expect("endpoint completion");
             },
         );
-    }).expect("bind broker");
+        assert!(
+            broker
+                .finish()
+                .expect("fatal handshake broker")
+                .expect("broker protocol")
+                == Redial::Elapsed,
+            "connector redialed after an unsupported AMQP locale"
+        );
+    })
+    .expect("bind broker");
 }
 
 #[test]
 fn close_is_terminal() {
     close(true, |broker| {
-        with(
+        Endpoint::new(
             broker.addr(),
             config::Config::new("guest", "guest").expect("config"),
+        )
+        .shutdown(broker.completion())
+        .try_check::<timing::Throughput, _>(
+            POLICY,
             |rt| {
                 let conn = rt.connection();
-                assert!(
-                    rt.block_on(dope_fiber::fiber!('_ => async move {
-                        let target = wait_ready(conn).await.expect("ready");
+                rt.until_shutdown(dope_fiber::fiber!('_ => async move {
+                    let target = conn.observe().ready().await.expect("ready");
 
-                        let allocation = Tracker::begin();
-                        conn.control()
-                            .close(target, 200, "done")
-                            .await
-                            .expect("graceful close");
-                        let allocation = allocation.finish();
-                        assert_eq!(
-                            (allocation.allocations, allocation.allocated_bytes),
-                            (0, 0)
-                        );
-                        let ready = conn.observe().read(|view| view.is_ready()).await;
-                        assert!(!ready);
-                        let handshake = conn.observe().epoch().await;
-                        assert!(matches!(handshake, Err(ref error) if matches!(error.error(), failure::Error::Closed)));
-                    }))
-                    .is_ok(),
-                    "AMQP fiber must complete"
-                );
-                assert!(
-                    broker
-                        .finish()
-                        .expect("terminal close broker")
-                        .expect("broker protocol")
-                        == Redial::Elapsed,
-                    "connector redialed after acknowledged local close"
-                );
-            }, recover,
+                    let allocation = Tracker::begin();
+                    conn.control()
+                        .close(target, 200, "done")
+                        .await
+                        .expect("graceful close");
+                    let allocation = allocation.finish();
+                    assert_eq!(
+                        (allocation.allocations, allocation.allocated_bytes),
+                        (0, 0)
+                    );
+                    let ready = conn.observe().read(|view| view.is_ready()).await;
+                    assert!(!ready);
+                    let handshake = conn.observe().epoch().await;
+                    assert!(matches!(handshake, Err(ref error) if matches!(error.error(), failure::Error::Closed)));
+                }))
+                .expect("broker completion")
+                .expect("AMQP fiber must complete");
+            },
+            recover,
             |result| {
                 result
                     .as_ref()
@@ -386,40 +398,44 @@ fn close_is_terminal() {
                     .expect("endpoint completion");
             },
         );
-    }).expect("bind broker");
+        assert!(
+            broker
+                .finish()
+                .expect("terminal close broker")
+                .expect("broker protocol")
+                == Redial::Elapsed,
+            "connector redialed after acknowledged local close"
+        );
+    })
+    .expect("bind broker");
 }
 
 #[test]
 fn close_loss_is_terminal() {
     close(false, |broker| {
-        with(
+        Endpoint::new(
             broker.addr(),
             config::Config::new("guest", "guest").expect("config"),
+        )
+        .shutdown(broker.completion())
+        .try_check::<timing::Throughput, _>(
+            POLICY,
             |rt| {
                 let conn = rt.connection();
-                assert!(
-                    rt.block_on(dope_fiber::fiber!('_ => async move {
-                        let target = wait_ready(conn).await.expect("ready");
+                rt.until_shutdown(dope_fiber::fiber!('_ => async move {
+                    let target = conn.observe().ready().await.expect("ready");
 
-                        let close = conn.control().close(target, 200, "done").await;
-                        assert!(matches!(close, Err(ref error) if matches!(error.error(), failure::Error::Closed)));
-                        let ready = conn.observe().read(|view| view.is_ready()).await;
-                        assert!(!ready);
-                        let handshake = conn.observe().epoch().await;
-                        assert!(matches!(handshake, Err(ref error) if matches!(error.error(), failure::Error::Closed)));
-                    }))
-                    .is_ok(),
-                    "AMQP fiber must complete"
-                );
-                assert!(
-                    broker
-                        .finish()
-                        .expect("terminal close broker")
-                        .expect("broker protocol")
-                        == Redial::Elapsed,
-                    "connector redialed after interrupted local close"
-                );
-            }, recover,
+                    let close = conn.control().close(target, 200, "done").await;
+                    assert!(matches!(close, Err(ref error) if matches!(error.error(), failure::Error::Closed)));
+                    let ready = conn.observe().read(|view| view.is_ready()).await;
+                    assert!(!ready);
+                    let handshake = conn.observe().epoch().await;
+                    assert!(matches!(handshake, Err(ref error) if matches!(error.error(), failure::Error::Closed)));
+                }))
+                .expect("broker completion")
+                .expect("AMQP fiber must complete");
+            },
+            recover,
             |result| {
                 result
                     .as_ref()
@@ -427,7 +443,16 @@ fn close_loss_is_terminal() {
                     .expect("endpoint completion");
             },
         );
-    }).expect("bind broker");
+        assert!(
+            broker
+                .finish()
+                .expect("terminal close broker")
+                .expect("broker protocol")
+                == Redial::Elapsed,
+            "connector redialed after interrupted local close"
+        );
+    })
+    .expect("bind broker");
 }
 
 #[global_allocator]

@@ -62,6 +62,9 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Methods<'o, 'r, 'c, 'b, '
                         .issue(route.index, lease.raw(), lanes::Slot::from(key), key)
                 })
             };
+            if expect == method::Kind::CloseOk && cancel.is_ok() {
+                route.channel.begin_close(self.core.waiters());
+            }
             Ok::<_, failure::Error>((route.index.lane(), cancel, action, next))
         });
         let entry = match result {
@@ -80,7 +83,9 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Methods<'o, 'r, 'c, 'b, '
             self.core
                 .send(access.reborrow(), route.epoch().raw(), lease.raw(), next);
         }
-        self.core.permits().wake_channel(entry.0);
+        if entry.2.is_some() || expect == method::Kind::CloseOk {
+            self.core.permits().wake_channel(entry.0);
+        }
         if let Some(action) = entry.2 {
             self.core.detach(access, lease, action);
         }

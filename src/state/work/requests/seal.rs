@@ -9,7 +9,6 @@ impl Seal for channel::CloseRef<'_> {}
 impl Seal for tx::Select {}
 impl Seal for tx::Commit {}
 impl Seal for tx::Rollback {}
-impl Seal for basic::CancelRef<'_> {}
 impl Seal for basic::Recover {}
 impl Seal for queue::Inspect<'_> {}
 impl Seal for queue::Purge<'_> {}

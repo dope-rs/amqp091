@@ -13,7 +13,9 @@ use crate::failure::{self, wire};
 use crate::service::content::{self, pending};
 
 pub(crate) enum Payload<'b, 'd> {
-    Compact(pool::Limit<pool::Cursor<pool::Layout, pool::Borrowed<'b>>, Lease<credit::Return<'b>>>),
+    Compact(
+        pool::Limit<pool::Span<pool::owners::Plain, pool::Borrowed<'b>>, Lease<credit::Return<'b>>>,
+    ),
     Segments {
         remaining: usize,
         parts: Parts<'b, 'd>,
@@ -247,7 +249,7 @@ impl<'d> Vacant<'_, '_, 'd> {
                 *resident |= retained;
                 // SAFETY: this exact FIFO gained its exclusively reserved node;
                 // its count remains within the arena's u32::MAX - 1 capacity.
-                *count = unsafe { bounded::raw::Proof::assume(count.get() + 1).retain() };
+                *count = unsafe { bounded::raw::u32(count.get() + 1) };
             }
         }
     }

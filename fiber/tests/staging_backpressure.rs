@@ -1,19 +1,21 @@
-use std::{convert::Infallible, time::Duration};
+use std::convert::Infallible;
 
 use dope::core::driver::life::recovery;
-use dope::core::platform::wake;
-use dope_amqp091::{config, message::field::view};
-use dope_fiber::task::time::sleep::TimerExt as _;
+use dope_amqp091::{
+    config,
+    message::{field::view, property::Properties},
+};
+use dope_fiber::abi::Join;
 use dope_test::harness::peer::TcpScript;
 
 pub mod common;
 use common::{
     amqp::{Peer, wire::Method},
     client::{
-        STAGING_BOUNDARY, STAGING_HELD, STAGING_NEXT, TUNE, returned_body, staging_header,
-        wait_ready, with,
+        STAGING_BOUNDARY, STAGING_HELD, STAGING_NEXT, TUNE, channel::request, check_publish,
+        returned_body, staging_header, with,
     },
-    fiber::{Pinned, poll_once, wait},
+    fiber::{Pinned, poll_once},
 };
 
 #[test]
@@ -44,7 +46,7 @@ fn retains_multiple_staged_frames_until_one_message_completes() {
                 |rt| {
                     let conn = rt.connection();
                     rt.block_on(dope_fiber::fiber!('_ => async move {
-                        let ready = wait_ready(conn).await.expect("ready");
+                        let ready = conn.observe().ready().await.expect("ready");
                         let channel = conn.channels().open(1).await.expect("channel");
                         let message = match channel.next_return().await {
                             Ok(message) => message.expect("complete message"),
@@ -113,32 +115,27 @@ fn reclaims_retained_and_consumed_staging_between_fragmented_frames() {
             let config = config::Config::new("guest", "guest").expect("fixture identity").capacity(capacity);
             with(broker.addr(), config, |rt| {
                 let conn = rt.connection();
-                let timer = rt.timer();
                 assert!(rt.block_on(dope_fiber::fiber!('_ => async move {
-                    let ready = wait_ready(conn).await.expect("ready");
+                    let ready = conn.observe().ready().await.expect("ready");
                     let channel = conn.channels().open(1).await.expect("channel");
                     let mut held = Pinned::new(channel.next_return());
                     assert!(poll_once(held.as_pin()).await.is_pending());
-                    timer.sleep(Duration::from_millis(50)).expect("first staging turn").await;
-                    let mut first_barrier = Pinned::new(channel.queue().purge("first"));
-                    assert!(poll_once(first_barrier.as_pin()).await.is_pending());
-                    let held = held.await.expect("held operation").expect("held return");
-                    first_barrier.await.expect("first barrier");
+                    let (first_barrier, held) = Join::new(channel.queue().purge("first"), held).await;
+                    first_barrier.expect("first barrier");
+                    let held = held.expect("held operation").expect("held return");
                     assert!(held.body() == first[..]);
                     let mut held = Some(held);
                     if release_early { held.take().expect("held body").release(); }
                     let mut next = Pinned::new(channel.next_return());
                     assert!(poll_once(next.as_pin()).await.is_pending());
                     channel.queue().purge("next").await.expect("prefix barrier");
-                    timer.sleep(Duration::from_millis(50)).expect("staging turn").await;
                     assert!(poll_once(next.as_pin()).await.is_pending(), "staging pressure must preserve the generation");
                     if let Some(held) = held { held.release(); }
-                    let mut released = Pinned::new(channel.queue().purge("release"));
-                    assert!(poll_once(released.as_pin()).await.is_pending());
-                    let next = next.await.expect("resumed operation").expect("resumed return");
+                    let (released, next) = Join::new(channel.queue().purge("release"), next).await;
+                    released.expect("release barrier");
+                    let next = next.expect("resumed operation").expect("resumed return");
                     assert!(next.body() == second[..]);
                     next.release();
-                    released.await.expect("release barrier");
                     conn.control().close(ready, 200, "OK").await.expect("close");
                 })).is_ok());
             }, recover, |result| {
@@ -151,14 +148,10 @@ fn reclaims_retained_and_consumed_staging_between_fragmented_frames() {
 }
 
 #[test]
-fn fragmented_header_resumes_on_release_and_reclaims_consumed_backing() {
+fn reclaims_retained_and_consumed_staging_for_fragmented_header() {
     for release_early in [false, true] {
-        let (payload, proceed) = wake::Ends::blocking().expect("payload gate").split();
-        let (written, notify) = wake::Ends::blocking().expect("wire completion").split();
         TcpScript::with(
             move |stream| {
-                use common::amqp::Error;
-
                 Peer::new(stream).open(TUNE)?;
                 let channel = common::basic::returned::open_channel(stream)?;
                 stream
@@ -170,12 +163,9 @@ fn fragmented_header_resumes_on_release_and_reclaims_consumed_backing() {
                 prefix.extend_from_slice(&common::basic::returned::method(channel, "", "")?);
                 prefix.extend_from_slice(&header[..3]);
                 stream.write_all(&prefix)?;
-                Method::read(stream)?.check(channel, 50, 30)?;
                 stream.write_all(&header[3..7])?;
-                payload.wait_timeout(Duration::from_secs(10)).map_err(Error::Wait)?;
+                check_publish(stream, channel, "header", &[])?;
                 stream.write_all(&header[7..])?;
-                Method::write(stream, channel, 50, 31, &[0; 4])?;
-                notify.notify().map_err(Error::Notify)?;
                 common::basic::returned::close_connection(stream)
             },
             |broker| {
@@ -192,9 +182,8 @@ fn fragmented_header_resumes_on_release_and_reclaims_consumed_backing() {
                 let config = config::Config::new("guest", "guest").expect("identity").capacity(capacity);
                 with(broker.addr(), config, |rt| {
                     let conn = rt.connection();
-                    let timer = rt.timer();
                     rt.block_on(dope_fiber::fiber!('_ => async move {
-                        let ready = wait_ready(conn).await.expect("ready");
+                        let ready = conn.observe().ready().await.expect("ready");
                         let channel = conn.channels().open(1).await.expect("channel");
                         let held = channel.next_return().await.expect("first operation").expect("first return");
                         assert!(held.body() == STAGING_BOUNDARY[..]);
@@ -203,32 +192,14 @@ fn fragmented_header_resumes_on_release_and_reclaims_consumed_backing() {
                         let mut next = Pinned::new(channel.next_return());
                         assert!(poll_once(next.as_pin()).await.is_pending());
                         channel.queue().purge("prefix").await.expect("prefix reply");
-                        timer.sleep(Duration::from_millis(50)).expect("three-byte staging turn").await;
-                        let mut header = Pinned::new(channel.queue().purge("header"));
-                        assert!(poll_once(header.as_pin()).await.is_pending());
-                        timer.sleep(Duration::from_millis(50)).expect("seven-byte staging turn").await;
-                        proceed.notify().expect("allow complete next frame");
-                        // A broker failure closes this pipe. Preserve that result
-                        // while observing the client's original terminal cause.
-                        let written = wait(&written).await;
-                        timer.sleep(Duration::from_millis(50)).expect("retained ingress turn").await;
+                        // Unconfirmed publication needs no reply behind the partial header.
+                        channel.basic().publish(request("", "header", &Properties::default(), &[]))
+                            .await.expect("header publication");
                         if let Some(held) = held {
-                            match poll_once(next.as_pin()).await {
-                                std::task::Poll::Pending => {}
-                                std::task::Poll::Ready(Err(error)) => panic!("retained header, release_early={release_early}, written={written:?}: {:?}", error.error()),
-                                std::task::Poll::Ready(Ok(_)) => panic!("retained owner did not block header, release_early={release_early}"),
-                            }
-                            // All broker writes and client requests precede this
-                            // release. No purge, heartbeat, or new input can supply
-                            // the connection wake needed to retry this staged owner.
+                            assert!(poll_once(next.as_pin()).await.is_pending());
                             held.release();
                         }
-                        let next = match next.await {
-                            Ok(Some(next)) => next,
-                            Ok(None) => panic!("missing header return, release_early={release_early}"),
-                            Err(error) => panic!("fragmented header, release_early={release_early}, written={written:?}: {:?}", error.error()),
-                        };
-                        written.expect("complete next frame written");
+                        let next = next.await.expect("header operation").expect("header return");
                         assert!(next.body().is_empty());
                         let properties = next.properties();
                         let mut headers = properties.headers().expect("headers").iter();
@@ -237,7 +208,6 @@ fn fragmented_header_resumes_on_release_and_reclaims_consumed_backing() {
                         assert!(value.iter().all(|byte| *byte == b'x'));
                         assert!(headers.next().is_none());
                         next.release();
-                        header.await.expect("header request completion");
                         conn.control().close(ready, 200, "OK").await.expect("close");
                     })).expect("fiber");
                 }, recover, |result| {

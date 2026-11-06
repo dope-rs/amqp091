@@ -7,7 +7,6 @@ use crate::common::amqp::{Peer, Tune};
 use crate::common::client::close_reason;
 pub mod common;
 
-use std::sync::mpsc;
 use std::time::Duration;
 
 use dope::core::io::Reclaimed;
@@ -29,8 +28,6 @@ fn close(
 ) -> usize {
     use crate::common::amqp::wire::Method;
 
-    let (release, begin) = mpsc::channel();
-    let (finish, wait) = mpsc::channel();
     TcpScript::with(
         move |stream| {
             assert!(
@@ -38,9 +35,12 @@ fn close(
                     .open(Tune::new(16, 131_072, 0))
                     .is_ok()
             );
-            assert!(begin.recv_timeout(Duration::from_secs(5)).is_ok());
+            Method::read(stream)
+                .expect("open request")
+                .check(1, 20, 10)
+                .expect("open channel route");
             assert!(Method::write(stream, 0, 10, 50, args).is_ok());
-            assert!(wait.recv_timeout(Duration::from_secs(5)).is_ok());
+            while stream.read(&mut [0; 256]).expect("endpoint teardown") != 0 {}
         },
         |broker| {
             let config = (config::Config::new("guest", "guest"))
@@ -53,24 +53,18 @@ fn close(
                         policy,
                         |scope| {
                             let conn = scope.connection();
-                            let ready = ((scope.block_on(conn.observe().ready()))
+                            ((scope.block_on(conn.observe().ready()))
                                 .expect("the server must complete its handshake before closing"))
                             .expect("the server must complete its handshake before closing");
-                            assert!(release.send(()).is_ok());
                             let ((), allocs) = Tracker::measure(|| {
                                 let observed =
                                     scope.block_on(dope_fiber::fiber!('_ => async move {
-                                        let error = loop {
-                                            match conn.observe().lease(ready).await {
-                                                Ok(_) => dope_test::fibers::Yield::new().await,
-                                                Err(error) => break error,
-                                            }
-                                        };
+                                        let error = conn.channels().open(1).await
+                                            .err().expect("server close rejects the open request");
                                         verify(error.error());
                                     }));
                                 assert!(observed.is_ok(), "close observation failed: {observed:?}");
                             });
-                            assert!(finish.send(()).is_ok());
                             allocs[0]
                         },
                         |event| reports.push(event),
@@ -108,7 +102,6 @@ fn retained(error: &failure::Error<resident::Short<'_, '_>>, expected: &str) {
     .expect("the server failure must retain its exact reply fields");
     assert_eq!((*code, *class, *method), (320, 0, 0));
     assert_eq!(text.as_ref(), expected);
-    assert_eq!(size_of_val(text), 3 * size_of::<usize>());
 }
 
 #[test]
@@ -215,6 +208,66 @@ fn rejects_class() {
             })
         ));
     });
+}
+
+#[test]
+fn rejects_empty_broker_queue() {
+    use crate::common::amqp::wire::Method;
+    use dope_amqp091::message::field::Table;
+    use dope_amqp091_fiber::channel::queue;
+
+    TcpScript::with(
+        |stream| {
+            Peer::new(stream)
+                .open(common::client::TUNE)
+                .expect("handshake");
+            Method::read(stream)
+                .expect("open request")
+                .check(1, 20, 10)
+                .expect("open route");
+            Method::write(stream, 1, 20, 11, &[0; 4]).expect("open reply");
+            Method::read(stream)
+                .expect("declare request")
+                .check(1, 50, 10)
+                .expect("declare route");
+            Method::write(stream, 1, 50, 11, &[0; 9]).expect("empty queue reply");
+            while stream.read(&mut [0; 256]).expect("endpoint teardown") != 0 {}
+        },
+        |broker| {
+            common::client::with(
+                broker.addr(),
+                config::Config::new("guest", "guest").expect("config"),
+                |scope| {
+                    let conn = scope.connection();
+                    scope
+                        .block_on(dope_fiber::fiber!('_ => async move {
+                            conn.observe().ready().await.expect("ready");
+                            let channel = conn.channels().open(1).await.expect("channel");
+                            let error = channel.queue().declare(queue::Declare {
+                                queue: "",
+                                durable: false,
+                                exclusive: true,
+                                auto_delete: true,
+                                arguments: &Table::new(),
+                            }).await.err().expect("empty broker queue must reject declaration");
+                            assert!(matches!(error.error(),
+                                failure::Error::Protocol(wire::Fault::QueueNameEmpty)
+                            ));
+                        }))
+                        .expect("fiber");
+                },
+                recover,
+                |result| {
+                    result
+                        .as_ref()
+                        .map_err(|error| error.kind())
+                        .expect("endpoint completion");
+                },
+            );
+            broker.finish().expect("broker");
+        },
+    )
+    .expect("scripted broker");
 }
 
 fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {

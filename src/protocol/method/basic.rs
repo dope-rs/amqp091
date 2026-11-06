@@ -206,10 +206,6 @@ impl method::Args for Cancel<'_> {
     }
 }
 
-impl method::Request for Cancel<'_> {
-    type Response = CancelReply;
-}
-
 pub struct CancelRef<'a> {
     pub consumer_tag: short::Short<'a>,
 }
@@ -224,14 +220,6 @@ impl method::Args for CancelRef<'_> {
     }
 }
 
-impl method::Request for CancelRef<'_> {
-    type Response = CancelReply;
-}
-
-impl<'d> method::Op<'d> for CancelRef<'_> {
-    type Output<'b, Consumer> = CancelOk<'d>;
-}
-
 fn write_cancel<S: wire::Put>(out: &mut S, tag: short::Short<'_>, wait: bool) {
     out.put_short(tag);
     out.put_bits([wait]);
@@ -243,32 +231,6 @@ pub struct CancelOk<'d> {
 
 impl method::Spec for CancelOk<'_> {
     const ID: method::Id = CANCEL_OK;
-}
-
-#[doc(hidden)]
-pub enum CancelReply {}
-
-impl method::Spec for CancelReply {
-    const ID: method::Id = CANCEL_OK;
-}
-
-impl method::Reply for CancelReply {
-    const KIND: method::Kind = method::Kind::CancelOk;
-    type Output<'b, 'd, Consumer> = CancelOk<'d>;
-    type Value<'b, 'd, Consumer> = CancelOk<'d>;
-
-    fn project<'b, 'd, Consumer>(
-        reply: protocol::Response<'b, 'd, Consumer>,
-    ) -> Result<Self::Output<'b, 'd, Consumer>, failure::Error> {
-        let actual = reply.kind();
-        match reply {
-            protocol::Response::BasicCancelOk(ok) => Ok(ok),
-            _ => Err(failure::Error::Protocol(Fault::Response {
-                expected: method::Kind::CancelOk,
-                actual,
-            })),
-        }
-    }
 }
 
 impl<'d> CancelOk<'d> {
@@ -374,7 +336,7 @@ impl<'input> Deliver<'input> {
             })?;
         Ok(Self {
             delivery_tag: num::NonZero::new(tag)
-                .ok_or(failure::Error::Protocol(Fault::DeliveryTagZero))?,
+                .ok_or_else(|| failure::Error::Protocol(Fault::DeliveryTagZero))?,
             redelivered: again,
             text,
         })

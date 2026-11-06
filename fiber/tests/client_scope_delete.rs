@@ -2,8 +2,8 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use dope::core::driver::life::recovery;
-use dope_amqp091::config;
 use dope_amqp091::message::field::Table;
+use dope_amqp091::{config, failure};
 use dope_amqp091_fiber::channel::{basic, queue};
 
 use crate::common::amqp::Peer;
@@ -11,17 +11,13 @@ use crate::common::amqp::wire::{Method, put_short};
 
 pub mod common;
 
-use std::sync::mpsc;
-
 use dope_amqp091::message::ack;
-use dope_test::fibers::Yield;
 use dope_test::harness::peer::AcceptScript;
 
 use crate::common::client::*;
 
 #[test]
 fn prevents_replay() {
-    let (done, finish) = mpsc::channel();
     AcceptScript::with(
         move |broker| {
             let mut first = broker.accept().expect("first connection");
@@ -37,7 +33,8 @@ fn prevents_replay() {
 
             Method::read(&mut first)
                 .expect("first channel open")
-                .check(1, 20, 10).expect("AMQP method route");
+                .check(1, 20, 10)
+                .expect("AMQP method route");
             first
                 .write_all(
                     &Method::try_encode(1, 20, 11, &[0, 0, 0, 0]).expect("AMQP frame fixture"),
@@ -45,7 +42,9 @@ fn prevents_replay() {
                 .expect("first channel open-ok");
             for (request, response) in [(20, 21), (40, 41)] {
                 let operation = Method::read(&mut first).expect("external queue operation");
-                operation.check(1, 50, request).expect("external queue route");
+                operation
+                    .check(1, 50, request)
+                    .expect("external queue route");
                 assert_eq!(queue_name(&operation).expect("queue name"), "external");
                 let args = if response == 41 { &[0_u8; 4][..] } else { &[] };
                 Method::write(&mut first, 1, 50, response, args).expect("external queue reply");
@@ -55,13 +54,15 @@ fn prevents_replay() {
             Method::write(&mut first, 1, 60, 21, b"\x09name-only").expect("name-only consume-ok");
             Method::read(&mut first)
                 .expect("queue declare")
-                .check(1, 50, 10).expect("AMQP method route");
+                .check(1, 50, 10)
+                .expect("AMQP method route");
             first
                 .write_all(&queue_declare_ok_frame(1, b"shared").expect("AMQP fixture"))
                 .expect("queue declare-ok");
             Method::read(&mut first)
                 .expect("consumer")
-                .check(1, 60, 20).expect("AMQP method route");
+                .check(1, 60, 20)
+                .expect("AMQP method route");
             let mut consumed = Vec::new();
             put_short(&mut consumed, b"deleted-queue").expect("AMQP short string");
             first
@@ -70,7 +71,8 @@ fn prevents_replay() {
 
             Method::read(&mut first)
                 .expect("second channel open")
-                .check(2, 20, 10).expect("AMQP method route");
+                .check(2, 20, 10)
+                .expect("AMQP method route");
             first
                 .write_all(
                     &Method::try_encode(2, 20, 11, &[0, 0, 0, 0]).expect("AMQP frame fixture"),
@@ -78,7 +80,8 @@ fn prevents_replay() {
                 .expect("second channel open-ok");
             Method::read(&mut first)
                 .expect("cross-channel queue delete")
-                .check(2, 50, 40).expect("AMQP method route");
+                .check(2, 50, 40)
+                .expect("AMQP method route");
             first
                 .write_all(
                     &Method::try_encode(2, 50, 41, &0_u32.to_be_bytes())
@@ -114,9 +117,18 @@ fn prevents_replay() {
                     .expect("recovered channel open-ok");
             }
             assert!(opened[1] && opened[2], "both channels must recover");
-            check_no_frame(&second, "deleted queue replay").expect("AMQP fixture");
-            done.send(())
-                .expect("publish deleted queue replay observation");
+            let purge = Method::read(&mut second).expect("deleted current queue purge");
+            purge.check(1, 50, 30).expect("no deleted topology replay");
+            assert_eq!(queue_name(&purge).expect("deleted queue name"), "shared");
+            let mut close = Vec::from(404_u16.to_be_bytes());
+            put_short(&mut close, b"missing shared").expect("reply text");
+            close.extend_from_slice(&50_u16.to_be_bytes());
+            close.extend_from_slice(&30_u16.to_be_bytes());
+            Method::write(&mut second, 1, 20, 40, &close).expect("deleted queue rejection");
+            Method::read(&mut second)
+                .expect("channel close-ok")
+                .check(1, 20, 41)
+                .expect("close-ok route");
         },
         |broker| {
             with(
@@ -124,75 +136,72 @@ fn prevents_replay() {
                 config::Config::new("guest", "guest").expect("config"),
                 |rt| {
                     let conn = rt.connection();
-                    assert!(rt.block_on(dope_fiber::fiber!('_ => async move {
-                        let target = conn.observe().ready().await.expect("first ready");
-                        let epoch = conn
-                            .observe()
-                            .read(|view| view.generation())
-                            .await;
-                        let first = conn
-                            .channels()
-                            .open_in(target, 1)
-                            .await
-                            .expect("first channel");
-                        let args = Table::new();
-                        first.queue().bind("external", "amq.direct", "rk", &args)
-                            .await.expect("external queue binding");
-                        first.queue().delete("external", false, false)
-                            .await.expect("external queue delete");
-                        let request = basic::Consume {
-                            queue: "shared",
-                            consumer_tag: "deleted-queue",
-                            no_local: false,
-                            ack: ack::Manual,
-                            exclusive: false,
-                            arguments: &args,
-                        };
-                        let named = first.basic().consume(basic::Consume {
-                            consumer_tag: "name-only",
-                            ..request
-                        }).await.expect("name-only consumer");
-                        first
-                            .queue()
-                            .declare(queue::Declare {
+                    assert!(
+                        rt.block_on(dope_fiber::fiber!('_ => async move {
+                            let target = conn.observe().ready().await.expect("first ready");
+                            let first = conn
+                                .channels()
+                                .open_in(target, 1)
+                                .await
+                                .expect("first channel");
+                            let args = Table::new();
+                            first.queue().bind("external", "amq.direct", "rk", &args)
+                                .await.expect("external queue binding");
+                            first.queue().delete("external", false, false)
+                                .await.expect("external queue delete");
+                            let request = basic::Consume {
                                 queue: "shared",
-                                durable: false,
+                                consumer_tag: "deleted-queue",
+                                no_local: false,
+                                ack: ack::Manual,
                                 exclusive: false,
-                                auto_delete: false,
                                 arguments: &args,
-                            })
-                            .await
-                            .expect("queue declare");
-                        let consumer = first
-                            .basic()
-                            .consume(request)
-                            .await
-                            .expect("consumer");
-                        let second = conn
-                            .channels()
-                            .open_in(target, 2)
-                            .await
-                            .expect("second channel");
-                        second
-                            .queue()
-                            .delete("shared", false, false)
-                            .await
-                            .expect("cross-channel queue delete");
+                            };
+                            let named = first.basic().consume(basic::Consume {
+                                consumer_tag: "name-only",
+                                ..request
+                            }).await.expect("name-only consumer");
+                            first
+                                .queue()
+                                .declare(queue::Declare {
+                                    queue: "shared",
+                                    durable: false,
+                                    exclusive: false,
+                                    auto_delete: false,
+                                    arguments: &args,
+                                })
+                                .await
+                                .expect("queue declare");
+                            let consumer = first
+                                .basic()
+                                .consume(request)
+                                .await
+                                .expect("consumer");
+                            let second = conn
+                                .channels()
+                                .open_in(target, 2)
+                                .await
+                                .expect("second channel");
+                            second
+                                .queue()
+                                .delete("shared", false, false)
+                                .await
+                                .expect("cross-channel queue delete");
 
-                        while conn
-                            .observe()
-                            .read(|view| view.generation())
-                            .await
-                            == epoch
-                        {
-                            Yield::new().await;
-                        }
-                        loop {
-                            match finish.try_recv() { Ok(()) => break, Err(mpsc::TryRecvError::Empty) => Yield::new().await, outcome => outcome.expect("broker ended before deleted queue replay observation"), }
-                        }
-                        drop((named, consumer));
-                    })).is_ok(), "AMQP fiber must complete");
-                }, recover,
+                            conn.observe().retired(target.epoch()).await.expect("first retirement");
+                            conn.observe().ready().await.expect("complete replay");
+                            let error = first.into_auto().queue().purge("").await
+                                .expect_err("deleted current queue");
+                            assert!(matches!(error.error(), failure::Error::Server {
+                                reply_code: 404, reply_text, class_id: 50, method_id: 30,
+                            } if reply_text.as_ref() == "missing shared"));
+                            drop((named, consumer));
+                        }))
+                        .is_ok(),
+                        "AMQP fiber must complete"
+                    );
+                },
+                recover,
                 |result| {
                     result
                         .as_ref()

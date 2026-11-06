@@ -327,13 +327,23 @@ impl<'c, 'd, const ID: u8> QueueStore<'c, 'd, ID> {
         values: &'c slab::Cell<queue::Declare<'b, 'd>, queue::Tag, { u32::MAX }, false>,
         name: short::Short<'_>,
     ) -> Option<queue::Key<'d, ID>> {
+        self.key_at(values, name, Fingerprint::of(name.value().as_bytes()).get())
+    }
+
+    pub(super) fn key_at<'b>(
+        &self,
+        values: &'c slab::Cell<queue::Declare<'b, 'd>, queue::Tag, { u32::MAX }, false>,
+        name: short::Short<'_>,
+        hash: u64,
+    ) -> Option<queue::Key<'d, ID>> {
         self.names
-            .get(Fingerprint::of(name.value().as_bytes()).get(), |key| {
+            .get(hash, |key| {
                 values
                     .entry(key.into_parts().0.parts())
                     .is_some_and(|entry| {
                         let queue = entry.value();
-                        queue.user_name() == name || queue.server_name() == name
+                        short::Short::from(queue.user_name()) == name
+                            || short::Short::from(queue.server_name()) == name
                     })
             })
             .copied()
@@ -346,7 +356,7 @@ impl<'c, 'd, const ID: u8> QueueStore<'c, 'd, ID> {
         value: queue::Declare<'b, 'd>,
     ) -> queue::Key<'d, ID> {
         let name = value.server_name();
-        let hash = Fingerprint::of(name.value().as_bytes()).get();
+        let hash = value.hash();
         // SAFETY: this scope's slab and directory share one admitted capacity.
         // Every name refers to a live row, while this retained reservation keeps
         // one slot unpublished: names <= live rows < capacity. The exclusive
@@ -419,7 +429,7 @@ impl<'c, 'd, const ID: u8> QueueStore<'c, 'd, ID> {
     ) -> Result<QueueHold<'c, 'b, 'd, ID>, failure::Error> {
         let entry = values
             .vacancy()
-            .ok_or(failure::Error::Capacity(wire::Capacity::TopologyMetadata))?;
+            .ok_or_else(|| failure::Error::Capacity(wire::Capacity::TopologyMetadata))?;
         Ok(QueueHold {
             entry,
             owner: self.owner,

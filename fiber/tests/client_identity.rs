@@ -11,17 +11,13 @@ use crate::common::amqp::wire::{Method, put_short};
 
 pub mod common;
 
-use std::sync::mpsc;
-
 use dope_amqp091::message::ack;
-use dope_test::fibers::Yield;
 use dope_test::harness::peer::AcceptScript;
 
 use crate::common::client::*;
 
 #[test]
 fn keeps_queue_identities() {
-    let (replayed, replay) = mpsc::channel();
     AcceptScript::with(
         move |acceptor| {
             fn declare_ok(stream: &dope_test::harness::peer::Stream<'_>, name: &[u8]) {
@@ -52,7 +48,8 @@ fn keeps_queue_identities() {
                 .expect("AMQP broker handshake");
             Method::read(&mut first)
                 .expect("AMQP method")
-                .check(1, 20, 10).expect("AMQP method route");
+                .check(1, 20, 10)
+                .expect("AMQP method route");
             first
                 .write_all(
                     &Method::try_encode(1, 20, 11, &[0, 0, 0, 0]).expect("AMQP frame fixture"),
@@ -62,7 +59,7 @@ fn keeps_queue_identities() {
             let declare = Method::read(&mut first).expect("AMQP method");
             declare.check(1, 50, 10).expect("AMQP method route");
             assert_eq!(queue_name(&declare).expect("AMQP fixture"), "");
-            declare_ok(&mut first, b"old-a");
+            declare_ok(&first, b"old-a");
             check_queue_bind_target(&Method::read(&mut first).expect("AMQP method"), "", "")
                 .expect("AMQP fixture");
             first
@@ -74,12 +71,12 @@ fn keeps_queue_identities() {
                 "consumer-a",
             )
             .expect("AMQP fixture");
-            consume_ok(&mut first, b"consumer-a");
+            consume_ok(&first, b"consumer-a");
 
             let declare = Method::read(&mut first).expect("AMQP method");
             declare.check(1, 50, 10).expect("AMQP method route");
             assert_eq!(queue_name(&declare).expect("AMQP fixture"), "");
-            declare_ok(&mut first, b"old-b");
+            declare_ok(&first, b"old-b");
             check_queue_bind_target(&Method::read(&mut first).expect("AMQP method"), "", "")
                 .expect("AMQP fixture");
             first
@@ -91,7 +88,7 @@ fn keeps_queue_identities() {
                 "consumer-b",
             )
             .expect("AMQP fixture");
-            consume_ok(&mut first, b"consumer-b");
+            consume_ok(&first, b"consumer-b");
             drop(first);
 
             let mut second = acceptor.accept().expect("recovered connection");
@@ -106,7 +103,8 @@ fn keeps_queue_identities() {
                 .expect("AMQP broker handshake");
             Method::read(&mut second)
                 .expect("AMQP method")
-                .check(1, 20, 10).expect("AMQP method route");
+                .check(1, 20, 10)
+                .expect("AMQP method route");
             second
                 .write_all(
                     &Method::try_encode(1, 20, 11, &[0, 0, 0, 0]).expect("AMQP frame fixture"),
@@ -116,11 +114,11 @@ fn keeps_queue_identities() {
             let replay_a = Method::read(&mut second).expect("AMQP method");
             replay_a.check(1, 50, 10).expect("AMQP method route");
             assert_eq!(queue_name(&replay_a).expect("AMQP fixture"), "");
-            declare_ok(&mut second, b"new-a");
+            declare_ok(&second, b"new-a");
             let replay_b = Method::read(&mut second).expect("AMQP method");
             replay_b.check(1, 50, 10).expect("AMQP method route");
             assert_eq!(queue_name(&replay_b).expect("AMQP fixture"), "");
-            declare_ok(&mut second, b"new-b");
+            declare_ok(&second, b"new-b");
 
             check_queue_bind_target(
                 &Method::read(&mut second).expect("AMQP method"),
@@ -147,18 +145,18 @@ fn keeps_queue_identities() {
                 "consumer-a",
             )
             .expect("AMQP fixture");
-            consume_ok(&mut second, b"consumer-a");
+            consume_ok(&second, b"consumer-a");
             check_consume_target(
                 &Method::read(&mut second).expect("AMQP method"),
                 "new-b",
                 "consumer-b",
             )
             .expect("AMQP fixture");
-            consume_ok(&mut second, b"consumer-b");
-            replayed.send(()).expect("publish queue identity replay");
+            consume_ok(&second, b"consumer-b");
             Method::read(&mut second)
                 .expect("connection close")
-                .check(0, 10, 50).expect("AMQP method route");
+                .check(0, 10, 50)
+                .expect("AMQP method route");
             second
                 .write_all(&Method::try_encode(0, 10, 51, &[]).expect("AMQP frame fixture"))
                 .expect("connection close-ok");
@@ -169,89 +167,93 @@ fn keeps_queue_identities() {
                 config::Config::new("guest", "guest")
                     .expect("config")
                     .capacity(
-                        config::Capacity::default().topology(config::Topology::default().identities(2)),
+                        config::Capacity::default()
+                            .topology(config::Topology::default().identities(2)),
                     ),
                 |rt| {
                     let conn = rt.connection();
-                    assert!(rt.block_on(dope_fiber::fiber!('_ => async move {
-                        let target = conn.observe().ready().await.expect("first ready");
-                        let channel = conn
-                            .channels()
-                            .open_in(target, 1)
-                            .await
-                            .expect("channel open");
-                        let args = Table::new();
+                    assert!(
+                        rt.block_on(dope_fiber::fiber!('_ => async move {
+                            let target = conn.observe().ready().await.expect("first ready");
+                            let channel = conn
+                                .channels()
+                                .open_in(target, 1)
+                                .await
+                                .expect("channel open");
+                            let args = Table::new();
 
-                        channel
-                            .queue()
-                            .declare(queue::Declare {
-                                queue: "",
-                                durable: false,
-                                exclusive: true,
-                                auto_delete: true,
-                                arguments: &args,
-                            })
-                            .await
-                            .expect("first anonymous queue");
-                        channel
-                            .queue()
-                            .bind("", "x", "", &args)
-                            .await
-                            .expect("first current-queue binding");
-                        let first = channel
-                            .basic()
-                            .consume(basic::Consume {
-                                queue: "",
-                                consumer_tag: "consumer-a",
-                                no_local: false,
-                                ack: ack::Manual,
-                                exclusive: false,
-                                arguments: &args,
-                            })
-                            .await
-                            .expect("first current-queue consumer");
+                            channel
+                                .queue()
+                                .declare(queue::Declare {
+                                    queue: "",
+                                    durable: false,
+                                    exclusive: true,
+                                    auto_delete: true,
+                                    arguments: &args,
+                                })
+                                .await
+                                .expect("first anonymous queue");
+                            channel
+                                .queue()
+                                .bind("", "x", "", &args)
+                                .await
+                                .expect("first current-queue binding");
+                            let first = channel
+                                .basic()
+                                .consume(basic::Consume {
+                                    queue: "",
+                                    consumer_tag: "consumer-a",
+                                    no_local: false,
+                                    ack: ack::Manual,
+                                    exclusive: false,
+                                    arguments: &args,
+                                })
+                                .await
+                                .expect("first current-queue consumer");
 
-                        channel
-                            .queue()
-                            .declare(queue::Declare {
-                                queue: "",
-                                durable: false,
-                                exclusive: true,
-                                auto_delete: true,
-                                arguments: &args,
-                            })
-                            .await
-                            .expect("second anonymous queue");
-                        channel
-                            .queue()
-                            .bind("", "x", "", &args)
-                            .await
-                            .expect("second current-queue binding");
-                        let second = channel
-                            .basic()
-                            .consume(basic::Consume {
-                                queue: "",
-                                consumer_tag: "consumer-b",
-                                no_local: false,
-                                ack: ack::Manual,
-                                exclusive: false,
-                                arguments: &args,
-                            })
-                            .await
-                            .expect("second current-queue consumer");
+                            channel
+                                .queue()
+                                .declare(queue::Declare {
+                                    queue: "",
+                                    durable: false,
+                                    exclusive: true,
+                                    auto_delete: true,
+                                    arguments: &args,
+                                })
+                                .await
+                                .expect("second anonymous queue");
+                            channel
+                                .queue()
+                                .bind("", "x", "", &args)
+                                .await
+                                .expect("second current-queue binding");
+                            let second = channel
+                                .basic()
+                                .consume(basic::Consume {
+                                    queue: "",
+                                    consumer_tag: "consumer-b",
+                                    no_local: false,
+                                    ack: ack::Manual,
+                                    exclusive: false,
+                                    arguments: &args,
+                                })
+                                .await
+                                .expect("second current-queue consumer");
 
-                        loop {
-                            match replay.try_recv() { Ok(()) => break, Err(mpsc::TryRecvError::Empty) => Yield::new().await, outcome => outcome.expect("broker ended before queue identity replay"), }
-                        }
-                        let ready = conn.observe().ready().await.expect("recovered ready");
-                        conn.control()
-                            .close(ready, 200, "done")
-                            .await
-                            .expect("connection close");
-                        drop(first);
-                        drop(second);
-                    })).is_ok(), "AMQP fiber must complete");
-                }, recover,
+                            conn.observe().retired(target.epoch()).await.expect("first retirement");
+                            let ready = conn.observe().ready().await.expect("recovered ready");
+                            conn.control()
+                                .close(ready, 200, "done")
+                                .await
+                                .expect("connection close");
+                            drop(first);
+                            drop(second);
+                        }))
+                        .is_ok(),
+                        "AMQP fiber must complete"
+                    );
+                },
+                recover,
                 |result| {
                     result
                         .as_ref()
@@ -267,8 +269,6 @@ fn keeps_queue_identities() {
 
 #[test]
 fn restores_checked_slot() {
-    let (ready_tx, ready_rx) = mpsc::channel();
-    let (replayed, replay) = mpsc::channel();
     AcceptScript::with(
         move |acceptor| {
             let mut first = acceptor.accept().expect("first connection");
@@ -300,9 +300,8 @@ fn restores_checked_slot() {
             first
                 .write_all(&Method::try_encode(1, 50, 21, &[]).expect("AMQP frame fixture"))
                 .expect("initial queue.bind-ok");
-            ready_rx
-                .recv()
-                .expect("client committed initial queue binding");
+            Method::read(&mut first).expect("committed binding fence")
+                .check(1, 50, 30).expect("queue.purge");
             drop(first);
 
             let mut middle = acceptor.accept().expect("interrupted recovery");
@@ -356,7 +355,6 @@ fn restores_checked_slot() {
             .expect("AMQP fixture");
             last.write_all(&Method::try_encode(1, 50, 21, &[]).expect("AMQP frame fixture"))
                 .expect("recovered queue.bind-ok");
-            replayed.send(()).expect("publish identity replay");
             Method::read(&mut last)
                 .expect("connection close")
                 .check(0, 10, 50).expect("AMQP method route");
@@ -397,10 +395,8 @@ fn restores_checked_slot() {
                             .bind("", "x", "", &args)
                             .await
                             .expect("current-queue binding");
-                        ready_tx.send(()).expect("publish initial queue binding");
-                        loop {
-                            match replay.try_recv() { Ok(()) => break, Err(mpsc::TryRecvError::Empty) => Yield::new().await, outcome => outcome.expect("broker ended before identity replay"), }
-                        }
+                        channel.queue().purge("").await.expect_err("disconnect after committed binding");
+                        conn.observe().retired(target.epoch()).await.expect("first retirement");
                         let ready = conn.observe().ready().await.expect("recovered ready");
                         conn.control()
                             .close(ready, 200, "done")

@@ -29,7 +29,6 @@ pub enum Response<'b, 'd, Consumer> {
     QueueDeleteOk(queue::DeleteOk),
     BasicConsumeOk(basic::ConsumeOk<'b, 'd>, Consumer),
     BasicConsumeReplayOk,
-    BasicCancelOk(basic::CancelOk<'d>),
 }
 
 pub enum Registration<'b, 'd, Consumer> {
@@ -71,12 +70,6 @@ impl<'b, 'd, Consumer> From<Registration<'b, 'd, Consumer>> for Response<'b, 'd,
             Registration::Registered(reply, key) => Self::BasicConsumeOk(reply, key),
             Registration::Replayed => Self::BasicConsumeReplayOk,
         }
-    }
-}
-
-impl<'b, 'd, Consumer> From<basic::CancelOk<'d>> for Response<'b, 'd, Consumer> {
-    fn from(reply: basic::CancelOk<'d>) -> Self {
-        Self::BasicCancelOk(reply)
     }
 }
 
@@ -133,7 +126,6 @@ impl<'b, 'd, Consumer> Response<'b, 'd, Consumer> {
             Self::QueuePurgeOk(_) => method::Kind::QueuePurge,
             Self::QueueDeleteOk(_) => method::Kind::QueueDelete,
             Self::BasicConsumeOk(_, _) | Self::BasicConsumeReplayOk => method::Kind::Consume,
-            Self::BasicCancelOk(_) => method::Kind::CancelOk,
         }
     }
 
@@ -148,7 +140,6 @@ impl<'b, 'd, Consumer> Response<'b, 'd, Consumer> {
             Self::QueueDeleteOk(value) => Response::QueueDeleteOk(value),
             Self::BasicConsumeOk(value, key) => Response::BasicConsumeOk(value, map(key)?),
             Self::BasicConsumeReplayOk => Response::BasicConsumeReplayOk,
-            Self::BasicCancelOk(value) => Response::BasicCancelOk(value),
         })
     }
 }

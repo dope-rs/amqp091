@@ -15,17 +15,13 @@ impl<'b, 'a, 'd> Pending<'a, 'b, 'd> {
         Self { state }
     }
 
-    pub(crate) fn preview<R>(
-        self,
-        send: impl for<'s> FnOnce(Dispatch<'s, 'b, 'd>) -> Option<R>,
-    ) -> Option<R> {
+    pub(crate) fn preview(self) -> Option<Dispatch<'a, 'b, 'd>> {
         match &self.state.outbound {
-            entry::Outbound::Consumer(key) => send(Dispatch::Consumer(*key))?,
-            entry::Outbound::Orphan(tag) => send(Dispatch::Orphan(tag))?,
-            entry::Outbound::Close => send(Dispatch::Close)?,
-            entry::Outbound::None => return None,
+            entry::Outbound::Consumer(key) => Some(Dispatch::Consumer(*key)),
+            entry::Outbound::Orphan(tag) => Some(Dispatch::Orphan(tag)),
+            entry::Outbound::Close => Some(Dispatch::Close),
+            entry::Outbound::None => None,
         }
-        .into()
     }
 
     pub(crate) fn commit(self) -> Effect {
