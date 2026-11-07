@@ -1,9 +1,7 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
-
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::Method;
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use common::basic::returned;
@@ -91,12 +89,7 @@ fn preserves_owners() {
                     conn.control().close(ready, 200, "done").await.expect("close");
                 })).expect("fiber");
                 }, recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker completion");
         },
@@ -172,19 +165,10 @@ fn empty_needs_no_credit() {
                     .expect("fiber");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker completion");
         },
     )
     .expect("broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

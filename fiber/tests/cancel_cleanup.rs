@@ -1,7 +1,5 @@
-use std::convert::Infallible;
 use std::time::Duration;
 
-use dope::core::driver::life::recovery;
 use dope_amqp091::adapter::Poll as _;
 use dope_amqp091::message::ack;
 use dope_amqp091::message::field::Table;
@@ -18,6 +16,8 @@ use o3::base::cell::local;
 use crate::common::amqp::wire::Method;
 use crate::common::amqp::{Peer, Tune};
 use crate::common::fiber::{Pinned, poll_once};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 use dope_test::harness::peer::TcpScript;
 
@@ -241,12 +241,7 @@ fn compensates_dropped_ops() {
                     .expect("close after consumer cancellation");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker completion");
         },
@@ -372,9 +367,7 @@ fn consumer_drop_precedes_unsent_close() {
                         })).expect("fiber completion");
                     },
                     recover,
-                    |result| {
-                        result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
-                    },
+                    complete,
                 );
                 broker.finish().expect("broker");
             },
@@ -384,7 +377,3 @@ fn consumer_drop_precedes_unsent_close() {
 
 #[global_allocator]
 static ALLOCATOR: alloc::Tracker = Tracker::new();
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
-}

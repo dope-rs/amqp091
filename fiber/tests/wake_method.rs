@@ -1,11 +1,10 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
 use dope_test::alloc;
 
 use crate::common::amqp::Peer;
 use crate::common::amqp::app::{Endpoint, Policy};
 use crate::common::amqp::wire::Method;
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use std::time::Duration;
@@ -196,12 +195,7 @@ fn keeps_generation() {
                     assert_eq!(reply.message_count, 0);
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker
                 .finish()
@@ -315,9 +309,7 @@ fn closes_abandoned_open_before_new_method() {
                         })).expect("fiber drive");
                     },
                     recover,
-                    |result| {
-                        result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
-                    },
+                    complete,
                 );
                 broker.finish().expect("broker");
             },
@@ -467,12 +459,7 @@ fn wakes_publish_after_notified_waiter_is_cancelled() {
                     }
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("publish cancellation broker");
         },
@@ -598,12 +585,7 @@ fn keeps_publish_credit_while_close_waits_for_input() {
                     })).expect("fiber drive");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
@@ -711,12 +693,7 @@ fn consumes_once() {
                     },
                     |event| reports.push(event),
                     recover,
-                    |result| {
-                        result
-                            .as_ref()
-                            .map_err(|error| error.kind())
-                            .expect("endpoint completion");
-                    },
+                    complete,
                 );
                 assert!(
                     matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]),
@@ -830,12 +807,7 @@ fn drops_unbound_consumer() {
                     }
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker
                 .finish()
@@ -847,7 +819,3 @@ fn drops_unbound_consumer() {
 
 #[global_allocator]
 static ALLOCATOR: alloc::Tracker = Tracker::new();
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
-}

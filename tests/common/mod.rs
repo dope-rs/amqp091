@@ -1,3 +1,6 @@
+use std::convert::Infallible;
+
+use dope::core::driver::life::recovery;
 use dope_amqp091::message::field::{Table, Value};
 use dope_amqp091::service::Spec;
 use dope_amqp091::{config, failure};
@@ -78,3 +81,7 @@ pub fn tagged_header(tag: u8) -> Result<(storage::Shared, bool), storage::AllocE
 pub const NESTED_INVALID_TAG: &[u8] = &[
     0, 0, 0, 15, 1, b'n', b'F', 0, 0, 0, 8, 1, b'a', b'A', 0, 0, 0, 1, b'?',
 ];
+
+pub fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
+    panic!("native recovery: {:?}", failure.cause());
+}

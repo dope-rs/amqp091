@@ -1,8 +1,6 @@
-use std::convert::Infallible;
 use std::task::Poll;
 use std::time::Duration;
 
-use dope::core::driver::life::recovery;
 use dope_amqp091::config;
 use dope_fiber::abi::poll_fn;
 use dope_test::alloc;
@@ -11,6 +9,8 @@ use dope_test::alloc::Tracker;
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::Method;
 use crate::common::fiber::{Pinned, poll_once};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use dope_amqp091::failure;
@@ -164,12 +164,7 @@ fn drop_closes_before_reuse() {
                     .expect("close");
                 })).is_ok(), "AMQP fiber must complete");
                 }, recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("open lifetime broker");
         },
@@ -179,7 +174,3 @@ fn drop_closes_before_reuse() {
 
 #[global_allocator]
 static ALLOCATOR: alloc::Tracker = Tracker::new();
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
-}

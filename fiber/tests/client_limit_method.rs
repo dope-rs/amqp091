@@ -1,8 +1,6 @@
 use dope_test::harness::peer;
-use std::convert::Infallible;
 use std::time::Duration;
 
-use dope::core::driver::life::recovery;
 use dope::core::driver::schedule::ready::wake::queue;
 use dope::manifold::{client::close, timing};
 use dope_amqp091::config;
@@ -12,6 +10,8 @@ use crate::common::amqp::Peer;
 use crate::common::amqp::app::{Endpoint, Policy};
 use crate::common::amqp::wire::Method;
 use crate::common::fiber::{Pinned, poll_once};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use dope_amqp091::adapter::publish;
@@ -88,12 +88,7 @@ fn drop_releases_capacity() {
                         "AMQP fiber must complete"
                     );
                 }, recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
@@ -188,12 +183,7 @@ fn queues_after_stream() {
                     })).is_ok(), "AMQP fiber must complete");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
@@ -301,12 +291,7 @@ fn drop_quarantines_borrow() {
                 })).is_ok(), "AMQP fiber must complete");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("publish cancellation broker");
         },
@@ -388,19 +373,10 @@ fn abort_discards_partial_publish() {
                         .expect("AMQP fiber must complete");
                     },
                     recover,
-                    |result| {
-                        result
-                            .as_ref()
-                            .map_err(|error| error.kind())
-                            .expect("endpoint completion");
-                    },
+                    complete,
                 );
             broker.finish().expect("publish abort broker");
         },
     )
     .expect("spawn publish-abort broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

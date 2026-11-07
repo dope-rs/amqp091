@@ -1,11 +1,10 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
 use dope::manifold::timing;
 
 use crate::common::amqp::Peer;
 use crate::common::amqp::app::Endpoint;
 use crate::common::amqp::wire::Method;
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use dope_test::harness::peer;
@@ -74,19 +73,10 @@ fn rejects_reconnect() {
                     );
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("scripted broker thread");
         },
     )
     .expect("scripted broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

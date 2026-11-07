@@ -1,6 +1,3 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
 use dope_amqp091::{
     config,
     message::{field::view, property::Properties},
@@ -8,6 +5,8 @@ use dope_amqp091::{
 use dope_fiber::abi::Join;
 use dope_test::harness::peer::TcpScript;
 
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 use common::{
     amqp::{Peer, wire::Method},
@@ -59,12 +58,7 @@ fn retains_multiple_staged_frames_until_one_message_completes() {
                     .expect("fiber");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker
                 .finish()
@@ -138,9 +132,7 @@ fn reclaims_retained_and_consumed_staging_between_fragmented_frames() {
                     next.release();
                     conn.control().close(ready, 200, "OK").await.expect("close");
                 })).is_ok());
-            }, recover, |result| {
-                result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
-            });
+            }, recover, complete);
             broker.finish().expect("broker completion");
         },
     ).expect("scripted broker");
@@ -210,9 +202,7 @@ fn reclaims_retained_and_consumed_staging_for_fragmented_header() {
                         next.release();
                         conn.control().close(ready, 200, "OK").await.expect("close");
                     })).expect("fiber");
-                }, recover, |result| {
-                    result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
-                });
+                }, recover, complete);
                 broker
                     .finish()
                     .expect("broker completion")
@@ -220,8 +210,4 @@ fn reclaims_retained_and_consumed_staging_for_fragmented_header() {
             },
         ).expect("scripted broker");
     }
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

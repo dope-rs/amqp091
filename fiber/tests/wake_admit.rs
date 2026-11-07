@@ -1,10 +1,9 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
 use dope::core::driver::schedule;
 
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::Method;
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use common::wake::Flow;
@@ -129,19 +128,10 @@ fn drains_disconnect() {
                     drop(guard);
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker completion");
         },
     )
     .expect("spawn disconnect broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

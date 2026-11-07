@@ -37,3 +37,10 @@ pub fn with_config(
 ) {
     Endpoint::new(address, config).try_check::<timing::Throughput, _>(POLICY, test, recover, finish)
 }
+
+pub fn complete<Q>(result: Result<(), error::Error<'_, (), Q>>) {
+    result
+        .as_ref()
+        .map_err(|error| error.kind())
+        .expect("endpoint completion");
+}

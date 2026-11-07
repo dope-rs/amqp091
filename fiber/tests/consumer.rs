@@ -1,10 +1,8 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
-
 use crate::common::amqp::app::{Endpoint, Policy};
 use crate::common::amqp::wire::{Method, put_short};
 use crate::common::amqp::{Peer, Tune};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use std::time::Duration;
@@ -79,9 +77,7 @@ fn retains_collision() {
                         drop(again);
                         assert!(matches!(error.error(), failure::Error::ConsumerCollision { tag, .. } if tag.as_ref() == "shared"));
                     })).expect("fiber");
-                }, |event| reports.push(event), recover, |result| {
-                result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
-            });
+                }, |event| reports.push(event), recover, complete);
     assert!(matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]), "unexpected reclaimed AMQP completion: {reports:?}");
     };
             broker.finish().expect("broker completion");
@@ -175,9 +171,7 @@ fn retains_names() {
                         });
                         assert_eq!(counts, [0; 4]);
                     })).expect("fiber");
-                }, |event| reports.push(event), recover, |result| {
-                result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
-            });
+                }, |event| reports.push(event), recover, complete);
     assert!(matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]), "unexpected reclaimed AMQP completion: {reports:?}");
     };
             broker.finish().expect("broker completion");
@@ -261,9 +255,7 @@ fn close_wakes_consumer() {
                     })).expect("fiber");
                 },
                 recover,
-                |result| {
-                    result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker completion");
         },
@@ -387,15 +379,9 @@ fn rejects_foreign_channel_key() {
                     })).expect("fiber");
                 },
                 recover,
-                |result| {
-                    result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker completion");
         },
     ).expect("broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

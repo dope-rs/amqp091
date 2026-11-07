@@ -1,7 +1,5 @@
-use std::convert::Infallible;
 use std::time::Duration;
 
-use dope::core::driver::life::recovery;
 use dope_amqp091::message::{ack, field::Table};
 use dope_amqp091::{config, failure};
 use dope_amqp091_fiber::channel::{basic, queue};
@@ -10,6 +8,8 @@ use crate::common::amqp::wire::{Method, put_short};
 use crate::common::amqp::{Peer, Tune};
 use crate::common::client::queue_name;
 
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use dope_test::harness::peer::AcceptScript;
@@ -241,12 +241,7 @@ fn restores_current_queue() {
                         })).is_ok(), "AMQP fiber must complete");
                     },
                     recover,
-                    |result| {
-                        result
-                            .as_ref()
-                            .map_err(|error| error.kind())
-                            .expect("endpoint completion");
-                    },
+                    complete,
                 );
                 broker.finish().expect("channel current queue broker");
             },
@@ -398,19 +393,10 @@ fn preserves_no_current_queue() {
                     })).is_ok(), "AMQP fiber must complete");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("no-current queue broker");
         },
     )
     .expect("no-current queue broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

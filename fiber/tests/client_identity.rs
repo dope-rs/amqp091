@@ -1,7 +1,5 @@
-use std::convert::Infallible;
 use std::time::Duration;
 
-use dope::core::driver::life::recovery;
 use dope_amqp091::config;
 use dope_amqp091::message::field::Table;
 use dope_amqp091_fiber::channel::{basic, queue};
@@ -9,6 +7,8 @@ use dope_amqp091_fiber::channel::{basic, queue};
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::{Method, put_short};
 
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use dope_amqp091::message::ack;
@@ -254,12 +254,7 @@ fn keeps_queue_identities() {
                     );
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("multi anonymous queue broker");
         },
@@ -404,19 +399,10 @@ fn restores_checked_slot() {
                             .expect("connection close");
                     })).is_ok(), "AMQP fiber must complete");
                 }, recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("identity rollback broker");
         },
     )
     .expect("identity rollback broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

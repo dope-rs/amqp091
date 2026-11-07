@@ -1,6 +1,3 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
 use dope_amqp091::config;
 use dope_amqp091::message::field::Table;
 use dope_amqp091_fiber::channel::{basic, exchange, queue};
@@ -9,6 +6,7 @@ use crate::common::amqp::Peer;
 use crate::common::amqp::wire::{Method, put_short};
 use crate::common::client::broker::rejection;
 
+use crate::common::recovery::recover;
 pub mod common;
 
 use dope_amqp091::failure;
@@ -486,8 +484,4 @@ fn rejects_ambiguous_queue() {
         );
     })
     .expect("bind topology broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

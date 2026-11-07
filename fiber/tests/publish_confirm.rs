@@ -1,11 +1,10 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
 use dope_test::alloc;
 
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::Method;
 use crate::common::client::{check_publish, confirm_ack, confirm_select};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use std::time::Duration;
@@ -73,12 +72,7 @@ fn rejects_plain_after_select() {
                     .expect("fiber");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker completion");
         },
@@ -175,12 +169,7 @@ fn keeps_partial_ack_before_later_publish() {
                         .expect("fiber");
                     },
                     recover,
-                    |result| {
-                        result
-                            .as_ref()
-                            .map_err(|error| error.kind())
-                            .expect("endpoint completion");
-                    },
+                    complete,
                 );
                 broker.finish().expect("broker completion");
             },
@@ -245,12 +234,7 @@ fn keeps_incomplete_publish_unconfirmed() {
                     .expect("fiber");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
@@ -351,12 +335,7 @@ fn keeps_first_settlement() {
                     );
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("duplicate-confirm broker");
         },
@@ -478,12 +457,7 @@ fn stale_drop_keeps_current() {
                 assert_eq!(outcome, protocol::Confirmation::Ack);
                 })).is_ok(), "AMQP fiber must complete");
                 }, recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("confirm reconnect broker");
         },
@@ -539,12 +513,7 @@ fn rejects_single_tag() {
                         .expect("AMQP fiber must complete");
                     },
                     recover,
-                    |result| {
-                        result
-                            .as_ref()
-                            .map_err(|error| error.kind())
-                            .expect("endpoint completion");
-                    },
+                    complete,
                 );
                 broker.finish().expect("invalid single confirm broker");
             },
@@ -555,7 +524,3 @@ fn rejects_single_tag() {
 
 #[global_allocator]
 static ALLOCATOR: alloc::Tracker = Tracker::new();
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
-}

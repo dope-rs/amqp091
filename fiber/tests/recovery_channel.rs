@@ -1,10 +1,8 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
-
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::Method;
 use crate::common::recovery::broker::tagged;
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use std::time::Duration;
@@ -39,23 +37,38 @@ fn replays_consumer_without_tracked_queue() {
         |broker| {
             for recovered in [false, true] {
                 let mut stream = broker.accept().expect("connection");
-                stream.read_wait(Some(Duration::from_secs(10))).expect("read timeout");
+                stream
+                    .read_wait(Some(Duration::from_secs(10)))
+                    .expect("read timeout");
                 Peer::new(&mut stream).open(TUNE).expect("handshake");
                 common::basic::returned::open_channel(&mut stream).expect("channel");
                 common::cancel::check_client_consume(
-                    &Method::read(&mut stream).expect("consume"), "tag",
-                ).expect("consumer tag");
+                    &Method::read(&mut stream).expect("consume"),
+                    "tag",
+                )
+                .expect("consumer tag");
                 let tag = common::cancel::consume_ok_arguments("tag").expect("tag");
                 Method::write(&mut stream, 1, 60, 21, &tag).expect("consume-ok");
                 if recovered {
-                    stream.write_all(&tagged(1, &[]).expect("delivery")).expect("delivery");
-                    Method::read(&mut stream).expect("ack").check(1, 60, 80).expect("ack route");
+                    stream
+                        .write_all(&tagged(1, &[]).expect("delivery"))
+                        .expect("delivery");
+                    Method::read(&mut stream)
+                        .expect("ack")
+                        .check(1, 60, 80)
+                        .expect("ack route");
                     common::basic::returned::close_connection(&mut stream).expect("close");
                 } else {
-                    Method::read(&mut stream).expect("purge").check(1, 50, 30).expect("purge route");
-                    stream.write_all(
-                        &channel_close(1, 404, "queue disappeared", 50, 30).expect("channel close"),
-                    ).expect("channel close");
+                    Method::read(&mut stream)
+                        .expect("purge")
+                        .check(1, 50, 30)
+                        .expect("purge route");
+                    stream
+                        .write_all(
+                            &channel_close(1, 404, "queue disappeared", 50, 30)
+                                .expect("channel close"),
+                        )
+                        .expect("channel close");
                     assert_close_retired(&stream);
                 }
             }
@@ -80,14 +93,21 @@ fn replays_consumer_without_tracked_queue() {
                         consumer.recv().await.expect("receive").expect("delivery")
                             .settle(Disposition::Ack).await.expect("ack");
                         conn.control().close(ready, 200, "done").await.expect("close");
-                    })).expect("fiber");
+                    }))
+                    .expect("fiber");
                 },
                 recover,
-                |result| { result.as_ref().map_err(|error| error.kind()).expect("endpoint"); },
+                |result| {
+                    result
+                        .as_ref()
+                        .map_err(|error| error.kind())
+                        .expect("endpoint");
+                },
             );
             broker.finish().expect("broker");
         },
-    ).expect("broker scope");
+    )
+    .expect("broker scope");
 }
 
 #[test]
@@ -200,12 +220,7 @@ fn replays_consumer() {
                 })).is_ok(), "AMQP fiber must complete");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("scripted broker thread");
         },
@@ -300,12 +315,7 @@ fn replays_pending_queue() {
                     })).is_ok(), "AMQP fiber must complete");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("queue recovery broker");
         },
@@ -373,12 +383,7 @@ fn assert_terminal_close(code: u16, text: &str) {
                     );
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("scripted broker thread");
         },
@@ -396,8 +401,4 @@ fn preserves_fatal_close() {
     ] {
         assert_terminal_close(code, text);
     }
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

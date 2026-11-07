@@ -1,8 +1,6 @@
 use dope_test::harness::peer;
 use std::array;
-use std::convert::Infallible;
 
-use dope::core::driver::life::recovery;
 use dope::manifold::timing;
 use dope_amqp091::config;
 use dope_amqp091::message::field::view;
@@ -13,6 +11,8 @@ use crate::common::amqp::app::Endpoint;
 use crate::common::amqp::wire::{Frame, Method};
 use crate::common::basic::{self, returned};
 use crate::common::fiber::{Pinned, poll_once};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use dope_amqp091::failure;
@@ -94,12 +94,7 @@ fn rejects_content_limits() {
                             );
                         })).is_ok(), "AMQP fiber must complete");
                     }, recover,
-                    |result| {
-                        result
-                            .as_ref()
-                            .map_err(|error| error.kind())
-                            .expect("endpoint completion");
-                    },
+                    complete,
                 );
                 broker.finish().expect("broker");
             },
@@ -220,12 +215,7 @@ fn wakes_fitting_channels() {
                     );
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
@@ -347,12 +337,7 @@ fn wakes_property_waiter() {
                     })).is_ok(), "AMQP fiber must complete");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
@@ -469,12 +454,7 @@ fn reuses_fragment_pool() {
                     );
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
@@ -545,12 +525,7 @@ fn rejects_fragment_exhaustion() {
                         .expect("fragment failure must wake the client");
                     },
                     recover,
-                    |result| {
-                        result
-                            .as_ref()
-                            .map_err(|error| error.kind())
-                            .expect("endpoint completion");
-                    },
+                    complete,
                 );
                 broker.finish().expect("broker");
             },
@@ -638,12 +613,7 @@ fn rejects_fragment_cycle() {
                     .expect("fragment cycle must wake both channels");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
@@ -751,20 +721,11 @@ fn rejects_resident_cycle() {
                         .expect("resident failure must wake the client");
                     },
                     recover,
-                    |result| {
-                        result
-                            .as_ref()
-                            .map_err(|error| error.kind())
-                            .expect("endpoint completion");
-                    },
+                    complete,
                 );
                 broker.finish().expect("broker");
             },
         )
         .expect("resident broker");
     }
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

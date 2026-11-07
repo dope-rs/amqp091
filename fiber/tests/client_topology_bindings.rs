@@ -1,7 +1,5 @@
-use std::convert::Infallible;
 use std::time::Duration;
 
-use dope::core::driver::life::recovery;
 use dope_amqp091::config;
 use dope_amqp091::message::ack;
 use dope_amqp091::message::field::{Table, Value};
@@ -12,6 +10,8 @@ use dope_test::harness::peer::AcceptScript;
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::{Method, put_short, short};
 use crate::common::client::*;
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 #[test]
@@ -350,12 +350,7 @@ fn keeps_binding_identity() {
                         conn.control().close(ready, 200, "done").await.expect("close");
                     })).is_ok(), "AMQP fiber must complete");
                 }, recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("binding arguments broker");
         },
@@ -467,12 +462,7 @@ fn passive_declaration_selects_current_binding() {
                     })).is_ok(), "AMQP fiber must complete");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("passive current binding broker");
         },
@@ -595,19 +585,10 @@ fn passive_external_current_survives_reconnect() {
                     })).is_ok(), "AMQP fiber must complete");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("external current broker");
         },
     )
     .expect("external current broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

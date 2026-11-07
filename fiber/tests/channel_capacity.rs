@@ -1,10 +1,8 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
-
 use crate::common::amqp::app::{Endpoint, Policy};
 use crate::common::amqp::wire::Method;
 use crate::common::amqp::{Peer, Tune};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use std::time::Duration;
@@ -101,9 +99,7 @@ fn rejects_and_reuses() {
                     let second = rt.block_on(conn.channels().open_auto()).expect("reuse fiber").expect("admission after release");
                     assert_eq!(second.id(), 1);
                     rt.block_on(conn.control().close(ready, 200, "done")).expect("connection close fiber").expect("close connection");
-                }, |event| reports.push(event), recover, |result| {
-                result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
-            });
+                }, |event| reports.push(event), recover, complete);
                     assert!(
                         matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]),
                         "unexpected reclaimed AMQP completion: {reports:?}"
@@ -117,7 +113,3 @@ fn rejects_and_reuses() {
 
 #[global_allocator]
 static ALLOCATOR: Tracker = Tracker::new();
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
-}

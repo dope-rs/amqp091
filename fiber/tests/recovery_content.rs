@@ -1,9 +1,7 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
-
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::{Frame, Method};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use dope_test::harness::peer;
@@ -77,9 +75,7 @@ fn rejects_partial_body_credit_cycle() {
                     let (need, spare) = credit.into_parts();
                     assert_eq!((need.get(), spare), (4, 3));
                 })).expect("peer shutdown").expect("body credit failure completes");
-            }, recover, |result| {
-                result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
-            });
+            }, recover, complete);
             broker.finish().expect("scripted broker");
         },
     ).expect("body credit peer");
@@ -159,12 +155,7 @@ fn rejects_early_method() {
                     );
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("scripted broker thread");
         },
@@ -292,19 +283,10 @@ fn accepts_empty_fragment() {
                     );
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("scripted broker thread");
         },
     )
     .expect("scripted broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

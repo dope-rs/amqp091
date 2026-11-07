@@ -1,10 +1,9 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
 use dope_test::alloc;
 
 use crate::common::amqp::wire::Method;
 use crate::common::amqp::{Greeting, Peer};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use std::task;
@@ -97,12 +96,7 @@ fn keeps_reason_exact() {
                     "AMQP fiber must complete"
                 );
                 }, recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("blocked publish broker");
         },
@@ -196,12 +190,7 @@ fn separates_control_text_credit() {
                         })).is_ok(), "AMQP fiber must complete");
                     },
                     recover,
-                    |result| {
-                        result
-                            .as_ref()
-                            .map_err(|error| error.kind())
-                            .expect("endpoint completion");
-                    },
+                    complete,
                 );
                 broker.finish().expect("control-text broker");
             },
@@ -270,9 +259,7 @@ fn wakes_flow_on_close_admission() {
                         .expect("flow wake deadline");
                 },
                 recover,
-                |result| {
-                    result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker completion");
         },
@@ -282,6 +269,3 @@ fn wakes_flow_on_close_admission() {
 
 #[global_allocator]
 static ALLOCATOR: alloc::Tracker = Tracker::new();
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
-}

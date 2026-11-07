@@ -1,9 +1,7 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
-
 use crate::common::amqp::wire::{Frame, Method};
 use crate::common::amqp::{Greeting, Peer, Tune};
+use crate::common::recovery::client::complete as finish;
+use crate::common::recovery::recover;
 pub mod common;
 use std::time::Duration;
 
@@ -65,7 +63,7 @@ fn honors_negotiated_heartbeat_deadlines() {
                         })).expect("peer shutdown").expect("heartbeat drive");
                     },
                     recover,
-                    |result| { result.as_ref().map_err(|error| error.kind()).expect("endpoint completion"); },
+                    finish,
                 );
                 broker.finish().expect("heartbeat peer");
             },
@@ -217,20 +215,11 @@ fn readies_after_replay() {
                     );
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                finish,
             );
             broker.finish().expect("scripted broker thread");
         },
     )
     .expect("scripted broker");
     }
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

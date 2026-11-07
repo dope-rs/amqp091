@@ -1,6 +1,4 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
+use crate::common::recover;
 pub mod common;
 use common::check::Check;
 use dope_amqp091::message::field::view;
@@ -192,8 +190,4 @@ fn table_update_is_atomic() {
     let entries = table.iter().collect::<Vec<_>>();
     assert_eq!(entries.len(), 1);
     assert!(matches!(entries[0].1, view::Value::Bool(true)));
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

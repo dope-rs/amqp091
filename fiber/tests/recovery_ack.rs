@@ -1,9 +1,7 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
-
 use crate::common::amqp::wire::Method;
 use crate::common::recovery::broker::{ack_tag, open_tagged, tagged};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 use std::task::Poll;
 
@@ -140,12 +138,7 @@ fn rejects_stale_epoch() {
                     conn.control().close(ready, 200, "done").await.expect("close after settlements");
                 })).is_ok(), "AMQP fiber must complete");
                 }, recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("scripted broker thread");
         },
@@ -259,12 +252,7 @@ fn waits_for_egress_credit() {
                 );
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("scripted broker thread");
         },
@@ -366,19 +354,10 @@ fn releases_body_first() {
                     );
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("scripted broker thread");
         },
     )
     .expect("scripted broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

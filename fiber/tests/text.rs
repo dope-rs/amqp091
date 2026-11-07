@@ -1,10 +1,8 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
-
 use crate::common::amqp::app::{Endpoint, Policy};
 use crate::common::amqp::{Peer, Tune};
 use crate::common::client::close_reason;
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use std::time::Duration;
@@ -257,19 +255,10 @@ fn rejects_empty_broker_queue() {
                         .expect("fiber");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
     )
     .expect("scripted broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

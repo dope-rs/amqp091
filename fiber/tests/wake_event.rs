@@ -1,10 +1,10 @@
-use std::convert::Infallible;
 use std::task::Poll;
 
-use dope::core::driver::life::recovery;
 use dope::core::driver::schedule;
 
 use crate::common::amqp::Peer;
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use dope::core::driver::schedule::ready::wake::fanout;
@@ -107,19 +107,10 @@ fn drains_budget() {
                     assert!(items.into_iter().all(|item| item.is_ok()));
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker completion");
         },
     )
     .expect("spawn connection-event broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

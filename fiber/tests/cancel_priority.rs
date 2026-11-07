@@ -1,4 +1,3 @@
-use std::convert::Infallible;
 use std::time::Duration;
 
 use dope::core::driver::life::recovery;
@@ -12,6 +11,8 @@ use dope_test::alloc::Tracker;
 use crate::common::amqp::wire::Method;
 use crate::common::amqp::{Peer, Tune};
 use crate::common::fiber::{Pinned, poll_once};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use dope_test::harness::peer::TcpScript;
@@ -145,12 +146,7 @@ fn orphan_preempts_owned() {
                         .expect("consumers retired");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker completion");
         },
@@ -383,7 +379,3 @@ fn resumes_cancellation_and_control_after_shared_quota() {
 
 #[global_allocator]
 static ALLOCATOR: alloc::Tracker = Tracker::new();
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
-}

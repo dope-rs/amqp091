@@ -1,7 +1,5 @@
-use std::convert::Infallible;
 use std::time::Duration;
 
-use dope::core::driver::life::recovery;
 use dope_amqp091::config;
 use dope_amqp091::message::ack;
 use dope_amqp091::message::field::Table;
@@ -10,6 +8,8 @@ use dope_amqp091_fiber::channel::basic;
 use crate::common::amqp::wire::Method;
 use crate::common::amqp::{Peer, Tune};
 use crate::common::fiber::{Pinned, poll_once};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use dope_test::harness::peer::AcceptScript;
@@ -189,19 +189,10 @@ fn drops_uncommitted() {
                     assert!(rt.block_on(run).is_ok(), "AMQP fiber must complete");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("transport intent broker");
         },
     )
     .expect("transport intent broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

@@ -1,7 +1,5 @@
-use std::convert::Infallible;
 use std::time::Duration;
 
-use dope::core::driver::life::recovery;
 use dope_amqp091::failure::wire::Fault;
 use dope_amqp091::message::field::Table;
 use dope_amqp091::{config, failure};
@@ -11,6 +9,8 @@ use dope_fiber::abi::{Join, Task};
 
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::{Method, put_short};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use dope_test::harness::peer::{AcceptScript, TcpScript};
@@ -205,12 +205,7 @@ fn commits_dropped_ops() {
                     })).is_ok(), "AMQP fiber must complete");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("topology intent broker");
         },
@@ -286,9 +281,7 @@ fn rejects_deleted_binding() {
                         )), "stale binding must preserve its generation error");
                     })).is_ok(), "AMQP fiber must complete");
                 }, recover,
-                |result| {
-                    result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("stale binding broker");
         },
@@ -365,17 +358,11 @@ fn rejects_deleted_declare() {
                             }
                         })).is_ok(), "AMQP fiber must complete");
                     }, recover,
-                    |result| {
-                        result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
-                    },
+                    complete,
                 );
                 broker.finish().expect("deleted redeclare broker")
                     .expect("deleted queue protocol close");
             },
         ).expect("deleted redeclare broker");
     }
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

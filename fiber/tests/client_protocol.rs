@@ -1,6 +1,3 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
 use dope::manifold::timing;
 use dope_amqp091::{config, protocol};
 use dope_test::alloc;
@@ -10,6 +7,8 @@ use crate::common::amqp::Peer;
 use crate::common::amqp::app::Endpoint;
 use crate::common::amqp::wire::{Frame, Method};
 
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use common::client::Redial;
@@ -62,12 +61,7 @@ fn rejects_scoped_method() {
                         "AMQP fiber must complete"
                     );
                 }, recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
@@ -112,12 +106,7 @@ fn rejects_heartbeat() {
                         "AMQP fiber must complete"
                     );
                 }, recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
@@ -166,12 +155,7 @@ fn rejects_unknown_channel() {
                         "AMQP fiber must complete"
                     );
                 }, recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("unknown channel flow broker");
         },
@@ -201,12 +185,7 @@ fn rejects_server_version() {
                 .expect("AMQP fiber must complete");
             },
             recover,
-            |result| {
-                result
-                    .as_ref()
-                    .map_err(|error| error.kind())
-                    .expect("endpoint completion");
-            },
+            complete,
         );
         assert!(
             broker
@@ -270,12 +249,7 @@ fn rejects_coalesced_handshake() {
                         .expect("AMQP fiber");
                     },
                     recover,
-                    |result| {
-                        result
-                            .as_ref()
-                            .map_err(|error| error.kind())
-                            .expect("endpoint completion");
-                    },
+                    complete,
                 );
                 broker.finish().expect("broker");
             },
@@ -310,12 +284,7 @@ fn rejects_retained_method() {
                 .expect("AMQP fiber must complete");
             },
             recover,
-            |result| {
-                result
-                    .as_ref()
-                    .map_err(|error| error.kind())
-                    .expect("endpoint completion");
-            },
+            complete,
         );
         let (sent, closed, redial) = broker
             .finish()
@@ -358,12 +327,7 @@ fn rejects_handshake_flow() {
                 .expect("AMQP fiber must complete");
             },
             recover,
-            |result| {
-                result
-                    .as_ref()
-                    .map_err(|error| error.kind())
-                    .expect("endpoint completion");
-            },
+            complete,
         );
         let (sent, closed, redial) = broker
             .finish()
@@ -402,12 +366,7 @@ fn rejects_server_locale() {
                 .expect("AMQP fiber must complete");
             },
             recover,
-            |result| {
-                result
-                    .as_ref()
-                    .map_err(|error| error.kind())
-                    .expect("endpoint completion");
-            },
+            complete,
         );
         assert!(
             broker
@@ -455,12 +414,7 @@ fn close_is_terminal() {
                 .expect("AMQP fiber must complete");
             },
             recover,
-            |result| {
-                result
-                    .as_ref()
-                    .map_err(|error| error.kind())
-                    .expect("endpoint completion");
-            },
+            complete,
         );
         assert!(
             broker
@@ -500,12 +454,7 @@ fn close_loss_is_terminal() {
                 .expect("AMQP fiber must complete");
             },
             recover,
-            |result| {
-                result
-                    .as_ref()
-                    .map_err(|error| error.kind())
-                    .expect("endpoint completion");
-            },
+            complete,
         );
         assert!(
             broker
@@ -521,7 +470,3 @@ fn close_loss_is_terminal() {
 
 #[global_allocator]
 static ALLOCATOR: alloc::Tracker = Tracker::new();
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
-}

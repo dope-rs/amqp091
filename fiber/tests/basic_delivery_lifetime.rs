@@ -1,11 +1,9 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
-
 use crate::common::amqp::Peer;
 use crate::common::amqp::app::Endpoint;
 use crate::common::amqp::wire::Method;
 use crate::common::cancel;
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use dope::core::io::Reclaimed;
@@ -136,12 +134,7 @@ fn outlives_consumer() {
                     },
                     |event| reports.push(event),
                     recover,
-                    |result| {
-                        result
-                            .as_ref()
-                            .map_err(|error| error.kind())
-                            .expect("endpoint completion");
-                    },
+                    complete,
                 );
                 assert!(
                     matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]),
@@ -234,12 +227,7 @@ fn empty_ends_at_header() {
                     },
                     |event| reports.push(event),
                     recover,
-                    |result| {
-                        result
-                            .as_ref()
-                            .map_err(|error| error.kind())
-                            .expect("endpoint completion");
-                    },
+                    complete,
                 );
                 assert!(
                     matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]),
@@ -250,8 +238,4 @@ fn empty_ends_at_header() {
         },
     )
     .expect("scripted AMQP broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

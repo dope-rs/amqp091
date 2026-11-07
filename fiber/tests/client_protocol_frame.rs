@@ -1,7 +1,5 @@
-use std::convert::Infallible;
 use std::task::Poll;
 
-use dope::core::driver::life::recovery;
 use dope_amqp091::adapter::publish::Request;
 use dope_amqp091::config;
 use dope_amqp091::message::property::Properties;
@@ -9,6 +7,8 @@ use dope_amqp091::message::property::Properties;
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::{Frame, Method};
 
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use dope_amqp091::failure;
@@ -79,9 +79,7 @@ fn rejects_partial_response_before_reusing_method() {
                     })).expect("fiber");
                 },
                 recover,
-                |result| {
-                    result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
@@ -141,9 +139,7 @@ fn rejects_partial_close_reply_before_close_admission() {
                     })).expect("fiber");
                 },
                 recover,
-                |result| {
-                    result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
@@ -219,20 +215,11 @@ fn rejects_invalid_frames() {
                     );
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
     )
     .expect("spawn invalid-frame broker");
     }
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

@@ -1,8 +1,6 @@
-use std::convert::Infallible;
 use std::task::Poll;
 use std::time::Duration;
 
-use dope::core::driver::life::recovery;
 use dope_amqp091::config;
 use dope_fiber::abi::poll_fn;
 
@@ -10,6 +8,8 @@ use crate::common::amqp::Peer;
 use crate::common::amqp::wire::{Frame, Method, put_short};
 use crate::common::basic::{self, returned};
 use crate::common::fiber::{Pinned, poll_once};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use dope_amqp091::failure;
@@ -98,9 +98,7 @@ fn close_drains_or_releases_pending_rpc() {
                         })).expect("fiber completion");
                     },
                     recover,
-                    |result| {
-                        result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
-                    },
+                    complete,
                 );
                 broker.finish().expect("broker");
             },
@@ -176,9 +174,7 @@ fn cancelled_unsent_close_preserves_inbound_content() {
                     })).expect("fiber completion");
                 },
                 recover,
-                |result| {
-                    result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
@@ -285,12 +281,7 @@ fn waits_for_channel_credit() {
                         close.await.expect("close after outbound credit release");
                     })).is_ok(), "AMQP fiber must complete");
                 }, recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
@@ -384,12 +375,7 @@ fn waits_for_conn_credit() {
                         "AMQP fiber must complete"
                     );
                 }, recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
@@ -453,19 +439,10 @@ fn server_is_terminal() {
                         "AMQP fiber must complete"
                     );
                 }, recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
     )
     .expect("spawn server-channel-close broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

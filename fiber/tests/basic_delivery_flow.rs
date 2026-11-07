@@ -1,11 +1,9 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
-
 use crate::common::amqp::Peer;
 use crate::common::amqp::app::Endpoint;
 use crate::common::amqp::wire::{Frame, Method};
 use crate::common::cancel;
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use dope::core::io::Reclaimed;
@@ -159,12 +157,7 @@ fn interleaves_by_channel() {
                     },
                     |event| reports.push(event),
                     recover,
-                    |result| {
-                        result
-                            .as_ref()
-                            .map_err(|error| error.kind())
-                            .expect("endpoint completion");
-                    },
+                    complete,
                 );
                 assert!(
                     matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]),
@@ -283,12 +276,7 @@ fn held_deliveries_block() {
                     },
                     |event| reports.push(event),
                     recover,
-                    |result| {
-                        result
-                            .as_ref()
-                            .map_err(|error| error.kind())
-                            .expect("endpoint completion");
-                    },
+                    complete,
                 );
                 assert!(
                     matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]),
@@ -444,12 +432,7 @@ fn cancel_wakes_route() {
                     },
                     |event| reports.push(event),
                     recover,
-                    |result| {
-                        result
-                            .as_ref()
-                            .map_err(|error| error.kind())
-                            .expect("endpoint completion");
-                    },
+                    complete,
                 );
                 assert!(
                     matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]),
@@ -460,8 +443,4 @@ fn cancel_wakes_route() {
         },
     )
     .expect("scripted AMQP broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

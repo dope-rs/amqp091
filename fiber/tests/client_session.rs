@@ -1,7 +1,5 @@
-use std::convert::Infallible;
 use std::time::Duration;
 
-use dope::core::driver::life::recovery;
 use dope_amqp091::config;
 use dope_amqp091::message::field::Table;
 use dope_amqp091_fiber::channel::basic;
@@ -9,6 +7,8 @@ use dope_amqp091_fiber::channel::basic;
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::{Method, put_short};
 
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use dope_amqp091::failure;
@@ -150,12 +150,7 @@ fn replays_after_retry() {
                     );
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker thread panicked");
         },
@@ -227,19 +222,10 @@ fn rejects_stale_ready() {
                         "AMQP fiber must complete"
                     );
                 }, recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("stale-ready broker");
         },
     )
     .expect("bind stale-ready broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

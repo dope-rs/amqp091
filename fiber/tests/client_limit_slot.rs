@@ -1,7 +1,5 @@
-use std::convert::Infallible;
 use std::task::Poll;
 
-use dope::core::driver::life::recovery;
 use dope_amqp091::config;
 use dope_amqp091::message::field::Table;
 use dope_amqp091_fiber::channel::{exchange, queue};
@@ -10,6 +8,8 @@ use dope_fiber::{abi::poll_fn, context};
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::Method;
 use crate::common::fiber::Pinned;
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use dope_amqp091::failure;
@@ -94,12 +94,7 @@ fn reserves_inflight_slot() {
                     })).is_ok(), "AMQP fiber must complete");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
@@ -201,19 +196,10 @@ fn retains_queue_slot() {
                     })).is_ok(), "AMQP fiber must complete");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             assert!(broker.finish().is_ok(), "queue reservation broker");
         },
     )
     .expect("queue reservation broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }
