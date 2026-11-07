@@ -303,29 +303,14 @@ unsafe impl<const ID: u8> depot::raw::Words for Store<'_, '_, '_, '_, ID> {
     }
 
     fn words(&self, (): ()) -> &[bitmap::Word] {
-        if self.shape.bits() == 0 {
-            return &[];
-        }
         let bytes = self.shape.bits() * mem::size_of::<Option<Index<'_, ID>>>();
         let align = mem::align_of::<bitmap::Word>();
         let offset = (bytes + align - 1) & !(align - 1);
+        // SAFETY: the admitted layout aligns this initialized plane, including its empty case.
         unsafe {
             slice::from_raw_parts(
                 self.memory.pointer.as_ptr().add(offset).cast(),
                 self.shape.words(),
-            )
-        }
-    }
-    fn row(entry: entry::Row<&Self>, (): ()) -> &[bitmap::Word] {
-        let store = *entry.source();
-        let bytes = store.shape.bits() * mem::size_of::<Option<Index<'_, ID>>>();
-        let align = mem::align_of::<bitmap::Word>();
-        let offset = (bytes + align - 1) & !(align - 1);
-        // SAFETY: this retained row proves the exact source allocation is nonempty.
-        unsafe {
-            slice::from_raw_parts(
-                store.memory.pointer.as_ptr().add(offset).cast(),
-                store.shape.words(),
             )
         }
     }

@@ -206,11 +206,6 @@ unsafe impl<const ID: u8> depot::raw::Words for Map<'_, '_, '_, '_, ID> {
     fn words(&self, (): ()) -> &[bitmap::Word] {
         self.store.words(())
     }
-
-    fn row(entry: entry::Row<&Self>, (): ()) -> &[bitmap::Word] {
-        // SAFETY: project the exact retained Map into its original Store without changing its domain.
-        Store::row(unsafe { entry.map(|table| &table.store) }, ())
-    }
 }
 
 const _: () = assert!(
