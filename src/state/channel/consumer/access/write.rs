@@ -80,11 +80,22 @@ impl<'b, 'a, 'd, const ID: u8> Write<'a, 'b, 'd, ID> {
         &mut self,
         spec: Record<'b, 'd, ID>,
     ) -> Result<consumer::Key, failure::Error> {
-        self.registry.check(spec.tag())?;
-        match self.registry.slots.insert(Slot::pending(spec)) {
-            Ok(key) => Ok(consumer::Key::from_raw(key)),
-            Err(_) => Err(failure::Error::Capacity(wire::Capacity::Consumer)),
+        let tag = spec.tag();
+        if !tag.is_empty()
+            && let Some(actual) = self.registry.key(tag.value())
+        {
+            return Err(failure::Error::Protocol(wire::Fault::ConsumerKey {
+                expected: None,
+                actual: Some(num::NonZero::from(actual)),
+                step: turn::Step::Pending,
+            }));
         }
+        let Some(vacant) = self.registry.slots.vacant() else {
+            return Err(failure::Error::Capacity(wire::Capacity::Consumer));
+        };
+        Ok(consumer::Key::from_raw(
+            vacant.insert(Slot::pending(spec)).key(),
+        ))
     }
 
     pub(crate) fn named(

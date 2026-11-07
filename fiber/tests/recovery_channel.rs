@@ -34,6 +34,63 @@ fn assert_close_retired(mut stream: &Stream<'_>) {
 }
 
 #[test]
+fn replays_consumer_without_tracked_queue() {
+    AcceptScript::with(
+        |broker| {
+            for recovered in [false, true] {
+                let mut stream = broker.accept().expect("connection");
+                stream.read_wait(Some(Duration::from_secs(10))).expect("read timeout");
+                Peer::new(&mut stream).open(TUNE).expect("handshake");
+                common::basic::returned::open_channel(&mut stream).expect("channel");
+                common::cancel::check_client_consume(
+                    &Method::read(&mut stream).expect("consume"), "tag",
+                ).expect("consumer tag");
+                let tag = common::cancel::consume_ok_arguments("tag").expect("tag");
+                Method::write(&mut stream, 1, 60, 21, &tag).expect("consume-ok");
+                if recovered {
+                    stream.write_all(&tagged(1, &[]).expect("delivery")).expect("delivery");
+                    Method::read(&mut stream).expect("ack").check(1, 60, 80).expect("ack route");
+                    common::basic::returned::close_connection(&mut stream).expect("close");
+                } else {
+                    Method::read(&mut stream).expect("purge").check(1, 50, 30).expect("purge route");
+                    stream.write_all(
+                        &channel_close(1, 404, "queue disappeared", 50, 30).expect("channel close"),
+                    ).expect("channel close");
+                    assert_close_retired(&stream);
+                }
+            }
+        },
+        |broker| {
+            with(
+                broker.addr(),
+                |rt| {
+                    let conn = rt.connection();
+                    rt.block_on(dope_fiber::fiber!('_ => async move {
+                        let target = conn.observe().ready().await.expect("ready");
+                        let channel = conn.channels().open_in(target, 1).await.expect("channel");
+                        let arguments = Table::new();
+                        let mut consumer = channel.basic().consume(basic::Consume {
+                            queue: "q", consumer_tag: "tag", no_local: false,
+                            ack: ack::Manual, exclusive: false, arguments: &arguments,
+                        }).await.expect("consumer");
+                        let error = channel.queue().purge("q").await.expect_err("remote close");
+                        assert_eq!(error.error().server_code(), Some(404));
+                        conn.observe().retired(target.epoch()).await.expect("retired");
+                        let ready = conn.observe().ready().await.expect("recovered");
+                        consumer.recv().await.expect("receive").expect("delivery")
+                            .settle(Disposition::Ack).await.expect("ack");
+                        conn.control().close(ready, 200, "done").await.expect("close");
+                    })).expect("fiber");
+                },
+                recover,
+                |result| { result.as_ref().map_err(|error| error.kind()).expect("endpoint"); },
+            );
+            broker.finish().expect("broker");
+        },
+    ).expect("broker scope");
+}
+
+#[test]
 fn replays_consumer() {
     AcceptScript::with(
         move |acceptor| {

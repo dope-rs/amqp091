@@ -289,9 +289,6 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
     }
 
     fn wake(self, target: epoch::Id<'d, ID>, freed: Freed) -> Result<(), failure::Error> {
-        match freed {
-            Freed::Available => Ok(()),
-            Freed::Route => self.domain.content.wake_route(target.token()),
-        }
+        self.domain.content.wake_route(target.token(), freed)
     }
 }

@@ -5,9 +5,8 @@ use o3::alloc;
 use o3::depot::arena::hash::runtime::{self, entry};
 
 use crate::failure::wire::turn;
-use crate::failure::{self, wire};
+use crate::failure::wire;
 use crate::protocol::wire::Fingerprint;
-use crate::protocol::wire::text::short;
 use crate::state::channel::consumer::delivery::{Access, Store};
 use crate::state::channel::consumer::storage::slot::Slot;
 use crate::state::channel::consumer::storage::status::Status;
@@ -63,25 +62,6 @@ impl<'b, 'd, const ID: u8> Registry<'b, 'd, ID> {
                 step,
             }),
         }
-    }
-
-    pub(in crate::state::channel::consumer) fn check(
-        &self,
-        tag: short::Short<'_>,
-    ) -> Result<(), failure::Error> {
-        if !tag.is_empty()
-            && let Some(actual) = self.key(tag.value())
-        {
-            return Err(failure::Error::Protocol(wire::Fault::ConsumerKey {
-                expected: None,
-                actual: Some(num::NonZero::from(actual)),
-                step: turn::Step::Pending,
-            }));
-        }
-        if self.slots.is_full() {
-            return Err(failure::Error::Capacity(wire::Capacity::Consumer));
-        }
-        Ok(())
     }
 
     pub(in crate::state::channel::consumer) fn remove<'r, 'c>(

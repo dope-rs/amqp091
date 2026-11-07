@@ -174,8 +174,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> SessionOps<'o, 'r, 'c, 'b
                 return;
             }
         };
-        self.port().coordination().waiters().wake_all();
-        self.port().admission().wake_all();
+        self.port().wake_all();
         if let Err(error) = self.wake_route(epoch, freed) {
             self.fail_session(
                 close,
@@ -242,7 +241,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> SessionOps<'o, 'r, 'c, 'b
             }
             shared::Start::Applied => {}
             shared::Start::Route { epoch } => {
-                if let Err(error) = self.port().content.wake_route(epoch.token()) {
+                if let Err(error) = self.wake_route(epoch, channel::Freed::Route) {
                     self.fail_session(
                         close,
                         FailureOwner::Immediate(epoch),
@@ -358,7 +357,6 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> SessionOps<'o, 'r, 'c, 'b
         if let Err(error) = self.port().content.cancel(epoch.token()) {
             self.port().fail(local::Access::new(region), epoch, error);
         }
-        self.port().coordination().waiters().wake_all();
-        self.port().admission().wake_all();
+        self.port().wake_all();
     }
 }

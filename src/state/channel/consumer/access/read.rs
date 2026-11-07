@@ -23,17 +23,11 @@ impl<'b, 'a, 'd, const ID: u8> Read<'a, 'b, 'd, ID> {
     }
 
     pub(crate) fn has_replay(&self) -> bool {
-        (0..self.registry.slots.capacity()).any(|index| {
-            self.registry
-                .slots
-                .key_value_at(index)
-                .is_some_and(|entry| {
-                    let slot = entry.1;
-                    matches!(
-                        slot.status,
-                        Status::Active | Status::Recovering | Status::Replaying
-                    )
-                })
+        self.registry.slots.values().any(|slot| {
+            matches!(
+                slot.status,
+                Status::Active | Status::Recovering | Status::Replaying
+            )
         })
     }
 

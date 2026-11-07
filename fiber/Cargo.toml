@@ -10,11 +10,11 @@ repository = "https://github.com/dope-rs/amqp091"
 readme = "../README.md"
 
 [dependencies]
-dope = "0.30"
-dope-fiber = "0.30"
-dope-amqp091 = { path = "..", version = "0.26.1" }
-o3 = "0.33.2"
+dope = "0.31"
+dope-fiber = "0.31"
+dope-amqp091 = { path = "..", version = "0.27.0" }
+o3 = "0.34.5"
 
 [dev-dependencies]
-dope-test = "0.30"
+dope-test = "0.31"
 pin-project = "1.1.13"

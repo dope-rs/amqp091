@@ -163,6 +163,10 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Domain<'r, 'c, 'b, 'd, ID> {
         };
         self.transport
             .close(target.token(), retire.abort(close::Reason::Protocol));
+        self.wake_all();
+    }
+
+    pub(crate) fn wake_all(&self) {
         self.coordination.waiters().wake_all();
         self.admission().wake_all();
     }

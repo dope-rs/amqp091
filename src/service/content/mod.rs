@@ -133,10 +133,16 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Store<'r, 'c, 'b, 'd, ID> {
             .map_err(failure::Error::WaitRegister)
     }
 
-    pub(crate) fn wake_route(&self, conn: conn::Id<'d, KeyTag<ID>>) -> Result<(), failure::Error> {
-        self.wait
-            .wake_route(conn)
-            .map_err(failure::Error::WaitRoute)
+    #[inline(always)]
+    pub(crate) fn wake_route(
+        &self,
+        conn: conn::Id<'d, KeyTag<ID>>,
+        freed: channel::Freed,
+    ) -> Result<(), failure::Error> {
+        match freed {
+            channel::Freed::Available => Ok(()),
+            channel::Freed::Route => self.wait.wake_route(conn).map_err(failure::Error::WaitRoute),
+        }
     }
 
     pub(crate) fn cancel(&self, conn: conn::Id<'d, KeyTag<ID>>) -> Result<(), failure::Error> {

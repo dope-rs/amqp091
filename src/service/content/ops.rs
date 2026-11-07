@@ -114,10 +114,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
     for State<'o, 'd, service::Port<'r, 'c, 'b, 'd, ID>, service::Logic<'o, 'd, ID>, KeyTag<ID>, 1>
 {
     fn wake_route(&self, epoch: epoch::Id<'d, ID>, freed: Freed) -> Result<(), failure::Error> {
-        match freed {
-            Freed::Available => Ok(()),
-            Freed::Route => self.port().content.wake_route(epoch.token()),
-        }
+        self.port().content.wake_route(epoch.token(), freed)
     }
 
     fn complete<C: method::Complete<'b, 'd, consumer::Key>>(
@@ -438,7 +435,6 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
             change,
             close::Reason::Local(close::LocalOrigin::ResourceFailure),
         ));
-        self.port().coordination().waiters().wake_all();
-        self.port().admission().wake_all();
+        self.port().wake_all();
     }
 }

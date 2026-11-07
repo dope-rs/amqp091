@@ -259,15 +259,14 @@ impl<'a, 'c, 'b, 'd, const ID: u8> State<'a, 'c, 'b, 'd, ID> {
         &mut self,
         needs: &need::Need<'_, M>,
     ) -> (need::IdentityPlan, need::Resolution<'d, ID>) {
-        let found = match needs.target() {
-            need::Target::None => None,
-            need::Target::Reference(name) => self.graph().queue_key(name),
-            need::Target::Declare(name) => (!name.is_empty())
-                .then(|| self.graph().queue_key(name))
-                .flatten(),
+        let (identity, found) = match needs.target() {
+            need::Target::None => (need::IdentityPlan::None, None),
+            need::Target::Declare(name) if name.is_empty() => (need::IdentityPlan::Fresh, None),
+            need::Target::Reference(name) | need::Target::Declare(name) => {
+                (need::IdentityPlan::None, self.graph().queue_key(name))
+            }
         };
-        let found = need::Resolution::new(found);
-        (needs.identity(), found)
+        (identity, need::Resolution::new(found))
     }
 }
 

@@ -6,7 +6,7 @@ use o3::buffer::resident;
 
 use crate::adapter::channel;
 use crate::protocol::wire::text::resident::Pool;
-use crate::state::channel::Stores;
+use crate::state::channel::{Freed, Stores};
 use crate::state::channel::methods::{self, send};
 use crate::state::{channels, epoch, shared};
 use crate::{config, failure, permits, service};
@@ -127,8 +127,12 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8, K: Capability>
         self.domain.config()
     }
 
-    pub(super) fn wake_route(self, target: epoch::Id<'d, ID>) -> Result<(), failure::Error> {
-        self.domain.content.wake_route(target.token())
+    pub(super) fn wake_route(
+        self,
+        target: epoch::Id<'d, ID>,
+        freed: Freed,
+    ) -> Result<(), failure::Error> {
+        self.domain.content.wake_route(target.token(), freed)
     }
 
     pub(super) const fn cancel(self) -> Cancel<'o, 'd, ID, K> {

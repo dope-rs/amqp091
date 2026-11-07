@@ -9,7 +9,6 @@ use crate::protocol::wire::text::short;
 pub(crate) struct Need<'a, M> {
     change: M,
     target: Target<'a>,
-    identity: IdentityPlan,
 }
 
 pub(crate) struct Plan<'c, 'd, const ID: u8> {
@@ -131,7 +130,6 @@ impl<'a> Need<'a, ()> {
         Self {
             change: (),
             target: Target::None,
-            identity: IdentityPlan::None,
         }
     }
 
@@ -139,7 +137,6 @@ impl<'a> Need<'a, ()> {
         Self {
             change: (),
             target: Target::Reference(queue),
-            identity: IdentityPlan::None,
         }
     }
 }
@@ -149,7 +146,6 @@ impl<'a> Need<'a, Exchange<'a>> {
         Self {
             change: Exchange { name },
             target: Target::None,
-            identity: IdentityPlan::None,
         }
     }
 }
@@ -169,7 +165,6 @@ impl<'a> Need<'a, Route<'a>> {
                 args,
             },
             target: Target::None,
-            identity: IdentityPlan::None,
         }
     }
 }
@@ -179,11 +174,6 @@ impl<'a> Need<'a, Queue<'a>> {
         Self {
             change: Queue { name },
             target: Target::Declare(name),
-            identity: if name.is_empty() {
-                IdentityPlan::Fresh
-            } else {
-                IdentityPlan::None
-            },
         }
     }
 }
@@ -203,7 +193,6 @@ impl<'a> Need<'a, Binding<'a>> {
                 args,
             },
             target: Target::Reference(queue.into()),
-            identity: IdentityPlan::None,
         }
     }
 }
@@ -211,10 +200,6 @@ impl<'a> Need<'a, Binding<'a>> {
 impl<'a, M> Need<'a, M> {
     pub(in crate::protocol::topology) const fn target(&self) -> Target<'a> {
         self.target
-    }
-
-    pub(in crate::protocol::topology) const fn identity(&self) -> IdentityPlan {
-        self.identity
     }
 }
 
@@ -392,4 +377,4 @@ impl<'c, 'b: 'c, 'd: 'c, const ID: u8> Reserve<'c, 'b, 'd, ID> for Binding<'_> {
     }
 }
 
-const _: () = assert!(mem::size_of::<Need<'_, ()>>() == 4 * mem::size_of::<usize>());
+const _: () = assert!(mem::size_of::<Need<'_, ()>>() == 3 * mem::size_of::<usize>());

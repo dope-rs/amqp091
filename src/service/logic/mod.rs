@@ -434,9 +434,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
     ) {
         let change = owner.with_shared(driver.region_token(), |shared| shared.reject(Some(cause)));
         if change == conn::Change::Applied {
-            let coord = owner.port().coordination();
-            coord.waiters().wake_all();
-            owner.port().admission().wake_all();
+            owner.port().wake_all();
         }
     }
 }
@@ -476,8 +474,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
         match change {
             shared::Failure::Ignored => Some(failure),
             shared::Failure::Applied(_) => {
-                owner.port().coordination().waiters().wake_all();
-                owner.port().admission().wake_all();
+                owner.port().wake_all();
                 None
             }
         }
@@ -624,9 +621,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
     }
 
     fn shutdown(owner: &mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>) {
-        let coord = owner.port().coordination();
-        coord.waiters().wake_all();
-        owner.port().admission().wake_all();
+        owner.port().wake_all();
     }
 
     fn progress(

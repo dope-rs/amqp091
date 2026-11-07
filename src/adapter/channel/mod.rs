@@ -20,7 +20,7 @@ use crate::protocol::method::{self, channel};
 use crate::service::cancel::pending::reap;
 use crate::service::cancel::{self};
 use crate::state::channel::cancel::lanes;
-use crate::state::channel::{Freed, returns};
+use crate::state::channel::returns;
 use crate::state::{channels, shared};
 
 #[repr(transparent)]
@@ -314,13 +314,9 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Channels<'o, 'r, 'c, 'b, 
                 returned: item,
                 freed,
             }))) => {
-                match freed {
-                    Freed::Available => {}
-                    Freed::Route => self
-                        .core
-                        .wake_route(target.epoch().raw())
-                        .map_err(failure::Runtime::from)?,
-                }
+                self.core
+                    .wake_route(target.epoch().raw(), freed)
+                    .map_err(failure::Runtime::from)?;
                 Ok(Some(item))
             }
             crate::service::EpochAccess::Live(Some(Ok(returns::Next::Pending))) => Ok(None),
