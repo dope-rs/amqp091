@@ -302,13 +302,9 @@ impl method::Unit for UnbindOk {
     const KIND: method::Kind = method::Kind::ExchangeUnbind;
 }
 
-impl requests::Seal for Inspect<'_> {}
-
 impl<'d> requests::Source<'d> for Inspect<'_> {
     type Policy<const ID: u8> = requests::Plain;
 }
-
-impl requests::Seal for Declare<'_> {}
 
 impl<'d> requests::Source<'d> for Declare<'_> {
     type Policy<const ID: u8> = requests::Tracked;
@@ -338,8 +334,6 @@ impl<'d, const ID: u8> requests::Capture<'d, ID> for Declare<'_> {
     }
 }
 
-impl requests::Seal for Delete<'_> {}
-
 impl<'d> requests::Source<'d> for Delete<'_> {
     type Policy<const ID: u8> = requests::Tracked;
 }
@@ -367,8 +361,6 @@ impl<'d, const ID: u8> requests::Capture<'d, ID> for Delete<'_> {
         })
     }
 }
-
-impl requests::Seal for Bind<'_> {}
 
 impl<'d> requests::Source<'d> for Bind<'_> {
     type Policy<const ID: u8> = requests::Tracked;
@@ -400,8 +392,6 @@ impl<'d, const ID: u8> requests::Capture<'d, ID> for Bind<'_> {
         })
     }
 }
-
-impl requests::Seal for Unbind<'_> {}
 
 impl<'d> requests::Source<'d> for Unbind<'_> {
     type Policy<const ID: u8> = requests::Tracked;

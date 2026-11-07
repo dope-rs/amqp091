@@ -11,9 +11,6 @@ use crate::protocol::wire::schema::{self, consume, queues, resource};
 use crate::protocol::wire::text::short;
 use crate::state::work;
 
-mod seal;
-pub(crate) use seal::Seal;
-
 pub enum Defer {
     Wait,
 }
@@ -21,9 +18,8 @@ pub enum Defer {
 pub enum Plain {}
 pub enum Keep {}
 pub enum Tracked {}
-pub enum Declaration {}
 
-pub trait Source<'d>: method::Request + Seal + Sized {
+pub trait Source<'d>: method::Request + Sized {
     type Policy<const ID: u8>: admit::Admit<'d, Self, ID>;
 }
 
@@ -242,7 +238,7 @@ impl<'d, M: ack::Mode, const ID: u8> Capture<'d, ID> for basic::Consume<'_, M> {
 }
 
 impl<'d> Source<'d> for queue::Declare<'_> {
-    type Policy<const ID: u8> = Declaration;
+    type Policy<const ID: u8> = Tracked;
 }
 
 impl<'d, const ID: u8> Capture<'d, ID> for queue::Declare<'_> {
@@ -254,6 +250,10 @@ impl<'d, const ID: u8> Capture<'d, ID> for queue::Declare<'_> {
         budget: &Budget<'d>,
         topo: &mut topology::State<'_, 'c, 'b, 'd, ID>,
     ) -> Result<work::Admit<'c, 'b, 'd, ID>, failure::Error> {
+        let name = view.field(queues::Declaration::QUEUE);
+        if name.is_empty() && !self.exclusive {
+            return Err(failure::Error::ServerNamedQueueNotExclusive);
+        }
         let needs = need::Need::queue(self.queue.into());
         let (id, plan) = topo.preflight(&needs)?;
         let work = match plan {
