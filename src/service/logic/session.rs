@@ -156,6 +156,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> SessionOps<'o, 'r, 'c, 'b
         sink: &mut egress::Queue<'_, '_, 'd, { client::IOV_CAP }, pool::Cursor>,
         region: &mut region::Token<region::Identity<'d>>,
     ) {
+        let broken_frame = matches!(&error, failure::Error::Frame(_));
         let stores = self.port().content.stores();
         let freed = match self.with_shared(region, |shared| {
             shared.connection.try_fail(epoch, error).map(|cause| {
@@ -203,6 +204,8 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> SessionOps<'o, 'r, 'c, 'b
                 recovery::Fault::session(error),
                 region,
             );
+        } else if broken_frame {
+            close(status::Retirement::Permanent.drain(close::Reason::Protocol));
         }
     }
 

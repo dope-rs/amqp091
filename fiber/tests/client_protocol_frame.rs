@@ -174,9 +174,16 @@ fn rejects_invalid_frames() {
             } else {
                 let mut header = vec![1, 0, 0];
                 header.extend_from_slice(&131_072u32.to_be_bytes());
+                header.extend_from_slice(&[1, 0, 0, 0, 0, 0, 0, 0xce]);
                 header
             };
             stream.write_all(&frame).expect("invalid frame");
+            if !zero_tag {
+                let close = Method::read(stream).expect("frame error close");
+                close.check(0, 10, 50).expect("connection close");
+                assert_eq!(&close.1[4..6], &501u16.to_be_bytes());
+                assert_eq!(stream.read(&mut [0]).expect("closed input"), 0);
+            }
         },
         |broker| {
             let addr = broker.addr();
@@ -187,7 +194,7 @@ fn rejects_invalid_frames() {
                     let conn = rt.connection();
                     assert!(
                         rt.block_on(dope_fiber::fiber!('_ => async move {
-                            conn.observe().ready().await.expect("ready");
+                            let ready = conn.observe().ready().await.expect("ready");
                             let channel = conn.channels().open(1).await.expect("open channel");
                             let error = channel.queue().purge("trigger").await
                                 .expect_err("invalid frame must fail the pending request");
@@ -200,6 +207,12 @@ fn rejects_invalid_frames() {
                                 ))
                                 | (true, failure::Error::Protocol(failure::wire::Fault::DeliveryTagZero))
                             ), "{:?}", error.error());
+                            if !zero_tag {
+                                conn.observe().retired(ready.epoch()).await.expect("retirement");
+                                conn.observe().read(|view| {
+                                    assert_eq!(view.last_exit().expect("frame error exit").reason(), failure::Reason::Protocol);
+                                }).await;
+                            }
                         }))
                         .is_ok(),
                         "AMQP fiber must complete"

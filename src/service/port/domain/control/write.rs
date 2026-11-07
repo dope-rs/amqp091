@@ -78,36 +78,22 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Write<'a, 'r, 'c, 'b, 'd, ID> {
                 .try_reserve(region, self.target.token(), frame);
             let slot = match slot {
                 Reserve::Item(slot) => slot,
-                Reserve::Unknown(frame) | Reserve::Inactive(frame) => {
-                    let (frame, _) = frame.into_parts();
-                    drop(frame);
+                Reserve::Unknown(_frame) | Reserve::Inactive(_frame) => {
                     return Admission::Missing(freed);
                 }
-                Reserve::Rejected(cause) => {
-                    let (frame, _) = cause.load.into_inner().into_parts();
-                    drop(frame);
-                    return Admission::Pending(freed);
-                }
+                Reserve::Rejected(_cause) => return Admission::Pending(freed),
                 Reserve::Invalid(cause) => {
-                    let (load, cause) = Rejected::<_>::from(cause).into_parts();
-                    let (frame, _) = load.into_inner().into_parts();
-                    drop(frame);
+                    let (_, cause) = Rejected::<_>::from(cause).into_parts();
                     return Admission::Failed(failure::Error::Egress(cause));
                 }
                 Reserve::Empty(cause) => {
-                    let (load, cause) = cause.into_parts();
-                    let (frame, _) = load.into_inner().into_parts();
-                    drop(frame);
+                    let (_, cause) = cause.into_parts();
                     return Admission::Failed(failure::Error::Egress(Rejection::Empty(cause)));
                 }
             };
             let slot = match slot.validate() {
                 Ok(slot) => slot,
-                Err(frame) => {
-                    let (frame, _) = frame.into_inner().into_parts();
-                    drop(frame);
-                    return Admission::Pending(freed);
-                }
+                Err(_frame) => return Admission::Pending(freed),
             };
             let effect = slot.try_commit(|region| {
                 self.domain
@@ -121,9 +107,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Write<'a, 'r, 'c, 'b, 'd, ID> {
             match effect {
                 Ok(()) => Admission::Continue(freed),
                 Err(rejected) => {
-                    let (frame, cause) = rejected.into_parts();
-                    let (frame, _) = frame.into_inner().into_parts();
-                    drop(frame);
+                    let (_, cause) = rejected.into_parts();
                     Admission::Failed(cause)
                 }
             }

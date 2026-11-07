@@ -19,7 +19,7 @@ use crate::state::channel::methods::{self, flight};
 use crate::state::channel::{Phase, change};
 use crate::state::conn::status::Retirement;
 use crate::state::conn::{Owner, Transport, phase};
-use crate::state::{channels, epoch};
+use crate::state::epoch;
 use crate::{failure, protocol, service};
 
 pub(in crate::service) mod commit;
@@ -56,8 +56,7 @@ pub(crate) trait Ops<'o, 'r, 'c, 'b, 'd, const ID: u8> {
 
     fn recv_chan(
         &mut self,
-        lease: channels::Lease<'d, ID>,
-        published: u64,
+        gate: gates::Channel<'d, ID>,
         server: channel::Event<'_, 'd>,
         attempt: Attempt<'d, ID>,
         parts: &mut service::Turn<'_, '_, 'd, ID>,
@@ -111,8 +110,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
                 else {
                     return Ok(ops::Input::Committed);
                 };
-                let (lease, published) = gate.into_parts();
-                self.recv_chan(lease, published, event, attempt, parts)
+                self.recv_chan(gate, event, attempt, parts)
             }
         }
     }
@@ -258,12 +256,12 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
 
     fn recv_chan(
         &mut self,
-        lease: channels::Lease<'d, ID>,
-        published: u64,
+        gate: gates::Channel<'d, ID>,
         server: channel::Event<'_, 'd>,
         attempt: Attempt<'d, ID>,
         parts: &mut service::Turn<'_, '_, 'd, ID>,
     ) -> Result<ops::Input<'d, ID>, failure::Error> {
+        let (lease, published) = gate.into_parts();
         let epoch = epoch::Id::new(parts.conn_id);
         let out = &mut parts.sink;
         let region = parts.driver.region_token();

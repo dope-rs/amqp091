@@ -5,7 +5,6 @@ use dope::core::driver::route::KeyTag;
 use dope::core::driver::schedule::ready::wake;
 use dope::manifold::client::port::write::Reserve;
 use dope::manifold::client::port::{self};
-use dope::net::link::egress::reserve::error;
 use dope::net::link::egress::{Rejected, Rejection, data};
 use o3::base::cell::{local, region};
 use o3::buffer::pool;
@@ -41,23 +40,6 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Admission<'a, 'r, 'c, 'b, 'd, ID> {
             admissions: &domain.admissions,
             egress: &domain.egress,
         }
-    }
-
-    fn rejected<R>(
-        cause: error::Capacity<compose::Tagged<pool::Cursor, Authority<'d, ID>>>,
-    ) -> service::Admit<R> {
-        let (frame, _) = cause.load.into_inner().into_parts();
-        drop(frame);
-        service::Admit::Unavailable
-    }
-
-    fn invalid<R>(
-        frame: compose::Tagged<pool::Cursor, Authority<'d, ID>>,
-        cause: Rejection,
-    ) -> service::Admit<R> {
-        let (frame, _) = frame.into_parts();
-        drop(frame);
-        service::Admit::Error(failure::Error::Egress(cause))
     }
 
     pub(crate) fn admit<R>(
@@ -163,35 +145,29 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Admission<'a, 'r, 'c, 'b, 'd, ID> {
             let hold = self.transport.try_reserve(region, target.token(), frame);
             let hold = match hold {
                 Reserve::Item(hold) => hold,
-                Reserve::Unknown(frame) | Reserve::Inactive(frame) => {
-                    let (frame, _) = frame.into_parts();
-                    drop(frame);
+                Reserve::Unknown(_frame) | Reserve::Inactive(_frame) => {
                     return Ok(service::Admit::Inactive);
                 }
-                Reserve::Rejected(cause) => return Ok(Self::rejected(cause)),
+                Reserve::Rejected(_cause) => return Ok(service::Admit::Unavailable),
                 Reserve::Invalid(cause) => {
-                    let (load, cause) = Rejected::<_>::from(cause).into_parts();
-                    return Ok(Self::invalid(load.into_inner(), cause));
+                    let (_, cause) = Rejected::<_>::from(cause).into_parts();
+                    return Ok(service::Admit::Error(failure::Error::Egress(cause)));
                 }
                 Reserve::Empty(cause) => {
-                    let (load, cause) = cause.into_parts();
-                    return Ok(Self::invalid(load.into_inner(), Rejection::Empty(cause)));
+                    let (_, cause) = cause.into_parts();
+                    return Ok(service::Admit::Error(failure::Error::Egress(
+                        Rejection::Empty(cause),
+                    )));
                 }
             };
             let permit = match hold.validate() {
                 Ok(permit) => permit,
-                Err(frame) => {
-                    let (frame, _) = frame.into_inner().into_parts();
-                    drop(frame);
-                    return Ok(service::Admit::Inactive);
-                }
+                Err(_frame) => return Ok(service::Admit::Inactive),
             };
             match permit.try_with(|region, frame| commit(region, frame.as_ref())) {
                 Ok(output) => Ok(service::Admit::Item(output)),
                 Err(rejected) => {
-                    let (frame, cause) = rejected.into_parts();
-                    let (frame, _) = frame.into_inner().into_parts();
-                    drop(frame);
+                    let (_, cause) = rejected.into_parts();
                     Err(cause)
                 }
             }

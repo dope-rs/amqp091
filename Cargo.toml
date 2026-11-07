@@ -14,15 +14,15 @@ members = ["fiber"]
 resolver = "2"
 
 [workspace.package]
-version = "0.27.0"
+version = "0.28.0"
 rust-version = "1.98"
 
 [dependencies]
-dope = "0.31"
-o3 = "0.34.5"
+dope = "0.32"
+o3 = "0.35.0"
 
 [dev-dependencies]
-dope-test = "0.31"
+dope-test = "0.32"
 
 [profile.release]
 panic = "abort"
