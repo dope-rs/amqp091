@@ -29,6 +29,7 @@ where
 pub(super) struct Last<'c> {
     wake: fifo::Index<'c>,
     next: Option<send::Next>,
+    flow: u8,
 }
 
 impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const CONFIRM: bool, const ID: u8>
@@ -96,6 +97,7 @@ where
             Ok(Last {
                 wake: route.index.lane(),
                 next,
+                flow: state.control.flow_reply.take().map_or(2, u8::from),
             })
         });
         step::Step::admit(route, access, admit, credit, wake)
@@ -108,6 +110,14 @@ where
     ) -> <Kind<CONFIRM> as Mode<'o, 'd, ID>>::Ticket {
         let core = self.route.core();
         self.publish.complete();
+        if last.flow < 2 {
+            core.flow(
+                access.reborrow(),
+                self.route.epoch().raw(),
+                self.route.lease().raw(),
+                last.flow != 0,
+            );
+        }
         if let Some(next) = last.next {
             core.send(
                 access.reborrow(),

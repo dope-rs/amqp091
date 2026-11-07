@@ -1,15 +1,14 @@
 use std::{mem, task::Poll};
 
 use dope::manifold::client::port;
-use dope::net::link::egress::{Rejected, Rejection};
+use dope::net::link::egress::{Rejected, Rejection, data};
 use o3::base::cell::{local, region};
 use port::write::Reserve;
-use runtime::Authority;
 
 use crate::failure;
+use crate::service::Domain;
 use crate::service::port::domain::control::plan::Plan;
 use crate::service::port::domain::egress;
-use crate::service::{Domain, runtime};
 use crate::state::channel::methods::{self, send};
 use crate::state::channels::Lease;
 use crate::state::{channel, epoch, shared};
@@ -70,7 +69,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Write<'a, 'r, 'c, 'b, 'd, ID> {
             Plan::Failed(cause) => return Admission::Failed(cause),
         };
         let key = next.key();
-        let frame = Authority::tagged(frame, Some(self.lease));
+        let frame = data::compose::Tagged::new(frame, Some(self.lease));
         let result = access.reborrow().with_region(|region| {
             let slot = self
                 .domain

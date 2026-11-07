@@ -35,11 +35,7 @@ fn stale_drop_keeps_stream() {
             Method::read(&mut first)
                 .expect("AMQP method")
                 .check(1, 20, 10).expect("AMQP method route");
-            first
-                .write_all(
-                    &Method::try_encode(1, 20, 11, &[0, 0, 0, 0]).expect("AMQP frame fixture"),
-                )
-                .expect("first channel.open-ok");
+            Method::write(&mut first, 1, 20, 11, &[0; 4]).expect("first channel.open-ok");
             let stale = Method::read(&mut first).expect("AMQP method");
             stale.check(1, 60, 40).expect("AMQP method route");
             assert_eq!(routing_key(&stale).expect("AMQP fixture"), "stale-stream");
@@ -58,11 +54,7 @@ fn stale_drop_keeps_stream() {
             Method::read(&mut second)
                 .expect("AMQP method")
                 .check(1, 20, 10).expect("AMQP method route");
-            second
-                .write_all(
-                    &Method::try_encode(1, 20, 11, &[0, 0, 0, 0]).expect("AMQP frame fixture"),
-                )
-                .expect("replayed channel.open-ok");
+            Method::write(&mut second, 1, 20, 11, &[0; 4]).expect("replayed channel.open-ok");
 
             let current = Method::read(&mut second).expect("AMQP method");
             current.check(1, 60, 40).expect("AMQP method route");
@@ -70,6 +62,7 @@ fn stale_drop_keeps_stream() {
                 routing_key(&current).expect("AMQP fixture"),
                 "current-stream"
             );
+            Method::write(&mut second, 1, 20, 20, &[0]).expect("pause publication");
             Method::write(&mut second, 0, 10, 60, b"\x05ready")
                 .expect("current publication observed");
 
@@ -82,15 +75,23 @@ fn stale_drop_keeps_stream() {
             let Frame(kind, channel, body) = Frame::read(&mut second).expect("content body");
             assert_eq!((kind, channel, body.as_slice()), (3, 1, b"new".as_slice()));
 
+            let flow = Method::read(&mut second).expect("deferred flow reply");
+            flow.check(1, 20, 21).expect("flow reply route");
+            assert_eq!(&flow.1[4..], &[0]);
+
             Method::read(&mut second)
                 .expect("AMQP method")
                 .check(1, 50, 30).expect("AMQP method route");
-            second
-                .write_all(
-                    &Method::try_encode(1, 50, 31, &0u32.to_be_bytes())
-                        .expect("AMQP frame fixture"),
-                )
-                .expect("queue.purge-ok");
+            Method::write(&mut second, 1, 20, 20, &[1]).expect("resume publication");
+            Method::write(&mut second, 0, 10, 61, &[]).expect("connection unblocked");
+            Method::write(&mut second, 1, 50, 31, &[0; 4]).expect("queue.purge-ok");
+            let flow = Method::read(&mut second).expect("idle flow reply");
+            flow.check(1, 20, 21).expect("flow reply route");
+            assert_eq!(&flow.1[4..], &[1]);
+            Method::read(&mut second).expect("resumed publish").check(1, 60, 40)
+                .expect("publish route");
+            Method::write(&mut second, 1, 20, 20, &[0]).expect("pending flow");
+            Method::write(&mut second, 1, 20, 20, &[1]).expect("flow capacity exceeded");
             assert_eq!(second.read(&mut [0]).expect("stream probe teardown"), 0);
         },
         |broker| {
@@ -143,6 +144,13 @@ fn stale_drop_keeps_stream() {
                 body.fill(0);
                 current.await.expect("current publish");
                 channel.queue().purge("barrier").await.expect("post-drop barrier");
+                let mut resumed = Pinned::new(channel.basic().publish(
+                    common::client::channel::request("", "resumed", &props, &[])));
+                assert!(poll_once(resumed.as_pin()).await.is_pending());
+                conn.observe().retired(ready.epoch()).await.expect("flow capacity retirement");
+                let error = conn.observe().ready().await.expect_err("flow capacity failure");
+                assert!(matches!(error.error(), dope_amqp091::failure::Error::Capacity(
+                    dope_amqp091::failure::wire::Capacity::Method)));
                 })).is_ok(), "AMQP fiber must complete");
                 }, recover,
                 complete,

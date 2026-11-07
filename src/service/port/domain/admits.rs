@@ -1,27 +1,22 @@
 use std::ops;
 
 use data::compose;
-use dope::core::driver::route::KeyTag;
 use dope::core::driver::schedule::ready::wake;
 use dope::manifold::client::port::write::Reserve;
-use dope::manifold::client::port::{self};
 use dope::net::link::egress::{Rejected, Rejection, data};
 use o3::base::cell::{local, region};
 use o3::buffer::pool;
-use runtime::Authority;
 
 use crate::protocol::wire::Writer;
-use crate::service::port::domain::egress;
-use crate::service::{
-    Domain, runtime, {self},
-};
+use crate::service::port::domain::{Transport, egress};
+use crate::service::{self, Domain};
 use crate::state::{channels, epoch, shared};
 use crate::{failure, permits};
 
 /// Exact borrows required to admit one regular outbound frame.
 pub(crate) struct Admission<'a, 'r, 'c, 'b, 'd, const ID: u8> {
     session: &'a shared::Root<'r, 'c, 'b, 'd, ID>,
-    transport: &'a port::Port<'b, 'd, compose::Tagged<pool::Cursor, Authority<'d, ID>>, KeyTag<ID>>,
+    transport: &'a Transport<'b, 'd, ID>,
     admissions: &'a permits::Registry<'c, 'd>,
     egress: &'a egress::Egress,
 }
@@ -140,7 +135,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Admission<'a, 'r, 'c, 'b, 'd, ID> {
         frame: pool::Cursor,
         commit: impl FnOnce(&mut region::Token<region::Identity<'d>>, &[u8]) -> Result<R, E>,
     ) -> Result<service::Admit<R>, E> {
-        let frame = runtime::Authority::tagged(frame, lease);
+        let frame = compose::Tagged::new(frame, lease);
         let result = access.with_region(|region| {
             let hold = self.transport.try_reserve(region, target.token(), frame);
             let hold = match hold {

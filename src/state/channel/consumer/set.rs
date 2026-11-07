@@ -17,18 +17,6 @@ pub(crate) struct Set<'b, 'd, const ID: u8> {
     registry: Registry<'b, 'd, ID>,
 }
 
-#[must_use = "consumer retirement can free a blocked route"]
-pub(crate) enum Retire {
-    Started(channel::Freed),
-    Missing,
-}
-
-#[must_use = "consumer removal can free a blocked route"]
-pub(crate) enum Removal {
-    Removed(channel::Freed),
-    Missing,
-}
-
 impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
     pub(crate) fn try_new(
         plan: consumer::Plan,
@@ -54,29 +42,29 @@ impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
         }
     }
 
+    #[must_use = "consumer retirement can free a blocked route"]
     pub(crate) fn retire<'r, 'c>(
         &mut self,
         key: consumer::Key,
         store: &'r Store<'c, 'b, 'd>,
         replay: impl FnOnce() -> bool,
-    ) -> Retire {
-        let Some((slot, freed)) = self.registry.begin_retire(key, store, replay) else {
-            return Retire::Missing;
-        };
+    ) -> Option<channel::Freed> {
+        let (slot, freed) = self.registry.begin_retire(key, store, replay)?;
         slot.waker.clear();
-        Retire::Started(freed)
+        Some(freed)
     }
 
+    #[must_use = "consumer removal can free a blocked route"]
     pub(crate) fn detach<'r, 'c>(
         &mut self,
         key: consumer::Key,
         store: &'r Store<'c, 'b, 'd>,
-    ) -> Removal {
+    ) -> channel::Freed {
         let Some((slot, freed)) = self.registry.remove(key, store) else {
-            return Removal::Missing;
+            return channel::Freed::Available;
         };
         slot.waker.clear();
-        Removal::Removed(freed)
+        freed
     }
 
     pub(crate) fn cancel<'r, 'c>(
@@ -213,8 +201,3 @@ fn forget_if<'b, 'd, const ID: u8>(
         }
     }
 }
-
-const _: () = {
-    assert!(std::mem::size_of::<Retire>() == std::mem::size_of::<Option<channel::Freed>>());
-    assert!(std::mem::size_of::<Removal>() == std::mem::size_of::<Option<channel::Freed>>());
-};

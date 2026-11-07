@@ -8,9 +8,9 @@ use o3::buffer::{pool, resident};
 use crate::failure::{recovery, terminal, wire};
 use crate::protocol::wire::Writer;
 use crate::protocol::wire::text::resident::Pool;
-use crate::service::{self, content, runtime};
+use crate::service::{self, content};
 use crate::state::conn::recovery::Plan;
-use crate::state::{epoch, shared};
+use crate::state::{channels, epoch, shared};
 use crate::{config, failure};
 
 mod admits;
@@ -26,9 +26,11 @@ pub(in crate::service) use settings::Settings;
 pub(in crate::service) use storage::Storage;
 pub(crate) use waiters::Waiters;
 
+type Transport<'b, 'd, const ID: u8> =
+    port::Port<'b, 'd, compose::Tagged<pool::Cursor, Option<channels::Lease<'d, ID>>>, KeyTag<ID>>;
+
 pub(crate) struct Domain<'r, 'c, 'b, 'd, const ID: u8> {
-    pub(in crate::service) transport:
-        port::Port<'b, 'd, compose::Tagged<pool::Cursor, runtime::Authority<'d, ID>>, KeyTag<ID>>,
+    pub(in crate::service) transport: Transport<'b, 'd, ID>,
     pub(crate) session: shared::Root<'r, 'c, 'b, 'd, ID>,
     pub(in crate::service) coordination: service::Coord<'d, ID>,
     pub(in crate::service) admissions: crate::permits::Registry<'c, 'd>,
@@ -37,6 +39,11 @@ pub(crate) struct Domain<'r, 'c, 'b, 'd, const ID: u8> {
     pub(in crate::service) storage: Storage<'c, 'b, 'd>,
     pub(in crate::service) settings: Settings<'d>,
 }
+
+const _: () = assert!(
+    std::mem::size_of::<compose::Tagged<pool::Cursor, Option<channels::Lease<'static, 0>>>>()
+        == std::mem::size_of::<pool::Cursor>() + std::mem::size_of::<usize>()
+);
 
 pub(crate) enum EpochAccess<'c, 'b, 'd, R> {
     Live(R),
@@ -51,6 +58,34 @@ pub(crate) enum Replay {
 }
 
 impl<'r, 'c, 'b, 'd, const ID: u8> Domain<'r, 'c, 'b, 'd, ID> {
+    pub(crate) fn flow(
+        &self,
+        access: local::Access<'_, region::Identity<'d>>,
+        target: epoch::Id<'d, ID>,
+        lease: channels::Lease<'d, ID>,
+        active: bool,
+    ) -> Result<(), failure::Error> {
+        use crate::protocol::method::{Encode, channel::FlowOk};
+        use port::error::Enqueue;
+
+        let frame = self
+            .egress
+            .control()
+            .ok_or_else(|| failure::Error::Capacity(wire::Capacity::OutboundBuffer))?
+            .encode(|output| FlowOk { active }.write(output, lease.id()))?
+            .into_output();
+        let frame = compose::Tagged::new(frame, Some(lease));
+        access
+            .with_region(|region| self.transport.try_enqueue(region, target.token(), frame))
+            .map_err(|error| match error {
+                Enqueue::Unknown(_) | Enqueue::Inactive(_) => failure::Error::Closed,
+                Enqueue::Rejected(rejected) => {
+                    let (_, cause) = rejected.into_parts();
+                    failure::Error::Egress(cause)
+                }
+            })
+    }
+
     pub(crate) fn encode(
         &self,
         f: impl FnOnce(&mut Writer),
@@ -179,10 +214,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Domain<'r, 'c, 'b, 'd, ID> {
         &self.admissions
     }
 
-    pub(crate) const fn transport(
-        &self,
-    ) -> &port::Port<'b, 'd, compose::Tagged<pool::Cursor, runtime::Authority<'d, ID>>, KeyTag<ID>>
-    {
+    pub(crate) const fn transport(&self) -> &Transport<'b, 'd, ID> {
         &self.transport
     }
 

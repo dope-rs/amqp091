@@ -351,11 +351,8 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> SessionOps<'o, 'r, 'c, 'b
         let change = self.with_shared(region, |shared| {
             shared.disconnect(epoch, reason.into(), self.port().content.stores())
         });
-        match change {
-            shared::Disconnect::Ignored => return,
-            shared::Disconnect::Applied {
-                freed: channel::Freed::Available | channel::Freed::Route,
-            } => {}
+        if change == conn::Change::Ignored {
+            return;
         }
         if let Err(error) = self.port().content.cancel(epoch.token()) {
             self.port().fail(local::Access::new(region), epoch, error);

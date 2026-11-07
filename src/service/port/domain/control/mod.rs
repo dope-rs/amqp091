@@ -48,7 +48,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
     ) {
         let stores = self.domain.content.stores();
         let chan = lease.id();
-        let target = self.domain.session.write(access.reborrow(), |state| {
+        let target = self.domain.session.read(access.read(), |state| {
             state.connection.lifecycle.status().epoch()
         });
         let Some(target) = target else {
@@ -67,11 +67,8 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
                     }
                     let mut method = view.channel.method_state();
                     let busy = method.publishing.is_active();
-                    let freed = match method.retire(key, stores) {
-                        consumer::Retire::Started(freed) => freed,
-                        consumer::Retire::Missing => {
-                            return Plan::Missing(Freed::Available);
-                        }
+                    let Some(freed) = method.retire(key, stores) else {
+                        return Plan::Missing(Freed::Available);
                     };
                     let Some(next) =
                         method
@@ -140,7 +137,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
             consumer::Cancel::Tracked(key) => Some(*key),
             consumer::Cancel::Orphan(_) => None,
         };
-        let Some((target, lease)) = self.domain.session.write(access.reborrow(), |state| {
+        let Some((target, lease)) = self.domain.session.read(access.read(), |state| {
             let target = match scope {
                 Scope::Ready => state.connection.lifecycle.status().ready(),
                 Scope::Replay => state.recovery.target(),
@@ -149,13 +146,9 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
         }) else {
             if let Some(key) = key {
                 let _ = self.domain.session.write(access, |state| {
-                    match state
+                    state
                         .routes
                         .with_id(chan, |view| view.channel.method_state().detach(key, stores))
-                    {
-                        Some(consumer::Removal::Removed(freed)) => freed,
-                        Some(consumer::Removal::Missing) | None => Freed::Available,
-                    }
                 });
             }
             return;
@@ -219,12 +212,12 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
         stores: Stores<'r, 'c, 'b, 'd>,
     ) -> Freed {
         self.domain.session.write(access, |state| {
-            match state.routes.project(lease, |view| {
-                view.channel.method_state().detach(key, stores)
-            }) {
-                Some(consumer::Removal::Removed(freed)) => freed,
-                Some(consumer::Removal::Missing) | None => Freed::Available,
-            }
+            state
+                .routes
+                .project(lease, |view| {
+                    view.channel.method_state().detach(key, stores)
+                })
+                .unwrap_or(Freed::Available)
         })
     }
 
@@ -235,7 +228,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
     ) {
         let stores = self.domain.content.stores();
         let chan = lease.id();
-        let target = self.domain.session.write(access.reborrow(), |state| {
+        let target = self.domain.session.read(access.read(), |state| {
             state.connection.lifecycle.status().ready()
         });
         let Some(target) = target else {

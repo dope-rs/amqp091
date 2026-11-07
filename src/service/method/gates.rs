@@ -27,9 +27,6 @@ pub(super) fn connection(
     receipt: Phase,
     closing: bool,
 ) -> Result<bool, failure::Error> {
-    if closing && !matches!(kind, conn::Kind::Close | conn::Kind::CloseOk) {
-        return Ok(false);
-    }
     let valid = match kind {
         conn::Kind::Start => phase == Phase::Start,
         conn::Kind::Secure | conn::Kind::Tune => phase == Phase::Tune,

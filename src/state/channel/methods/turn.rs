@@ -136,10 +136,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Turn<'_, 'r, 'c, 'b, 'd, ID> {
         // Controls are detached or replay-owned and cannot retain Flight work.
         front.discard();
         let freed = match retire {
-            Some(key) => match self.consumers.detach(key, self.deliveries) {
-                consumer::Removal::Removed(freed) => freed,
-                consumer::Removal::Missing => channel::Freed::Available,
-            },
+            Some(key) => self.consumers.detach(key, self.deliveries),
             None => channel::Freed::Available,
         };
         Ok(self.next(origin, freed))
@@ -296,12 +293,12 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Turn<'_, 'r, 'c, 'b, 'd, ID> {
         }
     }
 
+    #[inline(never)]
     pub(crate) fn fail(
         &mut self,
         topo: &mut topology::State<'_, 'c, 'b, 'd, ID>,
         cause: &terminal::Lease<'c, 'b, 'd>,
-    ) -> channel::Freed {
-        let mut freed = channel::Freed::Available;
+    ) {
         let rollback = self.methods.flight.cancel(topo);
         self.consumers.rollback(rollback);
         while let Some(front) = Front::fail(self.methods) {
@@ -312,15 +309,11 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Turn<'_, 'r, 'c, 'b, 'd, ID> {
             } else {
                 front.discard();
             }
-            if let Some(key) = retire
-                && let consumer::Removal::Removed(route) =
-                    self.consumers.detach(key, self.deliveries)
-            {
-                freed = freed.merge(route);
+            if let Some(key) = retire {
+                let _ = self.consumers.detach(key, self.deliveries);
             }
         }
         self.consumers.disconnect();
-        freed
     }
 
     fn next(&mut self, origin: entry::Origin, freed: channel::Freed) -> methods::Next<'b, 'd> {

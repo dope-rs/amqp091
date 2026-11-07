@@ -63,7 +63,7 @@ impl<'c, 'b, 'd, const ID: u8> Method<'_, 'c, 'b, 'd, ID> {
         &mut self,
         key: consumer::Key,
         stores: channel::Stores<'r, 'c, 'b, 'd>,
-    ) -> consumer::Retire {
+    ) -> Option<channel::Freed> {
         self.consumers
             .retire(key, stores.deliveries, || self.methods.replays(key))
     }
@@ -72,7 +72,7 @@ impl<'c, 'b, 'd, const ID: u8> Method<'_, 'c, 'b, 'd, ID> {
         &mut self,
         key: consumer::Key,
         stores: channel::Stores<'r, 'c, 'b, 'd>,
-    ) -> consumer::Removal {
+    ) -> channel::Freed {
         self.consumers.detach(key, stores.deliveries)
     }
 }

@@ -2,7 +2,7 @@ use dope::core::driver::route::KeyTag;
 use dope::manifold::client::{self, close};
 use dope::manifold::service::bindings::endpoint::State;
 use dope::net::link::egress;
-use o3::base::cell::region;
+use o3::base::cell::{local, region};
 use o3::buffer;
 use o3::buffer::hold::scope;
 use o3::buffer::pool;
@@ -268,7 +268,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
         let mut request = |next| parts.close.request(next);
         let close = &mut request;
 
-        use method::channel::{CloseOk, FlowOk};
+        use method::channel::CloseOk;
 
         let store = &self.port().content;
         let stores = store.stores();
@@ -288,9 +288,16 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
                 Ok(())
             }
             channel::Event::Flow(f) => {
-                self.send_method(out, region, channel, &FlowOk { active: f.active })?;
-                self.with_lease(region, lease, |c| c.control().set_flow(f.active))
-                    .ok_or_else(|| failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
+                let pending = self
+                    .with_lease(region, lease, |c| {
+                        let c = c.publish();
+                        c.control.try_flow(f.active, c.publishing.is_active())
+                    })
+                    .ok_or_else(|| failure::Error::Protocol(Fault::ChannelUnknown { channel }))??;
+                if !pending {
+                    self.port()
+                        .flow(local::Access::new(region), epoch, lease, f.active)?;
+                }
                 if f.active {
                     self.port().coordination().waiters().wake_flow();
                 }

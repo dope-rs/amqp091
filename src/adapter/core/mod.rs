@@ -6,8 +6,8 @@ use o3::buffer::resident;
 
 use crate::adapter::channel;
 use crate::protocol::wire::text::resident::Pool;
-use crate::state::channel::{Freed, Stores};
 use crate::state::channel::methods::{self, send};
+use crate::state::channel::{Freed, Stores};
 use crate::state::{channels, epoch, shared};
 use crate::{config, failure, permits, service};
 
@@ -137,6 +137,21 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8, K: Capability>
 
     pub(super) const fn cancel(self) -> Cancel<'o, 'd, ID, K> {
         Cancel::new(self.domain.coordination())
+    }
+
+    #[inline(never)]
+    pub(super) fn flow(
+        self,
+        mut access: local::Access<'_, region::Identity<'d>>,
+        target: epoch::Id<'d, ID>,
+        lease: channels::Lease<'d, ID>,
+        active: bool,
+    ) where
+        K: Allows<State> + Allows<Egress>,
+    {
+        if let Err(cause) = self.domain.flow(access.reborrow(), target, lease, active) {
+            self.domain.fail(access, target, cause);
+        }
     }
 
     pub(super) fn send(

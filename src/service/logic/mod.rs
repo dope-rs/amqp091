@@ -573,8 +573,8 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
         owner.root().domain().transport.drain_tagged(
             requests,
             |region, auth| match auth {
-                runtime::Authority::Connection => true,
-                runtime::Authority::Channel(lease) => endpoint.with_shared(region, |shared| {
+                None => true,
+                Some(lease) => endpoint.with_shared(region, |shared| {
                     match shared
                         .routes
                         .project(lease, |route| route.channel.control().phase)

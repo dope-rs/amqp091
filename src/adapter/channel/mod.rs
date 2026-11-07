@@ -203,9 +203,9 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Channels<'o, 'r, 'c, 'b, 
         access: local::Access<'_, region::Identity<'d>>,
         id: u16,
     ) -> Option<Lease<'c, 'd, ID>> {
-        self.core
-            .shared()
-            .write(access, |state| state.routes.lease(id).map(Lease::from_raw))
+        self.core.shared().read(access.read(), |state| {
+            state.routes.lease(id).map(Lease::from_raw)
+        })
     }
 
     pub fn release(

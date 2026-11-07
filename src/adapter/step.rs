@@ -132,7 +132,7 @@ where
         self,
         cx: local::Access<'_, region::Identity<'d>>,
     ) -> Result<(), failure::Runtime<'c, 'b, 'd, ID>> {
-        match self.gate.with(cx, |state| {
+        match self.gate.read(cx.read(), |state| {
             state.routes.lease(self.lease.id()) == Some(self.lease.raw())
         }) {
             service::EpochAccess::Live(true) => Ok(()),

@@ -94,20 +94,22 @@ impl<'c, 'b, 'd, const ID: u8> Core<'c, 'b, 'd, ID> {
         retire
     }
 
-    pub(crate) fn disconnect<R>(
+    pub(crate) fn disconnect(
         &mut self,
         target: epoch::Id<'d, ID>,
         reason: failure::Reason,
-        finish: impl FnOnce(&terminal::Lease<'c, 'b, 'd>) -> R,
-    ) -> Option<R> {
+        finish: impl FnOnce(&terminal::Lease<'c, 'b, 'd>),
+    ) -> Change {
         if self.lifecycle.status.source() != Some(target) {
-            return None;
+            return Change::Ignored;
         }
         self.lifecycle.retire(target, reason);
-        let cause = self.lifecycle.status.terminal(target)?;
-        let output = finish(cause);
+        let Some(cause) = self.lifecycle.status.terminal(target) else {
+            return Change::Ignored;
+        };
+        finish(cause);
         self.unblock();
-        Some(output)
+        Change::Applied
     }
 
     pub(crate) fn fail<P: recovery::Policy, R>(

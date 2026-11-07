@@ -80,7 +80,6 @@ enum Kind {
     Method,
     Header(Channel),
     Body(Channel),
-    Heartbeat,
 }
 
 pub struct Codec {
@@ -154,7 +153,7 @@ impl codec::Stateless for Codec {
             ));
         }
         let kind = match tag {
-            Type::METHOD => Kind::Method,
+            Type::METHOD => Some(Kind::Method),
             Type::HEADER => {
                 let Some(channel) = Channel::new(channel) else {
                     return Ok(Self::fault(
@@ -165,7 +164,7 @@ impl codec::Stateless for Codec {
                         header,
                     ));
                 };
-                Kind::Header(channel)
+                Some(Kind::Header(channel))
             }
             Type::BODY => {
                 let Some(channel) = Channel::new(channel) else {
@@ -177,7 +176,7 @@ impl codec::Stateless for Codec {
                         header,
                     ));
                 };
-                Kind::Body(channel)
+                Some(Kind::Body(channel))
             }
             Type::HEARTBEAT => {
                 if channel != 0 {
@@ -186,7 +185,7 @@ impl codec::Stateless for Codec {
                 if wire != 0 {
                     return Ok(Self::fault(Fault::HeartbeatPayload { len: wire }, header));
                 }
-                Kind::Heartbeat
+                None
             }
             other => {
                 return Ok(Self::fault(
@@ -211,12 +210,12 @@ impl codec::Stateless for Codec {
                 consumed,
             ));
         }
-        if matches!(kind, Kind::Heartbeat) {
+        let Some(kind) = kind else {
             return Ok(codec::Parse::Item {
                 head: Inbound::Heartbeat,
                 consumed,
             });
-        }
+        };
         let payload = buf
             .try_plan(HEADER_LEN..HEADER_LEN + len)
             .map_err(scope::Error::Range)?;
@@ -224,7 +223,6 @@ impl codec::Stateless for Codec {
             Kind::Method => Inbound::Method { channel, payload },
             Kind::Header(channel) => Inbound::Header { channel, payload },
             Kind::Body(channel) => Inbound::Body { channel, payload },
-            Kind::Heartbeat => Inbound::Heartbeat,
         };
         Ok(codec::Parse::Item { head, consumed })
     }
