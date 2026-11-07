@@ -14,12 +14,12 @@ members = ["fiber"]
 resolver = "2"
 
 [workspace.package]
-version = "0.26.0"
+version = "0.26.1"
 rust-version = "1.98"
 
 [dependencies]
 dope = "0.30"
-o3 = "0.33.1"
+o3 = "0.33.2"
 
 [dev-dependencies]
 dope-test = "0.30"

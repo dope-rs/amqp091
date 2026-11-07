@@ -12,8 +12,8 @@ readme = "../README.md"
 [dependencies]
 dope = "0.30"
 dope-fiber = "0.30"
-dope-amqp091 = { path = "..", version = "0.26.0" }
-o3 = "0.33.1"
+dope-amqp091 = { path = "..", version = "0.26.1" }
+o3 = "0.33.2"
 
 [dev-dependencies]
 dope-test = "0.30"
