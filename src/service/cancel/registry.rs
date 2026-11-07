@@ -4,7 +4,7 @@ use o3::alloc;
 use o3::depot::queue::round::{self, values};
 
 use crate::service::cancel::layout::Layout;
-use crate::service::cancel::pending::{Pending, reap};
+use crate::service::cancel::pending::Pending;
 use crate::service::cancel::{Lane, Plan, Signal};
 use crate::state::channel::cancel::lanes;
 use crate::state::channel::methods;
@@ -138,28 +138,11 @@ impl<'d, const ID: u8> Registry<'d, ID> {
         None
     }
 
-    pub(crate) fn reap_any<L: Lane<'d, ID>>(
-        &self,
-        reap: impl FnOnce(Pending<'d, L, ID>) -> reap::Decision,
-    ) {
-        let head = match L::KIND {
-            lanes::Kind::Reservation => self.entries.group::<0>().active(),
-            lanes::Kind::Method => self.entries.group::<1>().active(),
-            lanes::Kind::Consumer => self.entries.group::<2>().active(),
-            lanes::Kind::Confirm => self.entries.group::<3>().active(),
-            lanes::Kind::Publish => self.entries.group::<4>().active(),
-            lanes::Kind::Control => self.entries.group::<5>().active(),
-        };
-        let Some((turn, active)) = head else {
+    pub(crate) fn reap_any(&self, reap: impl FnOnce(Pending<'d, lanes::Reservation, ID>)) {
+        let Some((turn, active)) = self.entries.group::<0>().active() else {
             return;
         };
-        let Active {
-            lease,
-            identity: id,
-        } = active;
-        if matches!(reap(Pending::new(lease, id)), reap::Decision::Keep) {
-            return;
-        }
+        reap(Pending::new(active.lease, active.identity));
         let _ = turn.pop_if(|current| current == active);
     }
 

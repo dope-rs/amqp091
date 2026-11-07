@@ -2,7 +2,7 @@ use std::marker;
 
 use crate::adapter::core;
 use crate::failure;
-use crate::service::cancel::pending::{self, reap};
+use crate::service::cancel::pending;
 use crate::service::{self, cancel};
 use crate::state::channel::cancel::lanes::{self, Slot};
 use crate::state::channels;
@@ -44,11 +44,11 @@ impl<'o, 'd: 'o, const ID: u8, K: core::Capability> Cancel<'o, 'd, ID, K> {
             .map_err(failure::Error::Cancellation)
     }
 
-    pub(in crate::adapter) fn reap_any<L: cancel::Lane<'d, ID>>(
+    pub(in crate::adapter) fn reap_any(
         self,
-        reap: impl FnOnce(pending::Pending<'d, L, ID>) -> reap::Decision,
+        reap: impl FnOnce(pending::Pending<'d, lanes::Reservation, ID>),
     ) where
-        K: core::Allows<core::Reap<L>>,
+        K: core::Allows<core::Reap<lanes::Reservation>>,
     {
         self.owner.cancellations.reap_any(reap);
     }
@@ -66,20 +66,5 @@ impl<'o, 'd: 'o, const ID: u8, K: core::Capability> Cancel<'o, 'd, ID, K> {
             .cancellations
             .try_reap(index, lease, reap)
             .map_err(failure::Error::Cancellation)
-    }
-
-    pub(in crate::adapter) fn reap<L: cancel::Lane<'d, ID>>(
-        self,
-        index: channels::Index<'_, ID>,
-        lease: channels::Lease<'d, ID>,
-        reap: impl FnOnce(pending::Pending<'d, L, ID>) -> reap::Decision,
-    ) -> Result<(), failure::Error>
-    where
-        K: core::Allows<core::Reap<L>>,
-    {
-        self.try_reap::<L, _>(index, lease, |pending| {
-            matches!(reap(pending), reap::Decision::Remove).then_some(())
-        })
-        .map(|_| ())
     }
 }

@@ -10,7 +10,6 @@ use crate::failure::wire::{Allocation, Fault, Resident};
 use crate::protocol::method::{self, basic};
 use crate::protocol::wire::text::resident;
 use crate::service;
-use crate::service::cancel::pending::reap;
 use crate::service::cancel::{self};
 use crate::state::channel::cancel::lanes;
 use crate::state::channel::facets;
@@ -209,18 +208,15 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'exchange, 'key, 'properties, 'body, 'd: 'b, co
             |view, _, ()| {
                 check(&view).map_err(core::Reject::Error)?;
                 if CONFIRM {
-                    core.cancel().reap::<lanes::Confirm>(
+                    let _ = core.cancel().try_reap::<lanes::Confirm, _>(
                         view.index,
                         route.lease().raw(),
                         |item| {
-                            if matches!(
+                            matches!(
                                 view.channel.confirm().reap(item.identity()),
                                 confirms::Reap::Removed
-                            ) {
-                                reap::Decision::Remove
-                            } else {
-                                reap::Decision::Keep
-                            }
+                            )
+                            .then_some(())
                         },
                     )?;
                 }

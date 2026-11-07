@@ -3,8 +3,6 @@ use std::{marker, num};
 use crate::service::cancel::Lane;
 use crate::state::channels;
 
-pub(crate) mod reap;
-
 pub(crate) struct Pending<'d, L: Lane<'d, ID>, const ID: u8> {
     pub(super) lease: channels::Lease<'d, ID>,
     pub(super) identity: num::NonZero<u64>,
