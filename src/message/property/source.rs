@@ -45,33 +45,21 @@ impl AsRef<[u8]> for Source<'_, '_> {
 
 impl<'input, 'd> Properties<Source<'input, 'd>, view::TableSpan> {
     pub(crate) fn into_state(self) -> State<'input, 'd> {
-        let Self {
-            text,
-            headers,
-            delivery_mode: mode,
-            priority,
-            timestamp: time,
-        } = self;
-        let (text, keys) = text.into_parts();
-        match num::NonZero::<usize>::new(text.bytes.len()) {
-            Some(demand) if headers.is_some() || keys.iter().any(|key| key.is_some()) => {
+        match num::NonZero::<usize>::new(self.text.bytes.bytes.len()) {
+            Some(demand)
+                if self.headers.is_some() || self.text.keys.iter().any(|key| key.is_some()) =>
+            {
                 State::Resident(Admission {
-                    properties: Properties {
-                        text: Text::new(text, keys),
-                        headers,
-                        delivery_mode: mode,
-                        priority,
-                        timestamp: time,
-                    },
+                    properties: self,
                     demand,
                 })
             }
             _ => State::Empty(Properties {
-                text: Text::new(resident::Shared::new(), keys),
-                headers,
-                delivery_mode: mode,
-                priority,
-                timestamp: time,
+                text: Text::new(resident::Shared::new(), self.text.keys),
+                headers: self.headers,
+                delivery_mode: self.delivery_mode,
+                priority: self.priority,
+                timestamp: self.timestamp,
             }),
         }
     }
