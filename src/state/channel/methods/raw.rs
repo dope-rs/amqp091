@@ -8,7 +8,6 @@ use crate::state::channel::methods::MethodKey;
 // SAFETY: MethodKey is a transparent, identity-preserving slab handle wrapper.
 unsafe impl depot::raw::Key for MethodKey {
     type Raw = <key::Handle<Request> as depot::raw::Key>::Raw;
-    type Live = Self;
 
     const VACANT: Self::Raw = <key::Handle<Request> as depot::raw::Key>::VACANT;
 
@@ -28,13 +27,5 @@ unsafe impl depot::raw::Key for MethodKey {
 
     fn decode(raw: Self::Raw) -> Option<Self> {
         <key::Handle<Request> as depot::raw::Key>::decode(raw).map(Self::from_raw)
-    }
-
-    fn into_live(self) -> Self::Live {
-        self
-    }
-
-    fn from_live(live: Self::Live) -> Self {
-        live
     }
 }
