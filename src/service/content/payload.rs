@@ -3,7 +3,7 @@ use std::mem::size_of;
 use o3::base::num::bounded;
 use o3::buffer::hold::scope;
 use o3::buffer::write::consume;
-use o3::buffer::{self, Residency as _, hold, pool, resident};
+use o3::buffer::{self, Residency as _, hold, pool};
 use o3::depot;
 use o3::depot::arena::linked::{Iter, slots};
 use o3::depot::queue::pool::fifo::Fifo;
@@ -24,8 +24,8 @@ pub(crate) enum Payload<'b, 'd> {
 }
 
 pub(crate) struct Parts<'b, 'd> {
-    first: Option<resident::Shared<'d>>,
-    rest: Fifo<'b, resident::Shared<'d>>,
+    first: Option<hold::Retained<'d>>,
+    rest: Fifo<'b, hold::Retained<'d>>,
     resident: bool,
     fragments: bounded::U32<0, { u32::MAX - 1 }>,
 }
@@ -55,7 +55,7 @@ fn release(
 impl<'b, 'd> Payload<'b, 'd> {
     pub(crate) fn new(
         compact: &'b pool::Pool,
-        nodes: &'b depot::raw::Arena<resident::Shared<'d>>,
+        nodes: &'b depot::raw::Arena<hold::Retained<'d>>,
         budget: Option<Lease<credit::Return<'b>>>,
     ) -> Self {
         let (remain, budget) = match budget {
@@ -201,8 +201,8 @@ impl<'b, 'd> Payload<'b, 'd> {
 pub(crate) enum Chunks<'a, 'd> {
     Compact(Option<&'a [u8]>),
     Segments {
-        first: Option<&'a resident::Shared<'d>>,
-        rest: Iter<'a, resident::Shared<'d>>,
+        first: Option<&'a hold::Retained<'d>>,
+        rest: Iter<'a, hold::Retained<'d>>,
     },
 }
 
@@ -222,18 +222,18 @@ impl<'a> Iterator for Chunks<'a, '_> {
 
 enum Vacant<'a, 'b, 'd> {
     First {
-        first: &'a mut Option<resident::Shared<'d>>,
+        first: &'a mut Option<hold::Retained<'d>>,
         resident: &'a mut bool,
     },
     Rest {
-        entry: slots::Vacant<resident::Shared<'d>, &'a mut Fifo<'b, resident::Shared<'d>>>,
+        entry: slots::Vacant<hold::Retained<'d>, &'a mut Fifo<'b, hold::Retained<'d>>>,
         resident: &'a mut bool,
         fragments: &'a mut bounded::U32<0, { u32::MAX - 1 }>,
     },
 }
 
 impl<'d> Vacant<'_, '_, 'd> {
-    fn insert(self, chunk: resident::Shared<'d>) {
+    fn insert(self, chunk: hold::Retained<'d>) {
         let retained = chunk.resident() != 0;
         match self {
             Self::First { first, resident } => {

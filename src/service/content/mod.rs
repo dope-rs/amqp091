@@ -93,9 +93,9 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Store<'r, 'c, 'b, 'd, ID> {
     pub(crate) fn retain<'input, R: buffer::Cursor + hold::raw::Retain<'d> + 'input>(
         &self,
         source: scope::Bound<'input, 'd, R>,
-    ) -> Result<resident::Shared<'d>, pending::Error> {
+    ) -> Result<hold::Retained<'d>, pending::Error> {
         let Some(demand) = num::NonZero::<usize>::new(source.ceiling()) else {
-            return Ok(resident::Shared::new());
+            return Ok(resident::Shared::new().into());
         };
         let capacity = self.wait.resident().capacity();
         if demand.get() > capacity {
@@ -105,9 +105,10 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Store<'r, 'c, 'b, 'd, ID> {
             };
             return Err(pending::Error::Failure(failure::Error::Capacity(error)));
         }
-        source
-            .try_into()
-            .map_err(|error| self.admission(wire::Allocation::Content, error))
+        source.try_retain().map_err(|(source, error)| {
+            drop(source);
+            self.admission(wire::Allocation::Content, error)
+        })
     }
 
     pub(crate) fn discard(&self, body: payload::Payload<'b, 'd>) {
