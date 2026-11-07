@@ -174,7 +174,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Edit<'_, 'r, 'c, 'b, 'd, ID> {
         init: impl FnOnce(channels::Index<'c, ID>, channels::Lease<'d, ID>) -> Result<R, failure::Error>,
     ) -> Result<R, failure::Error> {
         let upper = if max == 0 { u16::MAX } else { max };
-        self.inner.channels.acquire_next(upper, init)
+        self.inner.channels.acquire::<R, false>(upper, init)
     }
 
     pub(crate) fn abandon(
@@ -220,7 +220,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Edit<'_, 'r, 'c, 'b, 'd, ID> {
                 max,
             }));
         }
-        self.inner.channels.acquire(id, init)
+        self.inner.channels.acquire::<R, true>(id, init)
     }
 }
 

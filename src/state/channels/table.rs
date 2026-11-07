@@ -101,20 +101,12 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Table<'r, 'c, 'b, 'd, ID> {
         })
     }
 
-    pub(crate) fn acquire<R>(
+    pub(crate) fn acquire<R, const EXACT: bool>(
         &mut self,
-        id: u16,
+        bound: u16,
         init: impl FnOnce(Index<'c, ID>, Lease<'d, ID>) -> Result<R, failure::Error>,
     ) -> Result<R, failure::Error> {
-        self.table.acquire(id, init)
-    }
-
-    pub(crate) fn acquire_next<R>(
-        &mut self,
-        upper: u16,
-        init: impl FnOnce(Index<'c, ID>, Lease<'d, ID>) -> Result<R, failure::Error>,
-    ) -> Result<R, failure::Error> {
-        self.table.acquire_min(upper, init)
+        self.table.acquire::<R, EXACT>(bound, init)
     }
 
     pub(crate) fn lease(&self, id: u16) -> Option<Lease<'d, ID>> {

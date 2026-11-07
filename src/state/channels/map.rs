@@ -92,36 +92,27 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Map<'r, 'c, 'b, 'd, ID> {
         Ok(table)
     }
 
-    pub(super) fn acquire<R>(
+    pub(super) fn acquire<R, const EXACT: bool>(
         &mut self,
-        id: u16,
+        bound: u16,
         init: impl FnOnce(Index<'c, ID>, Lease<'d, ID>) -> Result<R, failure::Error>,
     ) -> Result<R, failure::Error> {
-        let capacity = self.store.slots();
-        let vacancy = self.store.vacant(id)?;
-        let next = Generation::after(self.generation)?;
-        let index = self
-            .free
-            .ok_or_else(|| failure::Error::ChannelCapacity { capacity })?;
-        let key = Lease::mint(vacancy.id(), next);
-        let (free, result) = vacancy.occupy(index, key, || init(index, key))?;
-        self.free = free;
-        self.generation = Some(next);
-        Ok(result)
-    }
-
-    pub(super) fn acquire_min<R>(
-        &mut self,
-        upper: u16,
-        init: impl FnOnce(Index<'c, ID>, Lease<'d, ID>) -> Result<R, failure::Error>,
-    ) -> Result<R, failure::Error> {
-        let capacity = self.store.capacity(upper);
-        let Some(vacancy) = self.store.first_vacant() else {
-            return Err(failure::Error::ChannelCapacity { capacity });
+        let capacity = if EXACT {
+            self.store.slots()
+        } else {
+            self.store.capacity(bound)
         };
-        if vacancy.id() > upper {
-            return Err(failure::Error::ChannelCapacity { capacity });
-        }
+        let vacancy = if EXACT {
+            self.store.vacant(bound)?
+        } else {
+            let Some(vacancy) = self.store.first_vacant() else {
+                return Err(failure::Error::ChannelCapacity { capacity });
+            };
+            if vacancy.id() > bound {
+                return Err(failure::Error::ChannelCapacity { capacity });
+            }
+            vacancy
+        };
         let next = Generation::after(self.generation)?;
         let index = self
             .free
