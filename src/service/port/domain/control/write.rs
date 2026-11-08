@@ -74,7 +74,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Write<'a, 'r, 'c, 'b, 'd, ID> {
             let slot = self
                 .domain
                 .transport
-                .try_reserve(region, self.target.token(), frame);
+                .try_reserve(region, self.target, frame);
             let slot = match slot {
                 Reserve::Item(slot) => slot,
                 Reserve::Unknown(_frame) | Reserve::Inactive(_frame) => {

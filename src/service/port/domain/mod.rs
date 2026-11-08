@@ -76,7 +76,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Domain<'r, 'c, 'b, 'd, ID> {
             .into_output();
         let frame = compose::Tagged::new(frame, Some(lease));
         access
-            .with_region(|region| self.transport.try_enqueue(region, target.token(), frame))
+            .with_region(|region| self.transport.try_enqueue(region, target, frame))
             .map_err(|error| match error {
                 Enqueue::Unknown(_) | Enqueue::Inactive(_) => failure::Error::Closed,
                 Enqueue::Rejected(rejected) => {
@@ -197,7 +197,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Domain<'r, 'c, 'b, 'd, ID> {
             shared::Failure::Applied(retire) => retire,
         };
         self.transport
-            .close(target.token(), retire.abort(close::Reason::Protocol));
+            .close(target, retire.abort(close::Reason::Protocol));
         self.wake_all();
     }
 

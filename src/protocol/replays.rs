@@ -1,7 +1,8 @@
+use crate::message::field;
 use crate::protocol::method::{self, basic, channel, confirm};
 use crate::protocol::topology::records::{self, consumer, exchange, queue};
 use crate::protocol::wire::schema::consume;
-use crate::protocol::wire::schema::queues::{Binding, Declaration};
+use crate::protocol::wire::schema::queues::Binding;
 use crate::protocol::wire::text::short;
 use crate::protocol::wire::{self, Write, bytes, frame};
 
@@ -50,10 +51,14 @@ impl<'a, 'b, 'd, const ID: u8> method::Spec for Queue<'a, 'b, 'd, ID> {
 impl<const ID: u8> method::Args for Queue<'_, '_, '_, ID> {
     fn write_args<S: wire::Put>(&self, out: &mut S) {
         if self.current {
-            self.record.wire().write_with(
-                out,
-                bytes::Patch::default().with(Declaration::QUEUE, self.record.server_name().into()),
-            );
+            method::queue::Inspect {
+                queue: self.record.server_name(),
+                durable: false,
+                exclusive: false,
+                auto_delete: false,
+                arguments: &field::Table::new(),
+            }
+            .write_args(out);
         } else {
             out.extend(self.record.wire().as_slice());
         }

@@ -17,7 +17,6 @@ use crate::protocol::{method, wire};
 use crate::service::content::wait::{Attempt, Blocked};
 use crate::service::content::{payload, pending};
 use crate::service::logic::session::SessionOps as _;
-use crate::service::method::commit;
 use crate::state::channel::{Freed, Phase, consumer, methods};
 use crate::state::conn::{self, phase, status};
 use crate::state::{channels, epoch, shared};
@@ -28,16 +27,16 @@ pub(crate) enum Input<'d, const ID: u8> {
     Blocked(Blocked<'d, ID>),
 }
 
+#[must_use = "terminal reply commit must govern exact transport retirement"]
 pub(in crate::service) enum FailureOwner<'d, const ID: u8> {
     Immediate(epoch::Id<'d, ID>),
-    Reply(commit::Commit<'d, ID>),
+    Reply(epoch::Id<'d, ID>),
 }
 
 impl<'d, const ID: u8> FailureOwner<'d, ID> {
     const fn epoch(&self) -> epoch::Id<'d, ID> {
         match self {
-            Self::Immediate(epoch) => *epoch,
-            Self::Reply(reply) => reply.epoch(),
+            Self::Immediate(epoch) | Self::Reply(epoch) => *epoch,
         }
     }
 
@@ -114,7 +113,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
     for State<'o, 'd, service::Port<'r, 'c, 'b, 'd, ID>, service::Logic<'o, 'd, ID>, KeyTag<ID>, 1>
 {
     fn wake_route(&self, epoch: epoch::Id<'d, ID>, freed: Freed) -> Result<(), failure::Error> {
-        self.port().content.wake_route(epoch.token(), freed)
+        self.port().content.wake_route(epoch, freed)
     }
 
     fn complete<C: method::Complete<'b, 'd, consumer::Key>>(

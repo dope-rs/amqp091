@@ -151,7 +151,7 @@ pub(super) fn run<'turn, 'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>(
                         endpoint
                             .port()
                             .transport
-                            .close(target.token(), retire.abort(close::Reason::Protocol));
+                            .close(target, retire.abort(close::Reason::Protocol));
                         endpoint.port().coordination().waiters().wake_all();
                         return None;
                     }

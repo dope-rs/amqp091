@@ -43,7 +43,7 @@ use crate::service::content::ops::{FailureOwner, Input, Ops as _};
 use crate::service::content::wait::Blocked;
 use crate::service::logic::session::SessionOps as _;
 use crate::service::{self, Port, runtime};
-use crate::state::{channel, conn, epoch, shared};
+use crate::state::{channel, conn, shared};
 use dope::manifold::client::session::Blocking;
 
 #[doc(hidden)]
@@ -103,7 +103,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
         }
         context.state.received = receipt;
         if !has_prefix {
-            let epoch = epoch::Id::new(context.conn_id);
+            let epoch = context.conn_id;
             owner.with_shared(context.region(), |shared| {
                 if let conn::Input::Unbound(_, phase) = &mut shared.connection.input
                     && shared
@@ -153,7 +153,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
     {
         let bytes = input.as_slice();
         let parsed = codec::Stateless::parse(&owner.logic().codec, input);
-        let epoch = epoch::Id::new(context.conn_id);
+        let epoch = context.conn_id;
         let mut parts = context.parts();
         owner.with_shared(parts.driver.region_token(), |shared| {
             let status = shared.connection.lifecycle.status();
@@ -221,7 +221,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
         context: &mut turns::Context<'_, 'e, 'd, Self::ConnState, Self::Send, KeyTag<ID>>,
     ) -> response::Direct {
         let mut parts = context.parts();
-        let epoch = epoch::Id::new(parts.conn_id);
+        let epoch = parts.conn_id;
         let mut close = |plan| parts.close.request(plan);
         owner.fail_session(
             &mut close,
@@ -260,7 +260,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
                     .connection
                     .lifecycle
                     .status()
-                    .can_accept(epoch::Id::new(conn), conn::status::Input::Frame)
+                    .can_accept(conn, conn::status::Input::Frame)
                 {
                     shared.connection.input =
                         conn::Input::Unbound(shared.routes.generation(), received);
@@ -283,7 +283,7 @@ fn block<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, 'e, const ID: u8>(
             let mut close = |plan| parts.close.request(plan);
             owner.fail_session(
                 &mut close,
-                FailureOwner::Immediate(epoch::Id::new(parts.conn_id)),
+                FailureOwner::Immediate(parts.conn_id),
                 recovery::Fault::terminal(error.into()),
                 parts.driver.region_token(),
             );
@@ -356,7 +356,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
                 KeyTag<ID>,
                 1,
             >| {
-                let epoch = epoch::Id::new(context.conn_id);
+                let epoch = context.conn_id;
                 let received = context.state.received;
                 let ready = owner.with_shared(context.region(), |shared| {
                     if !shared
@@ -409,7 +409,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
         _: socket::Addr,
         mut ctx: turns::Startup<'_, 'e, 'd, Self::ConnState, Self::Send, KeyTag<ID>>,
     ) {
-        let epoch = epoch::Id::new(ctx.connection());
+        let epoch = ctx.connection();
         let until = ctx.lifetime.expires_at();
         let mut close = |plan| ctx.close.request(plan);
         owner.connect(
@@ -460,7 +460,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
             region::Token<region::Identity<'d, 1>>,
         ),
     ) -> Option<Transmit> {
-        let source = epoch::Id::new(conn);
+        let source = conn;
         let stores = owner.port().content.stores();
         let change = owner.with_shared(&mut regions.0, |shared| {
             shared.fail(
@@ -486,7 +486,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
         context: &mut turns::Context<'_, 'e, 'd, Self::ConnState, Self::Send, KeyTag<ID>>,
     ) {
         let mut parts = context.parts();
-        let epoch = epoch::Id::new(parts.conn_id);
+        let epoch = parts.conn_id;
         let mut close = |plan| parts.close.request(plan);
         owner.fail_session(
             &mut close,
@@ -523,7 +523,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
         ),
     ) {
         let region = &mut regions.0;
-        let epoch = epoch::Id::new(conn);
+        let epoch = conn;
         owner.with_shared(region, |shared| shared.retire(epoch, reason.into()));
     }
 
@@ -534,7 +534,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
         _: close::Reason,
         region: &mut region::Token<region::Identity<'d>>,
     ) -> close::Policy {
-        let epoch = epoch::Id::new(conn);
+        let epoch = conn;
         owner.with_shared(region, |shared| {
             shared
                 .connection
@@ -557,7 +557,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
     ) {
         let reason = context.reason();
         let (drained, _, region) = context.into_parts();
-        owner.disconnect(epoch::Id::new(drained.connection()), reason, region);
+        owner.disconnect(drained.connection(), reason, region);
     }
 }
 

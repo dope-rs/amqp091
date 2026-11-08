@@ -279,7 +279,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> SessionOps<'o, 'r, 'c, 'b
         turn: Attempt<'d, ID>,
         parts: &mut service::Turn<'_, '_, 'd, ID>,
     ) -> Input<'d, ID> {
-        let epoch = epoch::Id::new(parts.conn_id);
+        let epoch = parts.conn_id;
         let (valid, closing) = self.with_shared(parts.driver.region_token(), |shared| {
             let state = shared.connection.lifecycle.status();
             (
@@ -354,7 +354,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> SessionOps<'o, 'r, 'c, 'b
         if change == conn::Change::Ignored {
             return;
         }
-        if let Err(error) = self.port().content.cancel(epoch.token()) {
+        if let Err(error) = self.port().content.cancel(epoch) {
             self.port().fail(local::Access::new(region), epoch, error);
         }
         self.port().wake_all();

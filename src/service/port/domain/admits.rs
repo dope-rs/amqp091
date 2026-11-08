@@ -137,7 +137,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Admission<'a, 'r, 'c, 'b, 'd, ID> {
     ) -> Result<service::Admit<R>, E> {
         let frame = compose::Tagged::new(frame, lease);
         let result = access.with_region(|region| {
-            let hold = self.transport.try_reserve(region, target.token(), frame);
+            let hold = self.transport.try_reserve(region, target, frame);
             let hold = match hold {
                 Reserve::Item(hold) => hold,
                 Reserve::Unknown(_frame) | Reserve::Inactive(_frame) => {

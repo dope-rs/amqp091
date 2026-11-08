@@ -22,7 +22,6 @@ use crate::state::conn::{Owner, Transport, phase};
 use crate::state::epoch;
 use crate::{failure, protocol, service};
 
-pub(in crate::service) mod commit;
 mod gates;
 mod pending;
 
@@ -91,7 +90,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
                 let mut close = |next| parts.close.request(next);
                 self.recv_conn(
                     event,
-                    epoch::Id::new(parts.conn_id),
+                    parts.conn_id,
                     parts.state,
                     &mut close,
                     &mut parts.sink,
@@ -218,7 +217,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
                 });
                 // The broker's cause remains primary if its reply cannot be queued.
                 let owner = match self.send_method(out, region, 0, &CloseOk) {
-                    Ok(()) => ops::FailureOwner::Reply(commit::Commit::new(epoch)),
+                    Ok(()) => ops::FailureOwner::Reply(epoch),
                     Err(_) => ops::FailureOwner::Immediate(epoch),
                 };
                 self.fail_session(close, owner, failure, region);
@@ -262,7 +261,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
         parts: &mut service::Turn<'_, '_, 'd, ID>,
     ) -> Result<ops::Input<'d, ID>, failure::Error> {
         let (lease, published) = gate.into_parts();
-        let epoch = epoch::Id::new(parts.conn_id);
+        let epoch = parts.conn_id;
         let out = &mut parts.sink;
         let region = parts.driver.region_token();
         let mut request = |next| parts.close.request(next);
@@ -319,7 +318,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
                     .ok_or_else(|| failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
                 // The broker's cause remains primary if its reply cannot be queued.
                 let owner = match self.send_method(out, region, channel, &CloseOk) {
-                    Ok(()) => ops::FailureOwner::Reply(commit::Commit::new(epoch)),
+                    Ok(()) => ops::FailureOwner::Reply(epoch),
                     Err(_) => ops::FailureOwner::Immediate(epoch),
                 };
                 if replay {

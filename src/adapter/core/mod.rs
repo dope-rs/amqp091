@@ -96,14 +96,14 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8, K: Capability>
     where
         K: Allows<State>,
     {
-        self.domain.transport().is_active(target.token())
+        self.domain.transport().is_active(target)
     }
 
     pub(super) fn close(self, target: epoch::Id<'d, ID>, rule: close::Directive)
     where
         K: Allows<State>,
     {
-        self.domain.transport().close(target.token(), rule);
+        self.domain.transport().close(target, rule);
     }
 
     pub(super) fn waiters(self) -> &'o service::Waiters<'d>
@@ -132,7 +132,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8, K: Capability>
         target: epoch::Id<'d, ID>,
         freed: Freed,
     ) -> Result<(), failure::Error> {
-        self.domain.content.wake_route(target.token(), freed)
+        self.domain.content.wake_route(target, freed)
     }
 
     pub(super) const fn cancel(self) -> Cancel<'o, 'd, ID, K> {

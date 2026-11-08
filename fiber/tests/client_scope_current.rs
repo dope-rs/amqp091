@@ -52,22 +52,22 @@ fn restores_current_queue() {
                 );
                 first
                     .write_all(
-                        &queue_declare_ok_frame(1, b"first.generated").expect("AMQP fixture"),
+                        &queue_declare_ok_frame(1, b"amq.gen-first").expect("AMQP fixture"),
                     )
                     .expect("server-named queue declare-ok");
 
-                let selected = Method::read(&mut first).expect("second channel queue declare");
+                let selected = Method::read(&mut first).expect("second channel queue inspect");
                 selected.check(2, 50, 10).expect("AMQP method route");
                 assert_eq!(
                     queue_name(&selected).expect("queue name").as_bytes(),
-                    b"first.generated",
+                    b"amq.gen-first",
                     "second channel current queue"
                 );
                 first
                     .write_all(
-                        &queue_declare_ok_frame(2, b"first.generated").expect("AMQP fixture"),
+                        &queue_declare_ok_frame(2, b"amq.gen-first").expect("AMQP fixture"),
                     )
-                    .expect("second channel queue declare-ok");
+                    .expect("second channel queue inspect-ok");
                 drop(first);
 
                 let mut second = acceptor.accept().expect("recovered connection");
@@ -107,7 +107,7 @@ fn restores_current_queue() {
                 let source = replay.channel();
                 second
                     .write_all(
-                        &queue_declare_ok_frame(source, b"second.generated").expect("AMQP fixture"),
+                        &queue_declare_ok_frame(source, b"amq.gen-second").expect("AMQP fixture"),
                     )
                     .expect("global queue replay-ok");
 
@@ -121,17 +121,20 @@ fn restores_current_queue() {
                 );
                 assert_eq!(
                     queue_name(&current).expect("queue name").as_bytes(),
-                    b"second.generated",
+                    b"amq.gen-second",
                     "restored current queue identity"
                 );
+                let (_, offset) = crate::common::amqp::wire::short(current.payload(), 6)
+                    .expect("current queue name");
+                assert_eq!(&current.payload()[offset..], &[1, 0, 0, 0, 0]);
                 second
                     .write_all(
                         &queue_declare_ok_frame(
                             current.channel(),
                             if mismatch {
-                                b"different.generated"
+                                b"amq.gen-different"
                             } else {
-                                b"second.generated"
+                                b"amq.gen-second"
                             },
                         )
                         .expect("AMQP fixture"),
@@ -198,7 +201,7 @@ fn restores_current_queue() {
                                 .expect("server-named queue declare");
                             second
                                 .queue()
-                                .declare(queue::Declare {
+                                .inspect(queue::Inspect {
                                     queue: declared.queue.as_ref(),
                                     durable: false,
                                     exclusive: true,
@@ -206,7 +209,7 @@ fn restores_current_queue() {
                                     arguments: &args,
                                 })
                                 .await
-                                .expect("second channel queue declare");
+                                .expect("second channel queue inspect");
 
                             conn.observe().retired(target.epoch()).await.expect("first retirement");
                             if mismatch {
@@ -218,8 +221,8 @@ fn restores_current_queue() {
                                 std::assert_matches!(
                                     error.error(),
                                     failure::Error::QueueName { expected, actual }
-                                        if expected.as_ref() == "second.generated"
-                                            && actual.as_ref() == "different.generated"
+                                        if expected.as_ref() == "amq.gen-second"
+                                            && actual.as_ref() == "amq.gen-different"
                                 );
                             }
                             if mismatch {
