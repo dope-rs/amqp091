@@ -297,10 +297,6 @@ impl<'a, S: Write + ?Sized> Encoder<'a, S> {
 }
 
 impl<S: Write + AsMut<[u8]> + ?Sized> Encoder<'_, S> {
-    pub(crate) fn method(self, channel: u16, id: [u8; 4]) {
-        self.write(Type::METHOD, channel, |out| out.extend(&id));
-    }
-
     pub(crate) fn method_with<R, F: FnOnce(&mut S) -> R>(
         self,
         channel: u16,

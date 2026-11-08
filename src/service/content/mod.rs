@@ -152,14 +152,12 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Store<'r, 'c, 'b, 'd, ID> {
     fn admission(&self, target: wire::Allocation, error: hold::Error) -> pending::Error {
         let retry = self.wait.can_release();
         match error {
-            hold::Error::Resident(resident::AllocError::Budget(error)) if retry => {
+            hold::Error::Resident(resident::AllocError::Budget(error))
+            | hold::Error::Copy(copy::Error::Budget(error))
+            | hold::Error::Account(account::Cause::Budget(error))
+                if retry =>
+            {
                 pending::Error::Retry(resource::Resource::Resident(error))
-            }
-            hold::Error::Copy(copy::Error::Budget(error)) if retry => {
-                pending::Error::Retry(resource::Resource::Copy(error))
-            }
-            hold::Error::Account(account::Cause::Budget(error)) if retry => {
-                pending::Error::Retry(resource::Resource::Account(error))
             }
             error => pending::Error::Failure(failure::Error::Hold { target, error }),
         }

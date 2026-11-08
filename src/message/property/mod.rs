@@ -347,7 +347,8 @@ impl Properties {
     pub(crate) fn encoded_len(&self) -> u64 {
         let text = self.text.bytes.len() as u64;
         let headers = self
-            .headers()
+            .headers
+            .as_ref()
             .map_or(0, |table| 4 + u64::from(table.encoded_len()));
         let octets = u64::from(self.delivery_mode.is_some()) + u64::from(self.priority.is_some());
         2 + 2 + 8 + 2 + text + headers + octets + u64::from(self.timestamp.is_some()) * 8
@@ -362,7 +363,7 @@ impl Properties {
         out.put_u16(self.flags());
         self.text.encode(Field::ContentType, out);
         self.text.encode(Field::ContentEncoding, out);
-        if let Some(t) = self.headers() {
+        if let Some(t) = self.headers.as_ref() {
             t.encode(out);
         }
         if let Some(v) = self.delivery_mode {

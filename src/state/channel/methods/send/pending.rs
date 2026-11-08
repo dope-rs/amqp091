@@ -1,6 +1,5 @@
 use crate::state::channel::methods::entry;
 use crate::state::channel::methods::send::Effect;
-use crate::state::channel::methods::send::dispatch::Dispatch;
 
 /// Exclusive claim on the current control operation.
 #[repr(transparent)]
@@ -15,13 +14,8 @@ impl<'b, 'a, 'd> Pending<'a, 'b, 'd> {
         Self { state }
     }
 
-    pub(crate) fn preview(self) -> Option<Dispatch<'a, 'b, 'd>> {
-        match &self.state.outbound {
-            entry::Outbound::Consumer(key) => Some(Dispatch::Consumer(*key)),
-            entry::Outbound::Orphan(tag) => Some(Dispatch::Orphan(tag)),
-            entry::Outbound::Close => Some(Dispatch::Close),
-            entry::Outbound::None => None,
-        }
+    pub(in crate::state::channel) fn outbound(self) -> &'a entry::Outbound<'b, 'd> {
+        &self.state.outbound
     }
 
     pub(crate) fn commit(self) -> Effect {

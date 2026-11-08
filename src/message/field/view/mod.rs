@@ -8,8 +8,8 @@ use crate::failure::wire::field::Fault;
 use crate::message::field::MAX_DEPTH;
 use crate::message::field::view::tag::Tag;
 use crate::message::{field, property};
+use crate::protocol::wire::reader;
 use crate::protocol::wire::text::short;
-use crate::protocol::wire::{Put, reader};
 
 mod raw;
 mod tag;
@@ -134,23 +134,6 @@ impl<'a> Table<'a> {
         match self.source {
             Source::Owned(table) => table.entries().len() == 0,
             Source::Wire(body) => body.is_empty(),
-        }
-    }
-
-    pub(crate) fn encoded_len(self) -> u32 {
-        match self.source {
-            Source::Owned(table) => table.encoded_len(),
-            Source::Wire(body) => body.len() as u32,
-        }
-    }
-
-    pub(crate) fn encode<S: Put>(self, output: &mut S) {
-        match self.source {
-            Source::Owned(table) => table.encode(output),
-            Source::Wire(body) => {
-                output.put_u32(body.len() as u32);
-                output.extend(body);
-            }
         }
     }
 }

@@ -176,15 +176,13 @@ impl<'c, 'b, 'a, 'd, const ID: u8> Method<'a, 'c, 'b, 'd, ID> {
         next: &send::Next,
     ) -> Result<Option<send::Command<'_>>, wire::Fault> {
         let pending = self.methods.claim(channel, next)?;
-        Ok(match pending.preview() {
-            Some(send::Dispatch::Consumer(key)) => {
-                self.consumers.read().tag(key).map(send::Command::Cancel)
+        Ok(match pending.outbound() {
+            send::Outbound::Consumer(key) => {
+                self.consumers.read().tag(*key).map(send::Command::Cancel)
             }
-            Some(send::Dispatch::Orphan(tag)) => {
-                Some(send::Command::Cancel(short::Short::from(tag)))
-            }
-            Some(send::Dispatch::Close) => Some(send::Command::Close),
-            None => None,
+            send::Outbound::Orphan(tag) => Some(send::Command::Cancel(short::Short::from(tag))),
+            send::Outbound::Close => Some(send::Command::Close),
+            send::Outbound::None => None,
         })
     }
 

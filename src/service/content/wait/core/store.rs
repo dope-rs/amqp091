@@ -113,11 +113,9 @@ impl<'d> Store<'d> {
         let index = lane.slot().index().get() as usize;
         let slot = self.waits.try_slot(index)?;
         let demand = match resource {
-            Resource::Body(error)
-            | Resource::Resident(error)
-            | Resource::Staging(error)
-            | Resource::Copy(error)
-            | Resource::Account(error) => error.into_parts().0,
+            Resource::Body(error) | Resource::Resident(error) | Resource::Staging(error) => {
+                error.into_parts().0
+            }
             Resource::Delivery | Resource::Returned | Resource::Fragment | Resource::Route => {
                 num::NonZero::<usize>::MIN
             }

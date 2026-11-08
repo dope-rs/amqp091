@@ -27,8 +27,6 @@ pub(crate) enum Resource {
     Body(credit::Error),
     Resident(credit::Error),
     Staging(credit::Error),
-    Copy(credit::Error),
-    Account(credit::Error),
     Fragment,
     Route,
 }
@@ -81,7 +79,7 @@ impl Resource {
             Self::Delivery => Some(Kind::Delivery),
             Self::Returned => Some(Kind::Returned),
             Self::Body(_) => Some(Kind::Body),
-            Self::Resident(_) | Self::Copy(_) | Self::Account(_) => Some(Kind::Resident),
+            Self::Resident(_) => Some(Kind::Resident),
             Self::Staging(_) => Some(Kind::Staging),
             Self::Fragment => Some(Kind::Fragment),
             Self::Route => None,

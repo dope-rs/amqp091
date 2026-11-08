@@ -10,7 +10,7 @@ use crate::state::channel::consumer;
 use crate::state::channel::methods::{MethodKey, Plane};
 use crate::state::layout;
 
-pub(super) enum Outbound<'b, 'd> {
+pub(in crate::state::channel) enum Outbound<'b, 'd> {
     None,
     Consumer(consumer::Key),
     Orphan(resident::Short<'b, 'd>),
