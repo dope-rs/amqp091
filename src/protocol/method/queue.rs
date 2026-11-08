@@ -168,10 +168,6 @@ impl method::Reply for DeclareReply {
     }
 }
 
-impl<'b, 'd, Consumer> method::Complete<'b, 'd, Consumer> for DeclareOk<'b, 'd> {
-    type Reply = DeclareReply;
-}
-
 impl<'input> View<'input> {
     pub(crate) fn read<'d, R: buffer::Cursor + 'input>(
         input: &scope::Deferred<'input, 'd, R>,

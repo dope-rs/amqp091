@@ -45,8 +45,8 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Methods<'o, 'r, 'c, 'b, '
             let reaped = self
                 .core
                 .cancel()
-                .try_reap::<lanes::Method, _>(route.index, lease.raw(), |cancel| {
-                    Some(state.methods.reap(state.phase, active, cancel.identity()))
+                .try_reap::<lanes::Method, _>(route.index, lease.raw(), |_, identity| {
+                    Some(state.methods.reap(state.phase, active, identity))
                 })?
                 .transpose()?;
             let (action, next) = match reaped {

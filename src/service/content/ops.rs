@@ -12,8 +12,8 @@ use o3::buffer::{hold, pool};
 use crate::failure::recovery;
 use crate::failure::wire::Fault;
 use crate::protocol::method::conn::{Open, Start, StartOk, Tune, TuneOk};
+use crate::protocol::wire;
 use crate::protocol::wire::frame;
-use crate::protocol::{method, wire};
 use crate::service::content::wait::{Attempt, Blocked};
 use crate::service::content::{payload, pending};
 use crate::service::logic::session::SessionOps as _;
@@ -59,16 +59,13 @@ pub(crate) trait Ops<'o, 'r, 'c, 'b, 'd, const ID: u8> {
         region: &mut region::Token<region::Identity<'d>>,
     ) -> Result<(), failure::Error>;
 
-    fn complete<C: method::Complete<'b, 'd, consumer::Key>>(
+    fn complete(
         &mut self,
         lease: channels::Lease<'d, ID>,
-        done: C,
+        done: impl FnOnce() -> protocol::Response<'b, 'd, consumer::Key>,
         epoch: epoch::Id<'d, ID>,
         region: &mut region::Token<region::Identity<'d>>,
-    ) -> Result<(), failure::Error>
-    where
-        protocol::Response<'b, 'd, consumer::Key>:
-            From<<C::Reply as method::Reply>::Value<'b, 'd, consumer::Key>>;
+    ) -> Result<(), failure::Error>;
 
     fn start(
         &mut self,
@@ -116,19 +113,13 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
         self.port().content.wake_route(epoch, freed)
     }
 
-    fn complete<C: method::Complete<'b, 'd, consumer::Key>>(
+    fn complete(
         &mut self,
         lease: channels::Lease<'d, ID>,
-        done: C,
+        done: impl FnOnce() -> protocol::Response<'b, 'd, consumer::Key>,
         epoch: epoch::Id<'d, ID>,
         region: &mut region::Token<region::Identity<'d>>,
-    ) -> Result<(), failure::Error>
-    where
-        protocol::Response<'b, 'd, consumer::Key>:
-            From<<C::Reply as method::Reply>::Value<'b, 'd, consumer::Key>>,
-    {
-        let done: <C::Reply as method::Reply>::Value<'b, 'd, consumer::Key> = done.into();
-        let response = protocol::Response::from(done);
+    ) -> Result<(), failure::Error> {
         let stores = self.port().content.stores();
         let done = self.with_shared(region, |shared| {
             shared.routes.project(lease, |view| {
@@ -136,7 +127,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
                     view.index.lane(),
                     view.channel
                         .method_turn(stores)
-                        .complete(view.topology, response),
+                        .complete(view.topology, done()),
                 )
             })
         });

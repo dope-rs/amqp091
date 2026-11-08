@@ -183,16 +183,17 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Channels<'o, 'r, 'c, 'b, 
                 let Some(index) = state.routes.project(lease, |route| route.index) else {
                     return Ok(());
                 };
-                let _ =
-                    self.core
-                        .cancel()
-                        .try_reap::<lanes::Reservation, _>(index, lease, |item| {
-                            state.routes.collect(item.lease());
-                            Some(())
-                        })?;
+                let _ = self.core.cancel().try_reap::<lanes::Reservation, _>(
+                    index,
+                    lease,
+                    |held, _| {
+                        state.routes.collect(held);
+                        Some(())
+                    },
+                )?;
             }
-            None => self.core.cancel().reap_any(|item| {
-                state.routes.collect(item.lease());
+            None => self.core.cancel().reap_any(|lease| {
+                state.routes.collect(lease);
             }),
         }
         Ok(())

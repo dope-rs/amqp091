@@ -20,12 +20,11 @@ impl<'c, 'd, const ID: u8> Bindings<'c, 'd, ID> {
         q_keys: map::Plan,
         x_cap: capacity::Count,
         x_keys: map::Plan,
-        owner: store::Owner<'d, ID>,
         permits: &crate::permits::Registry<'c, 'd>,
     ) -> Result<Self, alloc::Error> {
         Ok(Self {
-            queues: store::Store::try_new(q_cap, q_keys, owner, permits)?,
-            exchanges: store::Store::try_new(x_cap, x_keys, owner, permits)?,
+            queues: store::Store::try_new(q_cap, q_keys, permits)?,
+            exchanges: store::Store::try_new(x_cap, x_keys, permits)?,
         })
     }
 

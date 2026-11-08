@@ -3,24 +3,18 @@ use o3::buffer::hold::scope;
 
 use crate::failure;
 use crate::failure::wire::Fault;
-use crate::protocol::method::{self, basic, channel, confirm, exchange, queue, tx};
+use crate::protocol::method::{self, basic, channel, confirm, queue};
 use crate::protocol::wire::text::fields;
 
 pub(crate) enum Event<'input, 'd> {
+    Done(method::Kind),
     Open(channel::OpenOk),
     Flow(channel::Flow),
     Close(channel::Close<'d>),
     CloseOk(channel::CloseOk),
-    ExchangeDeclare(exchange::DeclareOk),
-    ExchangeDelete(exchange::DeleteOk),
-    ExchangeBind(exchange::BindOk),
-    ExchangeUnbind(exchange::UnbindOk),
     QueueDeclare(queue::View<'input>),
-    QueueBind(queue::BindOk),
-    QueueUnbind(queue::UnbindOk),
     QueuePurge(queue::PurgeOk),
     QueueDelete(queue::DeleteOk),
-    Qos(basic::QosOk),
     Consume(basic::View<'input>),
     Cancel(basic::Cancel<'input>),
     CancelOk(basic::CancelOk<'d>),
@@ -28,11 +22,7 @@ pub(crate) enum Event<'input, 'd> {
     Deliver(basic::Deliver<'input>),
     Ack(basic::Ack),
     Nack(basic::Nack),
-    Recover(basic::RecoverOk),
     Confirm(confirm::SelectOk),
-    TxSelect(tx::SelectOk),
-    TxCommit(tx::CommitOk),
-    TxRollback(tx::RollbackOk),
 }
 
 impl<'input, 'd> Event<'input, 'd> {
@@ -42,6 +32,19 @@ impl<'input, 'd> Event<'input, 'd> {
         budget: &buffer::resident::Budget<'d>,
     ) -> Result<Self, failure::Error> {
         match kind {
+            method::Kind::ExchangeDeclare
+            | method::Kind::ExchangeDelete
+            | method::Kind::ExchangeBind
+            | method::Kind::ExchangeUnbind
+            | method::Kind::QueueBind
+            | method::Kind::QueueUnbind
+            | method::Kind::Qos
+            | method::Kind::Recover
+            | method::Kind::TxSelect
+            | method::Kind::TxCommit
+            | method::Kind::TxRollback => {
+                fields::Args::new(args).empty().map(|()| Self::Done(kind))
+            }
             method::Kind::Open => fields::Args::new(args)
                 .decode(channel::OpenOk::read)
                 .map(Self::Open),
@@ -53,34 +56,13 @@ impl<'input, 'd> Event<'input, 'd> {
             method::Kind::CloseOk => fields::Args::new(args)
                 .empty()
                 .map(|()| Self::CloseOk(channel::CloseOk)),
-            method::Kind::ExchangeDeclare => fields::Args::new(args)
-                .empty()
-                .map(|()| Self::ExchangeDeclare(exchange::DeclareOk)),
-            method::Kind::ExchangeDelete => fields::Args::new(args)
-                .empty()
-                .map(|()| Self::ExchangeDelete(exchange::DeleteOk)),
-            method::Kind::ExchangeBind => fields::Args::new(args)
-                .empty()
-                .map(|()| Self::ExchangeBind(exchange::BindOk)),
-            method::Kind::ExchangeUnbind => fields::Args::new(args)
-                .empty()
-                .map(|()| Self::ExchangeUnbind(exchange::UnbindOk)),
             method::Kind::QueueDeclare => queue::View::read(args).map(Self::QueueDeclare),
-            method::Kind::QueueBind => fields::Args::new(args)
-                .empty()
-                .map(|()| Self::QueueBind(queue::BindOk)),
-            method::Kind::QueueUnbind => fields::Args::new(args)
-                .empty()
-                .map(|()| Self::QueueUnbind(queue::UnbindOk)),
             method::Kind::QueuePurge => fields::Args::new(args)
                 .decode(queue::PurgeOk::read)
                 .map(Self::QueuePurge),
             method::Kind::QueueDelete => fields::Args::new(args)
                 .decode(queue::DeleteOk::read)
                 .map(Self::QueueDelete),
-            method::Kind::Qos => fields::Args::new(args)
-                .empty()
-                .map(|()| Self::Qos(basic::QosOk)),
             method::Kind::Consume => basic::View::read(args).map(Self::Consume),
             method::Kind::Cancel => fields::Args::new(args)
                 .decode(basic::Cancel::read)
@@ -97,21 +79,9 @@ impl<'input, 'd> Event<'input, 'd> {
             method::Kind::Nack => fields::Args::new(args)
                 .decode(basic::Nack::read)
                 .map(Self::Nack),
-            method::Kind::Recover => fields::Args::new(args)
-                .empty()
-                .map(|()| Self::Recover(basic::RecoverOk)),
             method::Kind::Confirm => fields::Args::new(args)
                 .empty()
                 .map(|()| Self::Confirm(confirm::SelectOk)),
-            method::Kind::TxSelect => fields::Args::new(args)
-                .empty()
-                .map(|()| Self::TxSelect(tx::SelectOk)),
-            method::Kind::TxCommit => fields::Args::new(args)
-                .empty()
-                .map(|()| Self::TxCommit(tx::CommitOk)),
-            method::Kind::TxRollback => fields::Args::new(args)
-                .empty()
-                .map(|()| Self::TxRollback(tx::RollbackOk)),
         }
     }
 }

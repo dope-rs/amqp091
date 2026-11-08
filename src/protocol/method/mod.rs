@@ -120,20 +120,6 @@ impl<R: Unit> Reply for R {
     }
 }
 
-pub(crate) trait Complete<'b, 'd, Consumer>:
-    Into<<Self::Reply as Reply>::Value<'b, 'd, Consumer>>
-{
-    type Reply: Reply;
-}
-
-impl<'b, 'd, Consumer, R> Complete<'b, 'd, Consumer> for R
-where
-    R: Reply,
-    R::Value<'b, 'd, Consumer>: From<R>,
-{
-    type Reply = R;
-}
-
 pub trait Request: Encode {
     type Response: Reply;
 }

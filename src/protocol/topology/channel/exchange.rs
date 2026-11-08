@@ -16,11 +16,10 @@ impl<'c, 'd, const ID: u8> Exchanges<'c, 'd, ID> {
     pub(super) fn try_new(
         cap: capacity::Count,
         names: map::Plan,
-        owner: store::Owner<'d, ID>,
         permits: &crate::permits::Registry<'c, 'd>,
     ) -> Result<Self, alloc::Error> {
         Ok(Self {
-            store: store::Store::try_new(cap, names, owner, permits)?,
+            store: store::Store::try_new(cap, names, permits)?,
         })
     }
 

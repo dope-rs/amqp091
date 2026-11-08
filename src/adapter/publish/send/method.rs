@@ -13,7 +13,6 @@ use crate::service;
 use crate::service::cancel::{self};
 use crate::state::channel::cancel::lanes;
 use crate::state::channel::facets;
-use crate::state::channel::publish::confirms;
 use crate::state::channels;
 
 pub(in crate::adapter::publish) struct Kind<const CONFIRM: bool>;
@@ -211,13 +210,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'exchange, 'key, 'properties, 'body, 'd: 'b, co
                     let _ = core.cancel().try_reap::<lanes::Confirm, _>(
                         view.index,
                         route.lease().raw(),
-                        |item| {
-                            matches!(
-                                view.channel.confirm().reap(item.identity()),
-                                confirms::Reap::Removed
-                            )
-                            .then_some(())
-                        },
+                        |_, identity| view.channel.confirm().reap(identity),
                     )?;
                 }
                 let slot = lanes::Slot::<lanes::Publish>::ZERO;

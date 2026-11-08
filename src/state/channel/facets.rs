@@ -148,7 +148,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Content<'_, 'r, 'c, 'b, 'd, ID> {
     fn route(&mut self, done: Option<pending::Complete<'r, 'c, 'b, 'd>>) {
         match done {
             Some(pending::Complete::Delivery(Some(claim))) => {
-                self.consumers.route(claim, self.stores.deliveries);
+                self.consumers.route(claim);
             }
             Some(pending::Complete::Delivery(None)) | None => {}
             Some(pending::Complete::Returned(claim)) => {
@@ -384,7 +384,7 @@ impl<'c, 'b, 'a, 'd> Confirm<'a, 'c, 'b, 'd> {
         self.confirm.complete(published, tag, many, result)
     }
 
-    pub(crate) fn reap(&mut self, id: num::NonZero<u64>) -> confirms::Reap {
+    pub(crate) fn reap(&mut self, id: num::NonZero<u64>) -> Option<()> {
         self.confirm.reap(id)
     }
 }

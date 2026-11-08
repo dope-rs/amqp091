@@ -87,16 +87,8 @@ const _: () = {
         >()
     );
     assert!(
-        size_of::<Delivery<'static, 'static, 'static, 'static, 'static, 'static, (), 0, ack::Manual>>(
-        ) == 5 * size_of::<usize>()
-    );
-    assert!(
         size_of::<Delivery<'static, 'static, 'static, 'static, 'static, 'static, (), 0, ack::Auto>>(
         ) == size_of::<consumer::Delivery<'static, 'static, 'static, 'static, 'static, 0, ack::Auto>>(
         )
-    );
-    assert!(
-        size_of::<Delivery<'static, 'static, 'static, 'static, 'static, 'static, (), 0, ack::Auto>>(
-        ) == size_of::<usize>()
     );
 };

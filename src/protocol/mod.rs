@@ -36,10 +36,6 @@ pub enum Registration<'b, 'd, Consumer> {
     Replayed,
 }
 
-impl<'b, 'd, Consumer> method::Complete<'b, 'd, Consumer> for Registration<'b, 'd, Consumer> {
-    type Reply = basic::ConsumeReply;
-}
-
 impl<'b, 'd, Consumer, R: method::Unit> From<R> for Response<'b, 'd, Consumer> {
     fn from(reply: R) -> Self {
         Self::Empty(reply.into_kind())

@@ -4,7 +4,6 @@ use o3::alloc;
 use o3::depot::queue::round::{self, values};
 
 use crate::service::cancel::layout::Layout;
-use crate::service::cancel::pending::Pending;
 use crate::service::cancel::{Lane, Plan, Signal};
 use crate::state::channel::cancel::lanes;
 use crate::state::channel::methods;
@@ -138,11 +137,11 @@ impl<'d, const ID: u8> Registry<'d, ID> {
         None
     }
 
-    pub(crate) fn reap_any(&self, reap: impl FnOnce(Pending<'d, lanes::Reservation, ID>)) {
+    pub(crate) fn reap_any(&self, reap: impl FnOnce(channels::Lease<'d, ID>)) {
         let Some((turn, active)) = self.entries.group::<0>().active() else {
             return;
         };
-        reap(Pending::new(active.lease, active.identity));
+        reap(active.lease);
         let _ = turn.pop_if(|current| current == active);
     }
 
@@ -150,7 +149,7 @@ impl<'d, const ID: u8> Registry<'d, ID> {
         &self,
         ch: channels::Index<'_, ID>,
         lease: channels::Lease<'d, ID>,
-        reap: impl FnOnce(Pending<'d, L, ID>) -> Option<R>,
+        reap: impl FnOnce(channels::Lease<'d, ID>, num::NonZero<u64>) -> Option<R>,
     ) -> Result<Option<R>, round::Bounds> {
         let queue = self.lane(u32::from(ch.offset()), L::KIND);
         let Some((front, active)) = self.entries.try_lane(queue as usize)?.front() else {
@@ -163,7 +162,7 @@ impl<'d, const ID: u8> Registry<'d, ID> {
         if lease != held {
             return Ok(None);
         }
-        let Some(result) = reap(Pending::new(held, id)) else {
+        let Some(result) = reap(held, id) else {
             return Ok(None);
         };
         let _ = front.pop_if(|current| current == active);

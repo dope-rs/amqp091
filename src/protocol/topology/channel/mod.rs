@@ -72,18 +72,12 @@ impl<'c, 'd, const ID: u8> Table<'c, 'd, ID> {
         let owner = store::Owner::new();
         Ok(Self {
             queues: store::QueueStore::try_new(plan.queue.index, owner, permits)?,
-            exchanges: Exchanges::try_new(
-                plan.exchange.slots,
-                plan.exchange.index,
-                owner,
-                permits,
-            )?,
+            exchanges: Exchanges::try_new(plan.exchange.slots, plan.exchange.index, permits)?,
             bindings: Bindings::try_new(
                 plan.queue_bind.slots,
                 plan.queue_bind.index,
                 plan.exchange_bind.slots,
                 plan.exchange_bind.index,
-                owner,
                 permits,
             )?,
         })

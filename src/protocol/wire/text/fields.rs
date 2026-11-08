@@ -30,11 +30,6 @@ pub(crate) enum Decode {
         offset: usize,
         remaining: usize,
     },
-    Span {
-        start: usize,
-        end: usize,
-        max: usize,
-    },
 }
 
 pub(crate) struct Args<'view, 'input, 'd, R>
@@ -76,9 +71,6 @@ impl Decode {
                 offset,
                 remaining: left,
             }),
-            Self::Span { start, end, max } => {
-                failure::Error::Field(field::Fault::Range { start, end, max })
-            }
         }
     }
 
@@ -345,14 +337,6 @@ impl Span {
                 error,
             })
         })?;
-        let end = len - reader.len();
-        if end > u32::MAX as usize {
-            return Err(Decode::Span {
-                start,
-                end,
-                max: u32::MAX as usize,
-            });
-        }
         let text = str::from_utf8(bytes).map_err(|error| Decode::Utf8 {
             offset: start,
             error,

@@ -175,42 +175,19 @@ impl<'c, 'b: 'c, 'd: 'b, T, const ID: u8> Step<'c, 'b, 'd, T, ID> {
                 credit.clear();
                 Self::Ready(value, wake)
             }
-            core::Admit::Full => Self::full(source, cx, credit, wake),
-            core::Admit::Error(error) => Self::Error(error),
-        }
-    }
-
-    fn full<'o, 'r: 'o, S>(
-        source: S,
-        cx: local::Access<'_, region::Identity<'d>>,
-        credit: &mut queue::Registration<'o, 'd, fifo::Scope<'c>>,
-        wake: wake::Waker<'d>,
-    ) -> Self
-    where
-        S: Source<'o, 'r, 'c, 'b, 'd, ID>,
-        'c: 'r,
-    {
-        if let Err(error) = source.core().permits().wait_credit(credit, &wake) {
-            return Self::Error(failure::Runtime::from(error));
-        }
-        Self::pending(source, cx, credit)
-    }
-
-    fn pending<'o, 'r: 'o, S>(
-        source: S,
-        cx: local::Access<'_, region::Identity<'d>>,
-        credit: &mut queue::Registration<'o, 'd, fifo::Scope<'c>>,
-    ) -> Self
-    where
-        S: Source<'o, 'r, 'c, 'b, 'd, ID>,
-        'c: 'r,
-    {
-        match source.live(cx) {
-            Ok(()) => Self::Pending,
-            Err(error) => {
-                credit.clear();
-                Self::Error(error)
+            core::Admit::Full => {
+                if let Err(error) = source.core().permits().wait_credit(credit, &wake) {
+                    return Self::Error(failure::Runtime::from(error));
+                }
+                match source.live(cx) {
+                    Ok(()) => Self::Pending,
+                    Err(error) => {
+                        credit.clear();
+                        Self::Error(error)
+                    }
+                }
             }
+            core::Admit::Error(error) => Self::Error(error),
         }
     }
 }

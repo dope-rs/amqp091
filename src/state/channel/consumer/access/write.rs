@@ -140,7 +140,7 @@ impl<'b, 'a, 'd, const ID: u8> Write<'a, 'b, 'd, ID> {
             }));
         }
         let expected = slot.spec.tag();
-        if expected.is_empty() != FRESH || (!FRESH && expected.value() != tag.value()) {
+        if !FRESH && expected.value() != tag.value() {
             return Err(
                 consumer::Mismatch::Tag(slot.spec.try_tag().map_err(Fault::Retain)?).into(),
             );

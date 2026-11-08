@@ -24,12 +24,6 @@ impl Cursor {
     const TAG_MAX: u64 = i64::MAX as u64;
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Reap {
-    Removed,
-    Missing,
-}
-
 struct Pending<'d> {
     cancelled: bool,
     wake: store::Slot<'d>,
@@ -210,11 +204,9 @@ impl<'c, 'b, 'd> Ledger<'c, 'b, 'd> {
         }
     }
 
-    pub(crate) fn reap(&mut self, raw: num::NonZero<u64>) -> Reap {
+    pub(crate) fn reap(&mut self, raw: num::NonZero<u64>) -> Option<()> {
         let key = Key::new(raw);
-        let Some(index) = key.try_index(self.slots.capacity()) else {
-            return Reap::Missing;
-        };
+        let index = key.try_index(self.slots.capacity())?;
         match self.slots.entry(index) {
             Some(staged::Entry::Queued(mut entry)) if *entry.key() == key => {
                 let item = entry.as_mut();
@@ -222,9 +214,9 @@ impl<'c, 'b, 'd> Ledger<'c, 'b, 'd> {
                 item.wake.clear();
             }
             Some(staged::Entry::Parked(entry)) if *entry.key() == key => entry.clear(),
-            Some(_) | None => return Reap::Missing,
+            Some(_) | None => return None,
         }
-        Reap::Removed
+        Some(())
     }
 
     pub(crate) fn fail_all(&mut self, cause: &terminal::Lease<'c, 'b, 'd>) {

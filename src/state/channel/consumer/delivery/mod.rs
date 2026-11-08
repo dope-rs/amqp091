@@ -1,4 +1,3 @@
-pub(super) use access::Access;
 pub(crate) use next::Next;
 use o3::depot::arena::linked::slots;
 use o3::depot::capacity;
@@ -9,7 +8,6 @@ use crate::state::channel::Freed;
 use crate::state::channel::consumer::delivery::queue::Queue;
 use crate::state::channel::consumer::delivery::{self};
 
-mod access;
 mod next;
 pub(super) mod queue;
 

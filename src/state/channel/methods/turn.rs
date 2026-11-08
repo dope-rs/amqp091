@@ -165,7 +165,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Turn<'_, 'r, 'c, 'b, 'd, ID> {
             .complete(front.key)
             .map_err(failure::Error::Protocol)?;
         let deletion = if let Some(work) = work {
-            match work.prepare(&reply).and_then(|ready| ready.commit(topo)) {
+            match work.commit(topo) {
                 Ok(deletion) => deletion,
                 Err(failure) => {
                     let (work, cause) = failure.split();

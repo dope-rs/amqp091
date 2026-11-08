@@ -29,7 +29,7 @@ impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
     }
 
     pub(crate) fn drain<'r, 'c>(&mut self, store: &'r Store<'c, 'b, 'd>) -> channel::Freed {
-        self.registry.deliveries(store, self.wakes).clear()
+        self.registry.clear(store)
     }
 
     pub(crate) fn close(&mut self) {
@@ -85,7 +85,7 @@ impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
         wake: wake::Waker<'d>,
         store: &'r Store<'c, 'b, 'd>,
     ) -> Next<'c, 'b, 'd> {
-        self.registry.deliveries(store, self.wakes).next(key, wake)
+        self.registry.next(store, self.wakes, key, wake)
     }
 
     pub(crate) fn reserve<'r, 'c>(
@@ -93,15 +93,11 @@ impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
         tag: &str,
         store: &'r Store<'c, 'b, 'd>,
     ) -> Option<Route<'r, 'c, 'b, 'd>> {
-        self.registry.deliveries(store, self.wakes).reserve(tag)
+        self.registry.reserve(store, tag)
     }
 
-    pub(crate) fn route<'r, 'c>(
-        &mut self,
-        claim: Claim<'r, 'c, 'b, 'd>,
-        store: &'r Store<'c, 'b, 'd>,
-    ) {
-        self.registry.deliveries(store, self.wakes).route(claim);
+    pub(crate) fn route<'r, 'c>(&mut self, claim: Claim<'r, 'c, 'b, 'd>) {
+        self.registry.route(claim, self.wakes);
     }
 
     pub(crate) fn rollback(&mut self, undo: Option<consumer::Rollback>) {

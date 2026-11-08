@@ -29,11 +29,7 @@ impl Limit {
             }
         };
         let buffer = route.core().config().capacity.egress.buffer;
-        let protocol = if tune.frame_max == 0 {
-            buffer
-        } else {
-            tune.frame_max as usize
-        };
+        let protocol = tune.frame_max as usize;
         let body = protocol
             .min(buffer)
             .checked_sub(frame::OVERHEAD)

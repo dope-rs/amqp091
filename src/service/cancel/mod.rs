@@ -4,14 +4,12 @@ use crate::state::channel::cancel::lanes::{Confirm, Consumer, Method, Publish, R
 
 mod lane;
 mod layout;
-pub(crate) mod pending;
 mod plan;
 mod registry;
 mod signal;
 mod ticket;
 
 pub(crate) use lane::Lane;
-use pending::Pending;
 pub(crate) use plan::Plan;
 pub(crate) use registry::Registry;
 pub(crate) use signal::Signal;
@@ -26,7 +24,6 @@ where
         mem::size_of::<Option<Ticket<'_, '_, L, 0>>>() == mem::size_of::<Ticket<'_, '_, L, 0>>()
     );
     assert!(mem::size_of::<Slot<L>>() == mem::size_of::<u32>());
-    assert!(mem::size_of::<Pending<'_, L, 0>>() == 2 * mem::size_of::<usize>());
 }
 
 const _: () = {

@@ -23,7 +23,6 @@ use crate::state::epoch;
 use crate::{failure, protocol, service};
 
 mod gates;
-mod pending;
 
 pub(crate) trait Ops<'o, 'r, 'c, 'b, 'd, const ID: u8> {
     fn recv<'input, R: buffer::Cursor + 'input>(
@@ -74,44 +73,57 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
         parts: &mut service::Turn<'_, '_, 'd, ID>,
     ) -> Result<ops::Input<'d, ID>, failure::Error> {
         let budget = self.port().budget();
-        match pending::Pending::inspect(channel, payload)? {
-            pending::Pending::Connection(pending) => {
-                let region = parts.driver.region_token();
-                let (receipt, admitted_close) =
-                    self.with_shared(region, |shared| match shared.connection.input.owner() {
-                        Some(Owner::Connection { phase, closing }) => (phase, closing),
-                        _ => unreachable!("input"),
-                    });
-                let Some(event) =
-                    pending.admit(budget, parts.state.phase, receipt, admitted_close, closing)?
-                else {
-                    return Ok(ops::Input::Committed);
-                };
-                let mut close = |next| parts.close.request(next);
-                self.recv_conn(
-                    event,
-                    parts.conn_id,
-                    parts.state,
-                    &mut close,
-                    &mut parts.sink,
-                    region,
-                )?;
-                Ok(ops::Input::Committed)
+        let (bytes, args) = payload
+            .try_split::<{ method::Id::SIZE }>()
+            .map_err(|cause| failure::Error::Protocol(Fault::MethodSize(cause)))?;
+        let id = method::Id::from_bytes(*bytes);
+        if let Some(channel) = frame::Channel::new(channel) {
+            let kind = if id.is_conn() {
+                Err(failure::Error::Protocol(Fault::ConnectionChannel {
+                    channel: channel.get(),
+                }))
+            } else {
+                method::Kind::identify(id)
+            };
+            if closing {
+                kind?;
+                return Ok(ops::Input::Committed);
             }
-            pending::Pending::Channel(pending) => {
-                let Some((gate, event)) = pending.admit(budget, |channel, kind| {
-                    if closing {
-                        kind?;
-                        return Ok(None);
-                    }
-                    self.admit_chan(channel, kind, parts.state, parts.driver.region_token())
-                })?
-                else {
-                    return Ok(ops::Input::Committed);
-                };
-                self.recv_chan(gate, event, attempt, parts)
-            }
+            let Some((gate, kind)) =
+                self.admit_chan(channel, kind, parts.state, parts.driver.region_token())?
+            else {
+                return Ok(ops::Input::Committed);
+            };
+            let event = channel::Event::decode(&args, kind, budget)?;
+            return self.recv_chan(gate, event, attempt, parts);
         }
+        if !id.is_conn() {
+            return Err(failure::Error::Protocol(Fault::ChannelZero));
+        }
+        let kind = conn::Kind::identify(id.method())?;
+        let region = parts.driver.region_token();
+        let (receipt, admitted_close) =
+            self.with_shared(region, |shared| match shared.connection.input.owner() {
+                Some(Owner::Connection { phase, closing }) => (phase, closing),
+                _ => unreachable!("input"),
+            });
+        if closing && !matches!(kind, conn::Kind::Close | conn::Kind::CloseOk) {
+            return Ok(ops::Input::Committed);
+        }
+        if !gates::connection(kind, parts.state.phase, receipt, admitted_close)? {
+            return Ok(ops::Input::Committed);
+        }
+        let event = conn::Event::decode(&args, kind, budget)?;
+        let mut close = |next| parts.close.request(next);
+        self.recv_conn(
+            event,
+            parts.conn_id,
+            parts.state,
+            &mut close,
+            &mut parts.sink,
+            region,
+        )?;
+        Ok(ops::Input::Committed)
     }
 
     fn admit_chan(
@@ -283,7 +295,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
                     })
                     .ok_or_else(|| failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
                 self.wake_route(epoch, freed)?;
-                self.complete(lease, ok, epoch, region)?;
+                self.complete(lease, || ok.into(), epoch, region)?;
                 Ok(())
             }
             channel::Event::Flow(f) => {
@@ -363,10 +375,9 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
                 }
                 Ok(())
             }
-            channel::Event::ExchangeDeclare(ok) => self.complete(lease, ok, epoch, region),
-            channel::Event::ExchangeDelete(ok) => self.complete(lease, ok, epoch, region),
-            channel::Event::ExchangeBind(ok) => self.complete(lease, ok, epoch, region),
-            channel::Event::ExchangeUnbind(ok) => self.complete(lease, ok, epoch, region),
+            channel::Event::Done(kind) => {
+                self.complete(lease, || protocol::Response::Empty(kind), epoch, region)
+            }
             channel::Event::QueueDeclare(view) => {
                 let name = view.try_queue()?;
                 let queue = self
@@ -380,7 +391,10 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
                     })
                     .ok_or_else(|| failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
                 match queue {
-                    Ok(queue) => self.complete(lease, view.retain(queue), epoch, region),
+                    Ok(queue) => {
+                        let done = view.retain(queue);
+                        self.complete(lease, || done.into(), epoch, region)
+                    }
                     Err(flight::Fault::Mismatch(mismatch)) => {
                         let error = failure::Error::QueueName {
                             expected: mismatch.into_name(),
@@ -393,11 +407,8 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
                     Err(flight::Fault::Retain(error)) => Err(failure::Error::Retain(error)),
                 }
             }
-            channel::Event::QueueBind(ok) => self.complete(lease, ok, epoch, region),
-            channel::Event::QueueUnbind(ok) => self.complete(lease, ok, epoch, region),
-            channel::Event::QueuePurge(ok) => self.complete(lease, ok, epoch, region),
-            channel::Event::QueueDelete(ok) => self.complete(lease, ok, epoch, region),
-            channel::Event::Qos(ok) => self.complete(lease, ok, epoch, region),
+            channel::Event::QueuePurge(ok) => self.complete(lease, || ok.into(), epoch, region),
+            channel::Event::QueueDelete(ok) => self.complete(lease, || ok.into(), epoch, region),
             channel::Event::Consume(view) => {
                 let tag = view.tag();
                 let done = self.with_shared(region, |shared| {
@@ -457,7 +468,6 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
                 self.wake_route(epoch, freed)?;
                 Ok(())
             }
-            channel::Event::Recover(ok) => self.complete(lease, ok, epoch, region),
             channel::Event::Ack(a) => self
                 .with_lease(region, lease, |c| {
                     c.confirm().complete(
@@ -513,11 +523,8 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
             channel::Event::Confirm(ok) => {
                 self.with_lease(region, lease, |c| c.confirm().enable())
                     .ok_or_else(|| failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
-                self.complete(lease, ok, epoch, region)
+                self.complete(lease, || ok.into(), epoch, region)
             }
-            channel::Event::TxSelect(ok) => self.complete(lease, ok, epoch, region),
-            channel::Event::TxCommit(ok) => self.complete(lease, ok, epoch, region),
-            channel::Event::TxRollback(ok) => self.complete(lease, ok, epoch, region),
         };
         done.map(|()| ops::Input::Committed)
     }
