@@ -12,6 +12,8 @@ pub(crate) enum Consumer {}
 pub(crate) enum Confirm {}
 #[derive(Clone, Copy)]
 pub(crate) enum Publish {}
+#[derive(Clone, Copy)]
+pub(crate) enum Control {}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -21,10 +23,11 @@ pub enum Kind {
     Consumer = 2,
     Confirm = 3,
     Publish = 4,
+    Control = 5,
 }
 
 impl Kind {
-    pub(crate) const COUNT: usize = 5;
+    pub(crate) const COUNT: usize = 6;
 
     pub(crate) const fn index(self) -> usize {
         self as usize
@@ -56,6 +59,10 @@ impl Slot<Reservation> {
 }
 
 impl Slot<Publish> {
+    pub(crate) const ZERO: Self = Self::new(0);
+}
+
+impl Slot<Control> {
     pub(crate) const ZERO: Self = Self::new(0);
 }
 

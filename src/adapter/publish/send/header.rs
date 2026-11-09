@@ -60,7 +60,7 @@ where
         let route = self.stream.route();
         let encode = |output: &mut Writer| {
             frame::Encoder::new(output).write(frame::Type::HEADER, route.lease().id(), |sink| {
-                property::Encoder::new(self.properties).encode(sink, self.body.len() as u64);
+                self.properties.encode(sink, self.body.len() as u64);
             });
         };
         match frame::Body::new(self.body) {

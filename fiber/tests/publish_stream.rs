@@ -1,14 +1,11 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
 use dope_test::alloc;
 
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::{Frame, Method};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
-use std::io::Write as _;
-use std::sync::mpsc;
 use std::time::Duration;
 
 use dope_amqp091::adapter::publish;
@@ -23,10 +20,6 @@ use crate::common::publish::{TUNE, routing_key, with_config};
 
 #[test]
 fn stale_drop_keeps_stream() {
-    let (first_tx, first_rx) = mpsc::channel();
-    let (sent, seen) = mpsc::channel();
-    let (dropped, drop_rx) = mpsc::channel();
-    let (done_tx, done_rx) = mpsc::channel();
     AcceptScript::with(
         move |acceptor| {
             let mut first = acceptor.accept().expect("first connection");
@@ -42,15 +35,10 @@ fn stale_drop_keeps_stream() {
             Method::read(&mut first)
                 .expect("AMQP method")
                 .check(1, 20, 10).expect("AMQP method route");
-            first
-                .write_all(
-                    &Method::try_encode(1, 20, 11, &[0, 0, 0, 0]).expect("AMQP frame fixture"),
-                )
-                .expect("first channel.open-ok");
+            Method::write(&mut first, 1, 20, 11, &[0; 4]).expect("first channel.open-ok");
             let stale = Method::read(&mut first).expect("AMQP method");
             stale.check(1, 60, 40).expect("AMQP method route");
             assert_eq!(routing_key(&stale).expect("AMQP fixture"), "stale-stream");
-            first_tx.send(()).expect("publish first observation");
             drop(first);
 
             let mut second = acceptor.accept().expect("recovered connection");
@@ -66,11 +54,7 @@ fn stale_drop_keeps_stream() {
             Method::read(&mut second)
                 .expect("AMQP method")
                 .check(1, 20, 10).expect("AMQP method route");
-            second
-                .write_all(
-                    &Method::try_encode(1, 20, 11, &[0, 0, 0, 0]).expect("AMQP frame fixture"),
-                )
-                .expect("replayed channel.open-ok");
+            Method::write(&mut second, 1, 20, 11, &[0; 4]).expect("replayed channel.open-ok");
 
             let current = Method::read(&mut second).expect("AMQP method");
             current.check(1, 60, 40).expect("AMQP method route");
@@ -78,8 +62,9 @@ fn stale_drop_keeps_stream() {
                 routing_key(&current).expect("AMQP fixture"),
                 "current-stream"
             );
-            sent.send(()).expect("publish current observation");
-            drop_rx.recv().expect("stale partial publish drop");
+            Method::write(&mut second, 1, 20, 20, &[0]).expect("pause publication");
+            Method::write(&mut second, 0, 10, 60, b"\x05ready")
+                .expect("current publication observed");
 
             let Frame(kind, channel, header) = Frame::read(&mut second).expect("content header");
             assert_eq!((kind, channel), (2, 1));
@@ -90,16 +75,24 @@ fn stale_drop_keeps_stream() {
             let Frame(kind, channel, body) = Frame::read(&mut second).expect("content body");
             assert_eq!((kind, channel, body.as_slice()), (3, 1, b"new".as_slice()));
 
+            let flow = Method::read(&mut second).expect("deferred flow reply");
+            flow.check(1, 20, 21).expect("flow reply route");
+            assert_eq!(&flow.1[4..], &[0]);
+
             Method::read(&mut second)
                 .expect("AMQP method")
                 .check(1, 50, 30).expect("AMQP method route");
-            second
-                .write_all(
-                    &Method::try_encode(1, 50, 31, &0u32.to_be_bytes())
-                        .expect("AMQP frame fixture"),
-                )
-                .expect("queue.purge-ok");
-            done_rx.recv().expect("post-drop barrier");
+            Method::write(&mut second, 1, 20, 20, &[1]).expect("resume publication");
+            Method::write(&mut second, 0, 10, 61, &[]).expect("connection unblocked");
+            Method::write(&mut second, 1, 50, 31, &[0; 4]).expect("queue.purge-ok");
+            let flow = Method::read(&mut second).expect("idle flow reply");
+            flow.check(1, 20, 21).expect("flow reply route");
+            assert_eq!(&flow.1[4..], &[1]);
+            Method::read(&mut second).expect("resumed publish").check(1, 60, 40)
+                .expect("publish route");
+            Method::write(&mut second, 1, 20, 20, &[0]).expect("pending flow");
+            Method::write(&mut second, 1, 20, 20, &[1]).expect("flow capacity exceeded");
+            assert_eq!(second.read(&mut [0]).expect("stream probe teardown"), 0);
         },
         |broker| {
             let cap = config::Capacity::default().egress(config::Egress::new(1, 4096));
@@ -129,10 +122,6 @@ fn stale_drop_keeps_stream() {
                     body: &body,
                 }));
                 assert!(poll_once(stale.as_pin()).await.is_pending());
-                loop {
-                    match first_rx.try_recv() { Ok(()) => break, Err(mpsc::TryRecvError::Empty) => Yield::new().await, outcome => outcome.expect("broker ended before observing first publish"), }
-                }
-
                 let retired = conn.observe().retired(target.epoch()).await;
                 assert!(retired.is_ok(), "old transport must retire: {retired:?}");
                 let ready = conn.observe().ready().await.expect("replayed topology must become ready");
@@ -146,25 +135,25 @@ fn stale_drop_keeps_stream() {
                     body: b"new",
                 }));
                 assert!(poll_once(current.as_pin()).await.is_pending());
-                loop {
-                    match seen.try_recv() { Ok(()) => break, Err(mpsc::TryRecvError::Empty) => Yield::new().await, outcome => outcome.expect("broker ended before observing current publish"), }
+                while !conn.observe().read(|view| view.is_blocked()).await {
+                    Yield::new().await;
                 }
 
                 let (_, alloc) = Tracker::usage(|| drop(stale));
                 assert_eq!(alloc, (0, 0));
                 body.fill(0);
-                dropped.send(()).expect("publish stale stream drop");
                 current.await.expect("current publish");
                 channel.queue().purge("barrier").await.expect("post-drop barrier");
-                done_tx.send(()).expect("publish post-drop barrier");
+                let mut resumed = Pinned::new(channel.basic().publish(
+                    common::client::channel::request("", "resumed", &props, &[])));
+                assert!(poll_once(resumed.as_pin()).await.is_pending());
+                conn.observe().retired(ready.epoch()).await.expect("flow capacity retirement");
+                let error = conn.observe().ready().await.expect_err("flow capacity failure");
+                assert!(matches!(error.error(), dope_amqp091::failure::Error::Capacity(
+                    dope_amqp091::failure::wire::Capacity::Method)));
                 })).is_ok(), "AMQP fiber must complete");
                 }, recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("stream reconnect broker");
         },
@@ -173,7 +162,3 @@ fn stale_drop_keeps_stream() {
 
 #[global_allocator]
 static ALLOCATOR: alloc::Tracker = Tracker::new();
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
-}

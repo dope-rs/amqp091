@@ -11,13 +11,13 @@ use dope_amqp091::{failure, service};
 type Output<'owner, R> =
     Result<Result<Result<R, session::Error<'owner, R>>, creation::Error>, service::Build>;
 
-pub enum Error<'owner, R> {
+pub enum Error<'owner, R, Q = ()> {
     Reports(Vec<io::Reclaimed>),
     Config(failure::Error),
     Plan(app::Error),
     Claim(errors::Claim),
     Executor(create::Error<'owner>),
-    Domain(domain::Error<'owner, Infallible, Output<'owner, R>>),
+    Domain(domain::Error<'owner, Infallible, Output<'owner, R>, Q>),
     Storage(service::Build),
     Install(creation::Error),
     App(session::Error<'owner, R>),
@@ -39,7 +39,7 @@ pub enum Kind<'a, 'owner, R> {
     App(&'a session::Error<'owner, R>),
 }
 
-impl<'owner, R> Error<'owner, R> {
+impl<'owner, R, Q> Error<'owner, R, Q> {
     pub fn kind(&self) -> Kind<'_, 'owner, R> {
         match self {
             Self::Reports(reports) => Kind::Reports(reports),

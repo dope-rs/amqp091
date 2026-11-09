@@ -1,20 +1,17 @@
-use std::convert::Infallible;
-use std::io::Write as _;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use dope::core::driver::life::recovery;
 use dope_amqp091::config;
 use dope_amqp091::message::ack;
 use dope_amqp091::message::field::Table;
 use dope_amqp091_fiber::channel::basic;
-use dope_fiber::task::time::sleep::TimerExt as _;
 use dope_test::alloc;
 use dope_test::alloc::Tracker;
 
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::Method;
 
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use dope_test::harness::peer::AcceptScript;
@@ -26,9 +23,6 @@ fn preserves_same_tag() {
     const TAG: &str = "same-tag";
     const CAPACITY_PROBE: &str = "capacity-probe";
 
-    let done = AtomicBool::new(false);
-    let done = &done;
-    let peer = done;
     AcceptScript::with(
         move |broker| {
             let mut first = broker.accept().expect("first connection");
@@ -128,7 +122,16 @@ fn preserves_same_tag() {
             second
                 .write_all(&Method::try_encode(1, 60, 31, &tag_ok).expect("AMQP frame fixture"))
                 .expect("replacement basic.cancel-ok");
-            peer.store(true, Ordering::Release);
+            second
+                .write_all(
+                    &Method::try_encode(0, 10, 50, &[0, 200, 0, 0, 0, 0, 0])
+                        .expect("AMQP frame fixture"),
+                )
+                .expect("retirement after cancel-ok");
+            Method::read(&mut second)
+                .expect("connection.close-ok")
+                .check(0, 10, 51)
+                .expect("cancel-ok processed before retirement");
         },
         |broker| {
             let addr = broker.addr();
@@ -152,13 +155,11 @@ fn preserves_same_tag() {
                 config,
                 |rt| {
                     let conn = rt.connection();
-                    let timer = rt.timer();
                     let run = dope_fiber::fiber!('_ => async move {
                         let target = conn
                             .observe().ready()
                             .await
                             .expect("first ready");
-                        let epoch = conn.observe().read(|view| view.generation()).await;
                         let chan = conn
                             .channels().open_in(target, 1)
                             .await
@@ -221,12 +222,8 @@ fn preserves_same_tag() {
                             .qos(1)
                             .await
                             .expect("server cancel dispatch barrier");
-                        while conn.observe().read(|view| view.generation()).await == epoch {
-                            timer
-                                .sleep(Duration::from_millis(10))
-                                .expect("generation wait")
-                                .await;
-                        }
+                        conn.observe().retired(target.epoch()).await.expect("first retirement");
+                        let recovered = conn.observe().ready().await.expect("topology replay");
 
                         let msg = next
                             .recv()
@@ -238,22 +235,12 @@ fn preserves_same_tag() {
                         msg.release();
                         let (_, alloc) = Tracker::usage(|| drop(next));
                         assert_eq!(alloc, (0, 0));
-                        while !done.load(Ordering::Acquire) {
-                            timer
-                                .sleep(Duration::from_millis(10))
-                                .expect("replacement retirement wait")
-                                .await;
-                        }
+                        conn.observe().retired(recovered.epoch()).await.expect("replacement retirement");
                     });
                     assert!(rt.block_on(run).is_ok(), "AMQP fiber must complete");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("same-tag replacement broker");
         },
@@ -263,7 +250,3 @@ fn preserves_same_tag() {
 
 #[global_allocator]
 static ALLOCATOR: alloc::Tracker = Tracker::new();
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
-}

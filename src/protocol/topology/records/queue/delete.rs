@@ -14,7 +14,7 @@ impl<'d, const ID: u8> Delete<'d, ID> {
     pub(crate) fn capture(
         budget: &Budget<'d>,
         queue: Option<Key<'d, ID>>,
-        name: short::Short<'_>,
+        name: short::Name<'_>,
     ) -> Result<Self, failure::Error> {
         Ok(Self {
             record: bytes::Field::capture(budget, name)?,
@@ -22,7 +22,7 @@ impl<'d, const ID: u8> Delete<'d, ID> {
         })
     }
 
-    pub(crate) fn name(&self) -> short::Short<'_> {
+    pub(crate) fn name(&self) -> short::Name<'_> {
         self.record.value()
     }
 

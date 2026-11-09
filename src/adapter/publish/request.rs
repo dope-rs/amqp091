@@ -34,8 +34,7 @@ impl<'exchange, 'key, 'properties, 'body> Request<'exchange, 'key, 'properties, 
         let method = publish::METHOD_FIXED_SIZE as u64
             + exchange.value().len() as u64
             + u64::from(key.len());
-        let header =
-            publish::FRAME_OVERHEAD as u64 + property::Encoder::new(self.properties).encoded_len();
+        let header = publish::FRAME_OVERHEAD as u64 + self.properties.encoded_len();
         validate(method, limit.frame())?;
         validate(header, limit.frame())?;
         Ok(Checked {

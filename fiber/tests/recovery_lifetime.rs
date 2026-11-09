@@ -1,11 +1,9 @@
-use std::convert::Infallible;
 use std::thread;
 
-use dope::core::driver::life::recovery;
-
-use crate::common::amqp::Peer;
+use crate::common::amqp::{Greeting, Peer, app::Endpoint};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
-use std::io;
 use std::time::Duration;
 
 use common::recovery::Profile;
@@ -15,7 +13,7 @@ use dope_test::harness::peer::AcceptScript;
 use o3::base::time::Positive;
 
 use crate::common::recovery::TUNE;
-use crate::common::recovery::client::with_policy;
+use crate::common::recovery::client::POLICY;
 
 #[test]
 fn owns_deadline() {
@@ -31,11 +29,23 @@ fn owns_deadline() {
             first
                 .write_wait(Some(Duration::from_secs(10)))
                 .expect("first write timeout");
+            let preface = Peer::new(&mut first).preface().expect("AMQP preface");
+            // The client publishes its lifetime before sending this preface.
             thread::sleep(DELAY);
-            Peer::new(&mut first)
-                .open(TUNE)
-                .expect("AMQP broker handshake");
-            io::copy(&mut first, &mut io::sink()).expect("generation-1 retirement");
+            preface
+                .start(Greeting::PLAIN)
+                .expect("AMQP start")
+                .recv()
+                .expect("AMQP start ok")
+                .tune(TUNE)
+                .expect("AMQP tune")
+                .recv()
+                .expect("AMQP tune ok")
+                .recv()
+                .expect("AMQP open")
+                .send()
+                .expect("AMQP open ok");
+            while first.read(&mut [0; 256]).expect("generation-1 retirement") != 0 {}
             drop(first);
 
             let mut second = broker.accept().expect("second connection");
@@ -48,13 +58,15 @@ fn owns_deadline() {
             Peer::new(&mut second)
                 .open(TUNE)
                 .expect("AMQP broker handshake");
-            io::copy(&mut second, &mut io::sink()).expect("endpoint teardown");
+            while second.read(&mut [0; 256]).expect("endpoint teardown") != 0 {}
         },
         |broker| {
-            with_policy::<Profile>(
+            Endpoint::new(
                 broker.addr(),
                 config::Config::new("guest", "guest").expect("AMQP config"),
-                AGE,
+            )
+            .try_check::<Profile, _>(
+                POLICY.retire_after(AGE),
                 |rt| {
                     let conn = rt.connection();
                     assert!(
@@ -105,19 +117,10 @@ fn owns_deadline() {
                     );
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("scripted broker thread");
         },
     )
     .expect("scripted broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

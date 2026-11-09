@@ -49,7 +49,6 @@ pub(crate) struct Run<
 impl<'o: 'app, 'r: 'o, 'c: 'r, 'b: 'c, 'app, 'd: 'app + 'b, B: ?Sized, const ID: u8>
     ready::Start<'app, 'o, 'r, 'c, 'b, 'd, B, ID> for Open
 {
-    type Output = Channel<'app, 'o, 'r, 'c, 'b, 'd, B, ID>;
     type Run = Run<'app, 'o, 'r, 'c, 'b, 'd, B, ID, ()>;
 
     fn start(
@@ -72,7 +71,6 @@ impl<'o: 'app, 'r: 'o, 'c: 'r, 'b: 'c, 'app, 'd: 'app + 'b, B: ?Sized, const ID:
 impl<'o: 'app, 'r: 'o, 'c: 'r, 'b: 'c, 'app, 'd: 'app + 'b, B: ?Sized, const ID: u8>
     ready::Start<'app, 'o, 'r, 'c, 'b, 'd, B, ID> for Bound
 {
-    type Output = Channel<'app, 'o, 'r, 'c, 'b, 'd, B, ID, conn::Ready<'d, ID>>;
     type Run = Run<'app, 'o, 'r, 'c, 'b, 'd, B, ID, conn::Ready<'d, ID>>;
 
     fn start(
@@ -95,7 +93,6 @@ impl<'o: 'app, 'r: 'o, 'c: 'r, 'b: 'c, 'app, 'd: 'app + 'b, B: ?Sized, const ID:
 impl<'o: 'app, 'r: 'o, 'c: 'r, 'b: 'c, 'app, 'd: 'app + 'b, B: ?Sized, const ID: u8>
     ready::Start<'app, 'o, 'r, 'c, 'b, 'd, B, ID> for Auto
 {
-    type Output = Channel<'app, 'o, 'r, 'c, 'b, 'd, B, ID>;
     type Run = Run<'app, 'o, 'r, 'c, 'b, 'd, B, ID, ()>;
 
     fn start(

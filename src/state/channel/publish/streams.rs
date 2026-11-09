@@ -45,7 +45,7 @@ impl Vacant<'_> {
         let key = match self.flight.last {
             Some(last) => last
                 .next()
-                .ok_or(failure::Error::Capacity(wire::Capacity::PublishGeneration))?,
+                .ok_or_else(|| failure::Error::Capacity(wire::Capacity::PublishGeneration))?,
             None => Key::FIRST,
         };
         let admitted = admit(key)?;

@@ -31,9 +31,9 @@ impl settings::Profile for Profile {
 
 fn config() -> Result<config::Config, failure::Error> {
     Ok(config::Config::new("guest", "guest")?
-        .tune(config::Tune::default().channel_max(1))
+        .tune(config::Tune::default().channel_max(2))
         .capacity(config::Capacity::new(
-            1,
+            2,
             config::Channel::new(1, 1, 1, 1, 1),
             config::Body::new(4096, 4096, 2),
             config::Egress::new(1, 4096),

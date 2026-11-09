@@ -54,7 +54,7 @@ impl<'b, 'd, const ID: u8> Named<'_, 'b, 'd, ID> {
 
 impl<'b, 'd, const ID: u8> Fresh<'_, 'b, 'd, '_, ID> {
     pub(crate) fn commit(mut self, writer: resident::Writer<'b>) -> resident::Short<'b, 'd> {
-        let (stored, tag) = writer.commit_pair(self.name);
+        let (stored, tag) = writer.commit_pair(self.name, self.entry.hash());
         let slot = self.entry.get_mut();
         slot.spec.set_tag(stored);
         self.entry.commit().into_mut().status = Status::Active;
@@ -62,7 +62,7 @@ impl<'b, 'd, const ID: u8> Fresh<'_, 'b, 'd, '_, ID> {
     }
 
     pub(crate) fn retire(mut self, writer: resident::Writer<'b>) {
-        let tag = writer.commit(self.name);
+        let tag = writer.commit(self.name, self.entry.hash());
         let slot = self.entry.get_mut();
         slot.spec.set_tag(tag);
         self.entry.commit().into_mut().status = Status::Retiring;
@@ -80,58 +80,32 @@ impl<'b, 'a, 'd, const ID: u8> Write<'a, 'b, 'd, ID> {
         &mut self,
         spec: Record<'b, 'd, ID>,
     ) -> Result<consumer::Key, failure::Error> {
-        self.registry.check(spec.tag())?;
-        match self.registry.slots.insert(Slot::pending(spec)) {
-            Ok(key) => Ok(consumer::Key::from_raw(key)),
-            Err(_) => Err(failure::Error::Capacity(wire::Capacity::Consumer)),
+        let tag = spec.tag();
+        if !tag.is_empty()
+            && let Some(actual) = self.registry.key(tag.value())
+        {
+            return Err(failure::Error::Protocol(wire::Fault::ConsumerKey {
+                expected: None,
+                actual: Some(num::NonZero::from(actual)),
+                step: turn::Step::Pending,
+            }));
         }
+        let Some(vacant) = self.registry.slots.vacant() else {
+            return Err(failure::Error::Capacity(wire::Capacity::Consumer));
+        };
+        Ok(consumer::Key::from_raw(
+            vacant.insert(Slot::pending(spec)).key(),
+        ))
     }
 
     pub(crate) fn named(
         self,
         key: consumer::Key,
-        reply: short::Short<'_>,
+        tag: short::Short<'_>,
     ) -> Result<Named<'a, 'b, 'd, ID>, Fault<'b, 'd>> {
-        let entry = self
-            .registry
-            .try_entry(key, turn::Step::Pending)
-            .map_err(Fault::Protocol)?;
-        let slot = entry.get();
-        if slot.status != Status::Pending {
-            return Err(Fault::Protocol(wire::Fault::ConsumerPhase {
-                consumer: num::NonZero::from(key).get(),
-                expected: turn::Consumer::Pending,
-                actual: slot.status.phase(),
-            }));
-        }
-        let expected = slot.spec.tag();
-        if expected.is_empty() || expected.value() != reply.value() {
-            return Err(
-                consumer::Mismatch::Tag(slot.spec.try_tag().map_err(Fault::Retain)?).into(),
-            );
-        }
-        let staged = match entry {
-            entry::Entry::Staged(staged) => staged,
-            entry::Entry::Indexed(indexed) => {
-                return Err(Fault::Protocol(wire::Fault::ConsumerIndex {
-                    consumer: indexed.key().parts().into_raw().get(),
-                    expected: turn::Index::Staged,
-                    actual: turn::Index::Indexed,
-                }));
-            }
-        };
-        let entry = staged
-            .try_reserve(
-                Fingerprint::of(reply.value().as_bytes()).get(),
-                reply.value(),
-            )
-            .map_err(|(staged, actual)| {
-                Fault::Mismatch(consumer::Mismatch::Collision(turn::Clash::new(
-                    consumer::Key::from_raw(staged.key()),
-                    consumer::Key::from_raw(actual),
-                )))
-            })?;
-        Ok(Named { entry })
+        Ok(Named {
+            entry: self.try_reserve::<false>(key, tag)?,
+        })
     }
 
     pub(crate) fn fresh<'n>(
@@ -139,6 +113,20 @@ impl<'b, 'a, 'd, const ID: u8> Write<'a, 'b, 'd, ID> {
         key: consumer::Key,
         tag: short::Short<'n>,
     ) -> Result<Fresh<'a, 'b, 'd, 'n, ID>, Fault<'b, 'd>> {
+        Ok(Fresh {
+            entry: self.try_reserve::<true>(key, tag)?,
+            name: tag,
+        })
+    }
+
+    fn try_reserve<const FRESH: bool>(
+        self,
+        key: consumer::Key,
+        tag: short::Short<'_>,
+    ) -> Result<
+        Vacancy<entry::Live<'a, Slot<'b, 'd, ID>, consumer::Tag, entry::Staged>, u64>,
+        Fault<'b, 'd>,
+    > {
         let entry = self
             .registry
             .try_entry(key, turn::Step::Pending)
@@ -146,12 +134,13 @@ impl<'b, 'a, 'd, const ID: u8> Write<'a, 'b, 'd, ID> {
         let slot = entry.get();
         if slot.status != Status::Pending {
             return Err(Fault::Protocol(wire::Fault::ConsumerPhase {
-                consumer: num::NonZero::from(key).get(),
+                consumer: num::NonZero::from(key),
                 expected: turn::Consumer::Pending,
                 actual: slot.status.phase(),
             }));
         }
-        if !slot.spec.tag().is_empty() {
+        let expected = slot.spec.tag();
+        if !FRESH && expected.value() != tag.value() {
             return Err(
                 consumer::Mismatch::Tag(slot.spec.try_tag().map_err(Fault::Retain)?).into(),
             );
@@ -160,21 +149,20 @@ impl<'b, 'a, 'd, const ID: u8> Write<'a, 'b, 'd, ID> {
             entry::Entry::Staged(staged) => staged,
             entry::Entry::Indexed(indexed) => {
                 return Err(Fault::Protocol(wire::Fault::ConsumerIndex {
-                    consumer: indexed.key().parts().into_raw().get(),
+                    consumer: indexed.key().parts().into_raw(),
                     expected: turn::Index::Staged,
                     actual: turn::Index::Indexed,
                 }));
             }
         };
-        let entry = staged
+        staged
             .try_reserve(Fingerprint::of(tag.value().as_bytes()).get(), tag.value())
             .map_err(|(staged, actual)| {
                 Fault::Mismatch(consumer::Mismatch::Collision(turn::Clash::new(
                     consumer::Key::from_raw(staged.key()),
                     consumer::Key::from_raw(actual),
                 )))
-            })?;
-        Ok(Fresh { entry, name: tag })
+            })
     }
 
     pub(crate) fn begin_replay(
@@ -190,7 +178,7 @@ impl<'b, 'a, 'd, const ID: u8> Write<'a, 'b, 'd, ID> {
             entry::Entry::Indexed(entry) => entry,
             entry::Entry::Staged(staged) => {
                 return Err(failure::Error::Protocol(wire::Fault::ConsumerIndex {
-                    consumer: staged.key().parts().into_raw().get(),
+                    consumer: staged.key().parts().into_raw(),
                     expected: turn::Index::Indexed,
                     actual: turn::Index::Staged,
                 }));
@@ -198,7 +186,7 @@ impl<'b, 'a, 'd, const ID: u8> Write<'a, 'b, 'd, ID> {
         };
         if entry.get().status != Status::Recovering {
             return Err(failure::Error::Protocol(wire::Fault::ConsumerPhase {
-                consumer: id.get(),
+                consumer: id,
                 expected: turn::Consumer::Recovering,
                 actual: entry.get().status.phase(),
             }));
@@ -233,7 +221,7 @@ impl<'b, 'a, 'd, const ID: u8> Write<'a, 'b, 'd, ID> {
             )),
             Status::Pending | Status::Active | Status::Untracked | Status::Recovering => {
                 Err(Fault::Protocol(wire::Fault::ConsumerPhase {
-                    consumer: num::NonZero::from(key).get(),
+                    consumer: num::NonZero::from(key),
                     expected: turn::Consumer::Replaying,
                     actual: entry.get().status.phase(),
                 }))

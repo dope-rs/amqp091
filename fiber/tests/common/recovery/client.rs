@@ -1,10 +1,8 @@
 use std::{net, time};
 
 use dope::core::driver::life::recovery;
-use dope::core::driver::settings;
 use dope::manifold::timing;
 use dope_amqp091::config;
-use o3::base::time::Positive;
 
 use crate::common::amqp::app::{Endpoint, Policy, Scope, error};
 
@@ -40,18 +38,9 @@ pub fn with_config(
     Endpoint::new(address, config).try_check::<timing::Throughput, _>(POLICY, test, recover, finish)
 }
 
-pub fn with_policy<P>(
-    address: net::SocketAddr,
-    config: config::Config,
-    age: Positive,
-    test: impl for<'app, 'life, 'q, 'h, 'p, 'o, 'r, 'c, 'b, 'd> FnOnce(
-        &mut Scope<'app, 'life, 'q, 'h, 'p, 'o, 'r, 'c, 'b, 'd, 0, P>,
-    ),
-    recover: impl recovery::Recover,
-    finish: impl for<'owner> FnOnce(Result<(), error::Error<'owner, ()>>),
-) where
-    P: settings::Profile + timing::Policy,
-{
-    let policy = POLICY.retire_after(age);
-    Endpoint::new(address, config).try_check::<P, _>(policy, test, recover, finish)
+pub fn complete<Q>(result: Result<(), error::Error<'_, (), Q>>) {
+    result
+        .as_ref()
+        .map_err(|error| error.kind())
+        .expect("endpoint completion");
 }

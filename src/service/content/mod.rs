@@ -48,6 +48,22 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Store<'r, 'c, 'b, 'd, ID> {
         )
     }
 
+    pub(in crate::service) fn retry_staging(
+        &self,
+        error: &resident::staging::reserve::Error,
+    ) -> Option<resource::Resource> {
+        use resident::{AllocError, staging::reserve};
+
+        match error {
+            reserve::Error::Resident(AllocError::Budget(credit))
+            | reserve::Error::Spill {
+                error: AllocError::Budget(credit),
+                ..
+            } if self.wait.can_release() => Some(resource::Resource::Staging(*credit)),
+            _ => None,
+        }
+    }
+
     pub(crate) const fn pool(&self) -> &'c pool::Pool<'b, 'd> {
         self.pool
     }
@@ -77,9 +93,9 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Store<'r, 'c, 'b, 'd, ID> {
     pub(crate) fn retain<'input, R: buffer::Cursor + hold::raw::Retain<'d> + 'input>(
         &self,
         source: scope::Bound<'input, 'd, R>,
-    ) -> Result<resident::Shared<'d>, pending::Error> {
+    ) -> Result<hold::Retained<'d>, pending::Error> {
         let Some(demand) = num::NonZero::<usize>::new(source.ceiling()) else {
-            return Ok(resident::Shared::new());
+            return Ok(resident::Shared::new().into());
         };
         let capacity = self.wait.resident().capacity();
         if demand.get() > capacity {
@@ -89,12 +105,10 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Store<'r, 'c, 'b, 'd, ID> {
             };
             return Err(pending::Error::Failure(failure::Error::Capacity(error)));
         }
-        source
-            .try_admit(&self.wait.resident())
-            .map_err(|(source, error)| {
-                drop(source);
-                self.admission(wire::Allocation::Content, error)
-            })
+        source.try_retain().map_err(|(source, error)| {
+            drop(source);
+            self.admission(wire::Allocation::Content, error)
+        })
     }
 
     pub(crate) fn discard(&self, body: payload::Payload<'b, 'd>) {
@@ -119,10 +133,16 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Store<'r, 'c, 'b, 'd, ID> {
             .map_err(failure::Error::WaitRegister)
     }
 
-    pub(crate) fn wake_route(&self, conn: conn::Id<'d, KeyTag<ID>>) -> Result<(), failure::Error> {
-        self.wait
-            .wake_route(conn)
-            .map_err(failure::Error::WaitRoute)
+    #[inline(always)]
+    pub(crate) fn wake_route(
+        &self,
+        conn: conn::Id<'d, KeyTag<ID>>,
+        freed: channel::Freed,
+    ) -> Result<(), failure::Error> {
+        match freed {
+            channel::Freed::Available => Ok(()),
+            channel::Freed::Route => self.wait.wake_route(conn).map_err(failure::Error::WaitRoute),
+        }
     }
 
     pub(crate) fn cancel(&self, conn: conn::Id<'d, KeyTag<ID>>) -> Result<(), failure::Error> {
@@ -132,14 +152,12 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Store<'r, 'c, 'b, 'd, ID> {
     fn admission(&self, target: wire::Allocation, error: hold::Error) -> pending::Error {
         let retry = self.wait.can_release();
         match error {
-            hold::Error::Resident(resident::AllocError::Budget(error)) if retry => {
+            hold::Error::Resident(resident::AllocError::Budget(error))
+            | hold::Error::Copy(copy::Error::Budget(error))
+            | hold::Error::Account(account::Cause::Budget(error))
+                if retry =>
+            {
                 pending::Error::Retry(resource::Resource::Resident(error))
-            }
-            hold::Error::Copy(copy::Error::Budget(error)) if retry => {
-                pending::Error::Retry(resource::Resource::Copy(error))
-            }
-            hold::Error::Account(account::Cause::Budget(error)) if retry => {
-                pending::Error::Retry(resource::Resource::Account(error))
             }
             error => pending::Error::Failure(failure::Error::Hold { target, error }),
         }

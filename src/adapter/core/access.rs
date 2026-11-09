@@ -2,16 +2,9 @@ use std::marker::PhantomData;
 
 use crate::state::channel::cancel::lanes;
 
-pub trait Seal {}
-pub(in crate::adapter) trait Permit<P> {}
+pub trait Capability {}
 
-pub trait Capability: Seal {}
-
-impl<K: Seal> Capability for K {}
-
-pub(in crate::adapter) trait Allows<P>: Capability + Permit<P> {}
-
-impl<K, P> Allows<P> for K where K: Capability + Permit<P> {}
+pub(in crate::adapter) trait Allows<P>: Capability {}
 
 pub(in crate::adapter) struct Root;
 pub(in crate::adapter) struct Channels;
@@ -32,59 +25,57 @@ pub(in crate::adapter) struct Issue<L>(PhantomData<fn() -> L>);
 pub(in crate::adapter) struct Reap<L>(PhantomData<fn() -> L>);
 pub(in crate::adapter) struct Project<T: Capability>(PhantomData<fn() -> T>);
 
-impl Seal for Root {}
-impl Permit<Project<Channels>> for Root {}
-impl Permit<Project<Conn>> for Root {}
-impl Permit<Project<Consumers>> for Root {}
-impl Permit<Project<Methods>> for Root {}
-impl Permit<Project<Publish>> for Root {}
+impl Capability for Root {}
+impl Allows<Project<Channels>> for Root {}
+impl Allows<Project<Conn>> for Root {}
+impl Allows<Project<Consumers>> for Root {}
+impl Allows<Project<Methods>> for Root {}
+impl Allows<Project<Publish>> for Root {}
 
-impl Seal for Channels {}
-impl Permit<State> for Channels {}
-impl Permit<Egress> for Channels {}
-impl Permit<WaiterAccess> for Channels {}
-impl Permit<Registry> for Channels {}
-impl Permit<Issue<lanes::Reservation>> for Channels {}
-impl Permit<Reap<lanes::Reservation>> for Channels {}
+impl Capability for Channels {}
+impl Allows<State> for Channels {}
+impl Allows<Egress> for Channels {}
+impl Allows<WaiterAccess> for Channels {}
+impl Allows<Registry> for Channels {}
+impl Allows<Issue<lanes::Reservation>> for Channels {}
+impl Allows<Reap<lanes::Reservation>> for Channels {}
 
-impl Seal for Conn {}
-impl Permit<Project<Observe>> for Conn {}
-impl Permit<Project<Command>> for Conn {}
+impl Capability for Conn {}
+impl Allows<Project<Observe>> for Conn {}
+impl Allows<Project<Command>> for Conn {}
 
-impl Seal for Observe {}
-impl Permit<State> for Observe {}
-impl Permit<WaiterAccess> for Observe {}
+impl Capability for Observe {}
+impl Allows<State> for Observe {}
+impl Allows<WaiterAccess> for Observe {}
 
-impl Seal for Command {}
-impl Permit<State> for Command {}
-impl Permit<Egress> for Command {}
-impl Permit<WaiterAccess> for Command {}
-impl Permit<Registry> for Command {}
+impl Capability for Command {}
+impl Allows<State> for Command {}
+impl Allows<Egress> for Command {}
+impl Allows<WaiterAccess> for Command {}
+impl Allows<Registry> for Command {}
 
-impl Seal for Consumers {}
-impl Permit<State> for Consumers {}
-impl Permit<Egress> for Consumers {}
-impl Permit<Control> for Consumers {}
-impl Permit<WaiterAccess> for Consumers {}
-impl Permit<Registry> for Consumers {}
-impl Permit<Project<Observe>> for Consumers {}
+impl Capability for Consumers {}
+impl Allows<State> for Consumers {}
+impl Allows<Egress> for Consumers {}
+impl Allows<Registry> for Consumers {}
+impl Allows<Project<Observe>> for Consumers {}
 
-impl Seal for Methods {}
-impl Permit<State> for Methods {}
-impl Permit<Egress> for Methods {}
-impl Permit<Control> for Methods {}
-impl Permit<Registry> for Methods {}
-impl Permit<Issue<lanes::Method>> for Methods {}
-impl Permit<Issue<lanes::Consumer>> for Methods {}
-impl Permit<Reap<lanes::Method>> for Methods {}
+impl Capability for Methods {}
+impl Allows<State> for Methods {}
+impl Allows<Egress> for Methods {}
+impl Allows<Control> for Methods {}
+impl Allows<WaiterAccess> for Methods {}
+impl Allows<Registry> for Methods {}
+impl Allows<Issue<lanes::Method>> for Methods {}
+impl Allows<Issue<lanes::Consumer>> for Methods {}
+impl Allows<Reap<lanes::Method>> for Methods {}
 
-impl Seal for Publish {}
-impl Permit<State> for Publish {}
-impl Permit<Egress> for Publish {}
-impl Permit<Settings> for Publish {}
-impl Permit<Control> for Publish {}
-impl Permit<WaiterAccess> for Publish {}
-impl Permit<Registry> for Publish {}
-impl Permit<Issue<lanes::Publish>> for Publish {}
-impl Permit<Issue<lanes::Confirm>> for Publish {}
-impl Permit<Reap<lanes::Confirm>> for Publish {}
+impl Capability for Publish {}
+impl Allows<State> for Publish {}
+impl Allows<Egress> for Publish {}
+impl Allows<Settings> for Publish {}
+impl Allows<WaiterAccess> for Publish {}
+impl Allows<Registry> for Publish {}
+impl Allows<Issue<lanes::Publish>> for Publish {}
+impl Allows<Issue<lanes::Confirm>> for Publish {}
+impl Allows<Reap<lanes::Confirm>> for Publish {}

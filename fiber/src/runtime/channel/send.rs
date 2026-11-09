@@ -1,7 +1,7 @@
 use std::mem;
 
 use dope_amqp091::adapter::{channel, conn, publish};
-use dope_amqp091::{failure, protocol};
+use dope_amqp091::failure;
 use o3::base::cell::{local, region};
 
 use crate::runtime::{self, ready};
@@ -47,7 +47,6 @@ impl<
 > ready::Start<'app, 'o, 'r, 'c, 'b, 'd, B, ID>
     for Send<'exchange, 'key, 'properties, 'body, 'c, 'd, false, ID>
 {
-    type Output = ();
     type Run = publish::Send<'exchange, 'key, 'properties, 'body, 'o, 'r, 'c, 'b, 'd, ID>;
 
     fn start(
@@ -79,7 +78,6 @@ impl<
 > ready::Start<'app, 'o, 'r, 'c, 'b, 'd, B, ID>
     for Send<'exchange, 'key, 'properties, 'body, 'c, 'd, true, ID>
 {
-    type Output = protocol::Confirmation;
     type Run = publish::Confirm<'exchange, 'key, 'properties, 'body, 'o, 'r, 'c, 'b, 'd, ID>;
 
     fn start(

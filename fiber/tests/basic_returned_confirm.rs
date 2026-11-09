@@ -1,13 +1,9 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
-
 use crate::common::amqp::Peer;
 use crate::common::amqp::app::Endpoint;
 use crate::common::amqp::wire::Method;
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
-
-use std::io::Write as _;
 
 use dope::core::io::Reclaimed;
 use dope::manifold::timing;
@@ -80,6 +76,8 @@ fn precedes_confirm() {
                     let channel = conn.channels().open(1).await.expect("channel open");
                     let confirms = channel.confirm().select().await.expect("confirm.select");
                     let properties = Builder::default()
+                        .content_type("obsolete")
+                        .expect("initial content type")
                         .content_type(returned::CONTENT_TYPE)
                         .expect("content type")
                         .build();
@@ -119,12 +117,7 @@ fn precedes_confirm() {
                     },
                     |event| reports.push(event),
                     recover,
-                    |result| {
-                        result
-                            .as_ref()
-                            .map_err(|error| error.kind())
-                            .expect("endpoint completion");
-                    },
+                    complete,
                 );
                 assert!(
                     matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]),
@@ -135,8 +128,4 @@ fn precedes_confirm() {
         },
     )
     .expect("scripted AMQP broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

@@ -11,8 +11,8 @@ use crate::message::{content, property};
 use crate::protocol::method::basic;
 use crate::protocol::wire::schema;
 use crate::protocol::wire::text::fields;
+use crate::service::content::wait::resource;
 use crate::service::content::wait::wake::Wake;
-use crate::service::content::wait::{resource, wake};
 use crate::service::content::{entry, payload};
 use crate::state::channel::consumer::delivery;
 use crate::state::channel::returns;
@@ -25,12 +25,6 @@ pub(crate) enum Complete<'r, 'c, 'b, 'd> {
 pub(crate) enum Error {
     Retry(resource::Resource),
     Failure(failure::Error),
-}
-
-pub(crate) enum Progress<'r, 'c, 'b, 'd, E> {
-    Pending(Pending<'r, 'c, 'b, 'd>),
-    Complete(Complete<'r, 'c, 'b, 'd>),
-    Failed(Pending<'r, 'c, 'b, 'd>, E),
 }
 
 enum Route<'r, 'c, 'b, 'd> {
@@ -46,35 +40,19 @@ impl From<failure::Error> for Error {
 }
 
 pub(crate) struct Pending<'r, 'c, 'b, 'd> {
-    slot: Unique<
-        'c,
-        entry::Entry<'b, 'd>,
-        release::Header<entry::Entry<'b, 'd>, wake::Wake<'b, 'd>>,
-        release::Notify<'c>,
-    >,
+    slot: Unique<'c, entry::Entry<'b, 'd>, Wake<'b, 'd>, release::Notify<'c>>,
     route: Route<'r, 'c, 'b, 'd>,
 }
 
 /// Complete content retained under its matching route and frozen slot ownership.
 pub(crate) struct Lease<'c, 'b, 'd, K>(
-    Unique<
-        'c,
-        entry::Entry<'b, 'd>,
-        release::Header<entry::Entry<'b, 'd>, wake::Wake<'b, 'd>>,
-        release::Notify<'c>,
-        release::Frozen,
-    >,
+    Unique<'c, entry::Entry<'b, 'd>, Wake<'b, 'd>, release::Notify<'c>, release::Frozen>,
     marker::PhantomData<K>,
 );
 
 impl<'r, 'c, 'b, 'd> Pending<'r, 'c, 'b, 'd> {
     pub(super) fn delivery<'input>(
-        mut slot: Unique<
-            'c,
-            entry::Entry<'b, 'd>,
-            release::Header<entry::Entry<'b, 'd>, wake::Wake<'b, 'd>>,
-            release::Notify<'c>,
-        >,
+        mut slot: Unique<'c, entry::Entry<'b, 'd>, Wake<'b, 'd>, release::Notify<'c>>,
         method: basic::Deliver<'input>,
         route: delivery::Route<'r, 'c, 'b, 'd>,
     ) -> Self {
@@ -95,12 +73,7 @@ impl<'r, 'c, 'b, 'd> Pending<'r, 'c, 'b, 'd> {
     }
 
     pub(super) fn returned<'input>(
-        mut slot: Unique<
-            'c,
-            entry::Entry<'b, 'd>,
-            release::Header<entry::Entry<'b, 'd>, wake::Wake<'b, 'd>>,
-            release::Notify<'c>,
-        >,
+        mut slot: Unique<'c, entry::Entry<'b, 'd>, Wake<'b, 'd>, release::Notify<'c>>,
         method: basic::Return<'input>,
         route: returns::Vacant<'r, 'c, 'b, 'd>,
     ) -> Self {
@@ -119,8 +92,7 @@ impl<'r, 'c, 'b, 'd> Pending<'r, 'c, 'b, 'd> {
     }
 
     pub(crate) fn bind<E: From<failure::Error>>(
-        mut self,
-        wake: Wake<'b, 'd>,
+        &mut self,
         bind: impl FnOnce() -> Result<
             (
                 property::Properties<resident::Shared<'d>, view::TableSpan>,
@@ -129,27 +101,23 @@ impl<'r, 'c, 'b, 'd> Pending<'r, 'c, 'b, 'd> {
             ),
             E,
         >,
-    ) -> Progress<'r, 'c, 'b, 'd, E> {
+    ) -> Result<(), E> {
         if self.is_bound() {
-            let error = E::from(failure::Error::Protocol(
+            return Err(E::from(failure::Error::Protocol(
                 wire::Fault::ContentHeaderDuplicate {
                     properties: true,
                     body: true,
                 },
-            ));
-            return Progress::Failed(self, error);
+            )));
         }
-        let (props, resident, body) = match bind() {
-            Ok(bound) => bound,
-            Err(error) => return Progress::Failed(self, error),
-        };
+        let (props, resident, body) = bind()?;
         let entry = self.slot.get_mut().get_mut();
         entry.content = Some(entry::Content {
             properties: props,
             resident,
             body,
         });
-        self.advance(wake)
+        Ok(())
     }
 
     pub(crate) fn is_bound(&self) -> bool {
@@ -157,32 +125,26 @@ impl<'r, 'c, 'b, 'd> Pending<'r, 'c, 'b, 'd> {
     }
 
     pub(crate) fn body<E: From<failure::Error>>(
-        mut self,
+        &mut self,
         length: usize,
-        wake: Wake<'b, 'd>,
         store: impl FnOnce(&mut payload::Payload<'b, 'd>) -> Result<(), E>,
-    ) -> Progress<'r, 'c, 'b, 'd, E> {
+    ) -> Result<(), E> {
         let entry = self.slot.get_mut().get_mut();
-        let content = match entry.content.as_mut() {
-            Some(content) => content,
-            None => {
-                let error = E::from(failure::Error::Protocol(wire::Fault::ContentBodyUnbound {
-                    actual: length,
-                }));
-                return Progress::Failed(self, error);
-            }
+        let Some(content) = entry.content.as_mut() else {
+            return Err(E::from(failure::Error::Protocol(
+                wire::Fault::ContentBodyUnbound { actual: length },
+            )));
         };
-        if let Err(error) = store(&mut content.body) {
-            return Progress::Failed(self, error);
-        }
-        self.advance(wake)
+        store(&mut content.body)
     }
 
-    fn advance<E>(self, wake: Wake<'b, 'd>) -> Progress<'r, 'c, 'b, 'd, E> {
-        let Self { slot, route } = self;
-        let content = match slot.get().get_ref().content.as_ref() {
+    pub(crate) fn advance(
+        pending: &mut Option<Self>,
+        wake: Wake<'b, 'd>,
+    ) -> Option<Complete<'r, 'c, 'b, 'd>> {
+        let content = match pending.as_ref()?.slot.get().get_ref().content.as_ref() {
             Some(content) if content.body.remaining() == 0 => content,
-            _ => return Progress::Pending(Self { slot, route }),
+            _ => return None,
         };
         let release = content.body.release();
         wake.complete(
@@ -190,8 +152,11 @@ impl<'r, 'c, 'b, 'd> Pending<'r, 'c, 'b, 'd> {
             release.fragments,
             content.resident || release.resident,
         );
+        let Some(Self { slot, route }) = pending.take() else {
+            unreachable!("pending");
+        };
         let slot = slot.commit();
-        Progress::Complete(match route {
+        Some(match route {
             Route::Delivery(route) => {
                 Complete::Delivery(Some(route.insert(Lease(slot, marker::PhantomData))))
             }

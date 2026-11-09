@@ -18,18 +18,6 @@ impl Frame<(), Writer> {
         encode: impl FnOnce(&mut Writer) -> P,
     ) -> Result<Frame<P>, failure::Error> {
         let proof = encode(&mut self.output);
-        self.finish(proof)
-    }
-
-    pub(in crate::service::port::domain) fn try_encode<P>(
-        mut self,
-        encode: impl FnOnce(&mut Writer) -> Result<P, failure::Error>,
-    ) -> Result<Frame<P>, failure::Error> {
-        let proof = encode(&mut self.output)?;
-        self.finish(proof)
-    }
-
-    fn finish<P>(self, proof: P) -> Result<Frame<P>, failure::Error> {
         let output = self
             .output
             .try_finish()
@@ -50,4 +38,7 @@ impl<P> Frame<P> {
     }
 }
 
-const _: () = assert!(std::mem::size_of::<Frame<()>>() == std::mem::size_of::<pool::Cursor>());
+const _: () = {
+    assert!(std::mem::size_of::<Frame<()>>() == std::mem::size_of::<pool::Cursor>());
+    assert!(std::mem::size_of::<Frame<(), Writer>>() == std::mem::size_of::<Writer>());
+};

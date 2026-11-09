@@ -1,7 +1,3 @@
-use std::convert::Infallible;
-use std::io::Write as _;
-
-use dope::core::driver::life::recovery;
 use dope_amqp091::config;
 use dope_amqp091::message::property::Properties;
 use dope_test::alloc;
@@ -10,6 +6,8 @@ use dope_test::alloc::Tracker;
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::Method;
 use crate::common::fiber::{Pinned, poll_once};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use dope_amqp091::failure;
@@ -62,7 +60,7 @@ fn reuses_id() {
                 |rt| {
                     let conn = rt.connection();
                     assert!(rt.block_on(dope_fiber::fiber!('_ => async move {
-                        let ready = wait_ready(conn).await.expect("ready");
+                        let ready = conn.observe().ready().await.expect("ready");
                         let first = conn.channels().open_auto().await.expect("first auto channel");
                         assert_eq!(first.id(), 1);
                         let late = first.queue().purge("late");
@@ -97,12 +95,7 @@ fn reuses_id() {
                             .expect("close");
                     })).is_ok(), "AMQP fiber must complete");
                 }, recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
@@ -112,7 +105,3 @@ fn reuses_id() {
 
 #[global_allocator]
 static ALLOCATOR: alloc::Tracker = Tracker::new();
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
-}

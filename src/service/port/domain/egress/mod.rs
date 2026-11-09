@@ -1,7 +1,7 @@
 use o3::buffer::pool;
 
 use crate::protocol::wire::Writer;
-use crate::service::port::domain::control::frame::Frame;
+use crate::service::port::domain::egress::frame::Frame;
 
 pub(super) mod frame;
 mod regular;
@@ -19,7 +19,7 @@ impl Egress {
         }
     }
 
-    pub(in crate::service::port::domain) fn control(&self) -> Option<Frame> {
+    pub(in crate::service::port::domain) fn control(&self) -> Option<Frame<(), Writer>> {
         let buffer = self.control.cursor()?;
         Some(Frame::new(Writer::new(buffer)))
     }

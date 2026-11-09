@@ -1,4 +1,4 @@
-use std::io::Read;
+use crate::common::amqp::io::Read;
 
 use crate::common::amqp::Error;
 use crate::common::amqp::phase::Opened;
@@ -13,12 +13,12 @@ pub struct Open<'a, IO> {
 
 impl<'a, IO: Read> Open<'a, IO> {
     pub fn recv(self) -> Result<Opened<'a, IO>, Error> {
-        let incoming = Incoming::read(&mut *self.io).map_err(Error::Io)?;
+        let incoming = Incoming::read(&mut *self.io)?;
         let expected = Route::new(0, 10, 40);
         if incoming.route() != expected {
             return Err(Error::route(expected, incoming.route()));
         }
-        incoming.discard().map_err(Error::Io)?;
+        incoming.discard()?;
         Ok(Opened { io: self.io })
     }
 }

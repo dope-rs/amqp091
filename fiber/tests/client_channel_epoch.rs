@@ -1,27 +1,20 @@
-use std::convert::Infallible;
-use std::io::Write as _;
 use std::time::Duration;
 
-use dope::core::driver::life::recovery;
 use dope_amqp091::config;
 
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::Method;
 use crate::common::fiber::{Pinned, poll_once};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
-use std::sync::mpsc;
-
-use dope_test::fibers::Yield;
 use dope_test::harness::peer::AcceptScript;
 
 use crate::common::client::*;
 
 #[test]
 fn releases_detached_open() {
-    let (req_tx, req_rx) = mpsc::channel();
-    let (drop_tx, drop_rx) = mpsc::channel();
-    let (clean_tx, clean_rx) = mpsc::channel();
     AcceptScript::with(
         move |acceptor| {
             let mut first = acceptor.accept().expect("first connection");
@@ -37,8 +30,13 @@ fn releases_detached_open() {
             Method::read(&mut first)
                 .expect("AMQP method")
                 .check(1, 20, 10).expect("AMQP method route");
-            req_tx.send(()).expect("publish detached open request");
-            drop_rx.recv().expect("detached open drop");
+            Method::read(&mut first)
+                .expect("observation channel")
+                .check(2, 20, 10).expect("channel.open");
+            Method::write(&mut first, 2, 20, 11, &[0; 4]).expect("pending open observed");
+            Method::read(&mut first)
+                .expect("post-drop purge")
+                .check(2, 50, 30).expect("queue.purge");
             drop(first);
 
             let mut second = acceptor.accept().expect("recovered connection");
@@ -51,8 +49,14 @@ fn releases_detached_open() {
             Peer::new(&mut second)
                 .open(TUNE)
                 .expect("AMQP broker handshake");
-            check_no_frame(&second, "detached open replay").expect("AMQP fixture");
-            clean_tx.send(()).expect("publish clean replay observation");
+            Method::read(&mut second)
+                .expect("retained observation channel")
+                .check(2, 20, 10).expect("only retained channel replays");
+            Method::write(&mut second, 2, 20, 11, &[0; 4]).expect("replayed observation channel");
+            Method::read(&mut second)
+                .expect("ready replay purge")
+                .check(2, 50, 30).expect("detached open must not replay");
+            Method::write(&mut second, 2, 50, 31, &[0; 4]).expect("replay observed");
             Method::read(&mut second)
                 .expect("AMQP method")
                 .check(1, 20, 10).expect("AMQP method route");
@@ -76,7 +80,7 @@ fn releases_detached_open() {
                 .deliveries(1)
                 .returns(1);
             let cap = config::Capacity::default()
-                .channels(1)
+                .channels(2)
                 .channel(chan)
                 .egress(config::Egress::new(2, 4096));
             let cfg = config::Config::new("guest", "guest")
@@ -90,42 +94,26 @@ fn releases_detached_open() {
                     let conn = rt.connection();
                     assert!(rt.block_on(dope_fiber::fiber!('_ => async move {
                 let target = conn.observe().ready().await.expect("first ready");
-                let epoch = conn.observe().read(|view| view.generation()).await;
                 let mut opening = Pinned::new(conn.channels().open_in(target, 1));
                 assert!(poll_once(opening.as_pin()).await.is_pending());
-                loop {
-                    match req_rx.try_recv() { Ok(()) => break, Err(mpsc::TryRecvError::Empty) => Yield::new().await, outcome => outcome.expect("broker ended before observing detached open"), }
-                }
+                // This retained channel occupies the added slot in both epochs.
+                let observer = conn.channels().open(2).await.expect("pending open observed");
                 drop(opening);
-                drop_tx.send(()).expect("publish detached open drop");
-
-                while conn.observe().read(|view| view.generation()).await == epoch {
-                    Yield::new().await;
-                }
-                loop {
-                    match clean_rx.try_recv() { Ok(()) => break, Err(mpsc::TryRecvError::Empty) => Yield::new().await, outcome => outcome.expect("broker ended before clean replay observation"), }
-                }
-                conn.channels().open(1).await.expect("generation reuse");
+                observer.queue().purge("dropped").await.expect_err("peer closes after observing drop");
+                conn.observe().retired(target.epoch()).await.expect("old epoch retired");
                 let ready = conn.observe().ready().await.expect("recovered ready");
+                observer.queue().purge("replayed").await.expect("only retained channel replayed");
+                conn.channels().open(1).await.expect("generation reuse");
                 conn.control()
                     .close(ready, 200, "done")
                     .await
                     .expect("connection close");
                 })).is_ok(), "AMQP fiber must complete");
                 }, recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("open generation broker");
         },
     )
     .expect("open generation broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

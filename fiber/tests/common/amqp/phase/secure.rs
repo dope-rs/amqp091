@@ -1,4 +1,4 @@
-use std::io::Read;
+use crate::common::amqp::io::Read;
 
 use crate::common::amqp::Error;
 use crate::common::amqp::phase::Started;
@@ -16,12 +16,12 @@ impl<'a, IO: Read> Secure<'a, IO> {
         let length = u32::try_from(response.len())
             .map_err(Error::Length)?
             .to_be_bytes();
-        let incoming = Incoming::read(&mut *self.io).map_err(Error::Io)?;
+        let incoming = Incoming::read(&mut *self.io)?;
         let expected = Route::new(0, 10, 21);
         if incoming.route() != expected {
             return Err(Error::route(expected, incoming.route()));
         }
-        incoming.compare(&[&length, response]).map_err(Error::Io)?;
+        incoming.compare(&[&length, response])?;
         Ok(Started { io: self.io })
     }
 }

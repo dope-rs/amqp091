@@ -6,14 +6,12 @@ use dope_amqp091::protocol::method::queue;
 use dope_fiber::abi::Fiber;
 use dope_fiber::context;
 use dope_test::alloc::Tracker;
-use dope_test::harness::support::gates::Barrier;
 use o3::base::cell::local;
 
 use crate::common::wake::Fault;
 
 pub struct Purge<'a, 'name, 'o, 'r, 'c, 'b, 'd> {
     pub(crate) call: &'a mut method::Call<'o, 'r, 'c, 'b, 'd, 0, queue::Purge<'name>>,
-    pub(crate) gate: Option<&'a Barrier>,
 }
 
 impl<'name, 'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b> Fiber<'d> for Purge<'_, 'name, 'o, 'r, 'c, 'b, 'd> {
@@ -30,11 +28,6 @@ impl<'name, 'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b> Fiber<'d> for Purge<'_, 'name, '
                 count: alloc.0,
                 bytes: alloc.1,
             }));
-        }
-        if poll.is_pending()
-            && let Some(gate) = this.gate.take()
-        {
-            gate.arrive().map_err(Fault::Notify)?;
         }
         poll.map_err(Fault::Runtime)
     }

@@ -1,16 +1,18 @@
+use dope_test::harness::peer;
 use std::array;
-use std::convert::Infallible;
-use std::io::{ErrorKind, Read as _, Write as _};
 
-use dope::core::driver::life::recovery;
+use dope::manifold::timing;
 use dope_amqp091::config;
 use dope_amqp091::message::field::view;
 use o3::buffer::{hold, resident};
 
 use crate::common::amqp::Peer;
+use crate::common::amqp::app::Endpoint;
 use crate::common::amqp::wire::{Frame, Method};
 use crate::common::basic::{self, returned};
 use crate::common::fiber::{Pinned, poll_once};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use dope_amqp091::failure;
@@ -66,7 +68,7 @@ fn rejects_content_limits() {
                     |rt| {
                         let conn = rt.connection();
                         assert!(rt.block_on(dope_fiber::fiber!('_ => async move {
-                            wait_ready(conn).await.expect("ready");
+                            conn.observe().ready().await.expect("ready");
                             let channel = conn.channels().open(1).await.expect("open channel");
                             let mut returned = Pinned::new(channel.next_return());
                             assert!(poll_once(returned.as_pin()).await.is_pending());
@@ -92,12 +94,7 @@ fn rejects_content_limits() {
                             );
                         })).is_ok(), "AMQP fiber must complete");
                     }, recover,
-                    |result| {
-                        result
-                            .as_ref()
-                            .map_err(|error| error.kind())
-                            .expect("endpoint completion");
-                    },
+                    complete,
                 );
                 broker.finish().expect("broker");
             },
@@ -176,7 +173,7 @@ fn wakes_fitting_channels() {
                     let conn = rt.connection();
                     assert!(
                         rt.block_on(dope_fiber::fiber!('_ => async move {
-                            let ready = wait_ready(conn).await.expect("ready");
+                            let ready = conn.observe().ready().await.expect("ready");
                             let first = conn.channels().open(1).await.expect("first channel");
                             let second = conn.channels().open(2).await.expect("second channel");
                             let third = conn.channels().open(3).await.expect("third channel");
@@ -218,12 +215,7 @@ fn wakes_fitting_channels() {
                     );
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
@@ -301,7 +293,7 @@ fn wakes_property_waiter() {
                 |rt| {
                     let conn = rt.connection();
                     assert!(rt.block_on(dope_fiber::fiber!('_ => async move {
-                        let ready = wait_ready(conn).await.expect("ready");
+                        let ready = conn.observe().ready().await.expect("ready");
                         let first = conn.channels().open(1).await.expect("first channel");
                         let second = conn.channels().open(2).await.expect("second channel");
                         let mut first_return = Pinned::new(first.next_return());
@@ -345,12 +337,7 @@ fn wakes_property_waiter() {
                     })).is_ok(), "AMQP fiber must complete");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
@@ -417,7 +404,7 @@ fn reuses_fragment_pool() {
                     let conn = rt.connection();
                     assert!(
                         rt.block_on(dope_fiber::fiber!('_ => async move {
-                            wait_ready(conn).await.expect("ready");
+                            conn.observe().ready().await.expect("ready");
                             let channel = conn.channels().open(1).await.expect("open channel");
                             let mut first = Pinned::new(channel.next_return());
                             assert!(poll_once(first.as_pin()).await.is_pending());
@@ -467,12 +454,7 @@ fn reuses_fragment_pool() {
                     );
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
@@ -501,20 +483,24 @@ fn rejects_fragment_exhaustion() {
                 stream.read_wait(None).expect("wait for client close");
                 match stream.read(&mut [0]) {
                     Ok(0) => {}
-                    Err(error) if error.kind() == ErrorKind::ConnectionReset => {}
+                    Err(peer::Error::Syscall(error)) if error.is_reset() => {}
                     result => panic!("client did not close: {result:?}"),
                 }
             },
             |broker| {
-                with(
+                Endpoint::new(
                     broker.addr(),
                     config::Config::new("guest", "guest")
                         .expect("config")
                         .capacity(config::Capacity::default().body(body)),
+                )
+                .shutdown(broker.completion())
+                .try_check::<timing::Throughput, _>(
+                    POLICY,
                     |rt| {
                         let conn = rt.connection();
-                        rt.block_on(dope_fiber::fiber!('_ => async move {
-                            wait_ready(conn).await.expect("ready");
+                        rt.until_shutdown(dope_fiber::fiber!('_ => async move {
+                            conn.observe().ready().await.expect("ready");
                             let channel = conn.channels().open(1).await.expect("channel");
                             let mut returned = Pinned::new(channel.next_return());
                             assert!(poll_once(returned.as_pin()).await.is_pending());
@@ -535,15 +521,11 @@ fn rejects_fragment_exhaustion() {
                             };
                             assert!(cause.is_same(other));
                         }))
+                        .expect("peer shutdown")
                         .expect("fragment failure must wake the client");
                     },
                     recover,
-                    |result| {
-                        result
-                            .as_ref()
-                            .map_err(|error| error.kind())
-                            .expect("endpoint completion");
-                    },
+                    complete,
                 );
                 broker.finish().expect("broker");
             },
@@ -582,20 +564,24 @@ fn rejects_fragment_cycle() {
             stream.read_wait(None).expect("wait for client close");
             match stream.read(&mut [0]) {
                 Ok(0) => {}
-                Err(error) if error.kind() == ErrorKind::ConnectionReset => {}
+                Err(peer::Error::Syscall(error)) if error.is_reset() => {}
                 result => panic!("client did not close: {result:?}"),
             }
         },
         |broker| {
-            with(
+            Endpoint::new(
                 broker.addr(),
                 config::Config::new("guest", "guest")
                     .expect("config")
                     .capacity(config::Capacity::default().body(config::Body::new(3, 6, 1))),
+            )
+            .shutdown(broker.completion())
+            .try_check::<timing::Throughput, _>(
+                POLICY,
                 |rt| {
                     let conn = rt.connection();
-                    rt.block_on(dope_fiber::fiber!('_ => async move {
-                        wait_ready(conn).await.expect("ready");
+                    rt.until_shutdown(dope_fiber::fiber!('_ => async move {
+                        conn.observe().ready().await.expect("ready");
                         let first = conn.channels().open(1).await.expect("first channel");
                         let second = conn.channels().open(2).await.expect("second channel");
                         let mut left = Pinned::new(first.next_return());
@@ -623,15 +609,11 @@ fn rejects_fragment_cycle() {
                             assert!(cause.is_same(&other));
                         }
                     }))
+                    .expect("peer shutdown")
                     .expect("fragment cycle must wake both channels");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
@@ -673,12 +655,12 @@ fn rejects_resident_cycle() {
                 stream.read_wait(None).expect("wait for client close");
                 match stream.read(&mut [0]) {
                     Ok(0) => {}
-                    Err(error) if error.kind() == ErrorKind::ConnectionReset => {}
+                    Err(peer::Error::Syscall(error)) if error.is_reset() => {}
                     result => panic!("client did not close: {result:?}"),
                 }
             },
             |broker| {
-                with(
+                Endpoint::new(
                     broker.addr(),
                     config::Config::new("guest", "guest")
                         .expect("config")
@@ -688,10 +670,14 @@ fn rejects_resident_cycle() {
                                 .channel(config::Channel::new(1, 0, 0, 0, 2))
                                 .body(config::Body::new(1500, 4096, 1)),
                         ),
+                )
+                .shutdown(broker.completion())
+                .try_check::<timing::Throughput, _>(
+                    POLICY,
                     |rt| {
                         let conn = rt.connection();
-                        rt.block_on(dope_fiber::fiber!('_ => async move {
-                            wait_ready(conn).await.expect("ready");
+                        rt.until_shutdown(dope_fiber::fiber!('_ => async move {
+                            conn.observe().ready().await.expect("ready");
                             let first = conn.channels().open(1).await.expect("first channel");
                             let second = if count == 2 {
                                 Some(conn.channels().open(2).await.expect("second channel"))
@@ -731,23 +717,15 @@ fn rejects_resident_cycle() {
                                 assert!(cause.is_same(&other));
                             }
                         }))
+                        .expect("peer shutdown")
                         .expect("resident failure must wake the client");
                     },
                     recover,
-                    |result| {
-                        result
-                            .as_ref()
-                            .map_err(|error| error.kind())
-                            .expect("endpoint completion");
-                    },
+                    complete,
                 );
                 broker.finish().expect("broker");
             },
         )
         .expect("resident broker");
     }
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

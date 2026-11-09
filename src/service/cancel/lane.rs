@@ -41,3 +41,9 @@ impl<const ID: u8> Lane<'_, ID> for lanes::Publish {
 
     const KIND: lanes::Kind = lanes::Kind::Publish;
 }
+
+impl<const ID: u8> Lane<'_, ID> for lanes::Control {
+    type Identity = methods::MethodKey;
+
+    const KIND: lanes::Kind = lanes::Kind::Control;
+}

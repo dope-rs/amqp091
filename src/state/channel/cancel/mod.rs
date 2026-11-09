@@ -27,21 +27,14 @@ impl<'c, 'b, 'd, const ID: u8> Access<'_, 'c, 'b, 'd, ID> {
     pub(crate) fn reap(&mut self, kind: lanes::Kind, id: num::NonZero<u64>) -> Option<Outcome> {
         match kind {
             lanes::Kind::Reservation => Some(Outcome::Reservation),
+            lanes::Kind::Control => None,
             lanes::Kind::Method => Some(Outcome::Method(self.methods.reap(
                 &mut self.control.phase,
                 self.publishing.is_active(),
                 id,
             ))),
             lanes::Kind::Consumer => self.consumers.read().cancel_key(id).map(Outcome::Consumer),
-            lanes::Kind::Confirm => {
-                if !self.control.has_confirms() {
-                    return None;
-                }
-                match self.confirm.reap(id) {
-                    confirms::Reap::Removed => Some(Outcome::Confirm),
-                    confirms::Reap::Missing => None,
-                }
-            }
+            lanes::Kind::Confirm => self.confirm.reap(id).map(|()| Outcome::Confirm),
             lanes::Kind::Publish => {
                 let key = streams::Key::new(id);
                 self.publishing.get(key)?.finish();

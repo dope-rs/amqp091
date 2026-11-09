@@ -1,27 +1,19 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
-
 use crate::common::amqp::wire::Method;
 use crate::common::amqp::{Greeting, Peer, Tune};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
-use std::io::{ErrorKind, Read as _, Write as _};
 use std::time::Duration;
 
-use dope::core::platform::wake;
 use dope_amqp091::failure;
 use dope_amqp091::message::field::{Table, Value};
 use dope_test::harness::peer::TcpScript;
 
-use crate::common::fiber::wait;
 use crate::common::recovery::client::with;
 
 #[test]
 fn rejects_large_method() {
-    let (seen, observe) = wake::Ends::blocking()
-        .expect("frame rejection observation")
-        .split();
     TcpScript::with(
         move |stream| {
             stream
@@ -42,18 +34,11 @@ fn rejects_large_method() {
                 )
                 .expect("Channel.OpenOk");
 
-            stream
-                .read_wait(Some(Duration::from_millis(250)))
-                .expect("short read timeout");
-            let mut byte = [0_u8; 1];
-            let error = stream
-                .read(&mut byte)
-                .expect_err("local oversized method changed the transport");
-            assert!(matches!(
-                error.kind(),
-                ErrorKind::WouldBlock | ErrorKind::TimedOut
-            ));
-            observe.notify().expect("frame rejection observation");
+            Method::read(stream)
+                .expect("method after local rejection")
+                .check(1, 50, 30)
+                .expect("oversized method must not precede Queue.Purge");
+            Method::write(stream, 1, 50, 31, &[0; 4]).expect("Queue.PurgeOk");
         },
         |broker| {
             with(
@@ -71,15 +56,10 @@ fn rejects_large_method() {
                         error.error(),
                         failure::Error::FrameTooLarge { max: 4096, .. }
                     );
-                    wait(&seen).await.expect("frame rejection observation");
+                    channel.queue().purge("queue").await.expect("transport survives local rejection");
                 })).is_ok(), "AMQP fiber must complete");
                 }, recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("scripted broker thread");
         },
@@ -120,19 +100,10 @@ fn rejects_small_frame_max() {
                     std::assert_matches!(error.error(), failure::Error::Protocol(_));
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("scripted broker thread");
         },
     )
     .expect("scripted broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

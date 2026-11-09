@@ -8,6 +8,7 @@ use crate::adapter::{conn, core};
 use crate::failure;
 use crate::protocol::method;
 use crate::state::channel::cancel::lanes;
+use crate::state::channel::methods::DetachAction;
 
 #[repr(transparent)]
 pub struct Methods<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> {
@@ -44,19 +45,26 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Methods<'o, 'r, 'c, 'b, '
             let reaped = self
                 .core
                 .cancel()
-                .try_reap::<lanes::Method, _>(route.index, lease.raw(), |cancel| {
-                    Some(state.methods.reap(state.phase, active, cancel.identity()))
+                .try_reap::<lanes::Method, _>(route.index, lease.raw(), |_, identity| {
+                    Some(state.methods.reap(state.phase, active, identity))
                 })?
                 .transpose()?;
-            let cancel = state.methods.enqueue(state.phase, expect, |key| {
-                self.core
-                    .cancel()
-                    .issue(route.index, lease.raw(), lanes::Slot::from(key), key)
-            });
             let (action, next) = match reaped {
                 Some(result) => (Some(result.action), result.control),
                 None => (None, None),
             };
+            let cancel = if matches!(action, Some(DetachAction::CloseAbandonedOpen)) {
+                Err(failure::Error::Closed)
+            } else {
+                state.methods.enqueue(state.phase, expect, |key| {
+                    self.core
+                        .cancel()
+                        .issue(route.index, lease.raw(), lanes::Slot::from(key), key)
+                })
+            };
+            if expect == method::Kind::CloseOk && cancel.is_ok() {
+                route.channel.begin_close(self.core.waiters());
+            }
             Ok::<_, failure::Error>((route.index.lane(), cancel, action, next))
         });
         let entry = match result {
@@ -75,7 +83,9 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Methods<'o, 'r, 'c, 'b, '
             self.core
                 .send(access.reborrow(), route.epoch().raw(), lease.raw(), next);
         }
-        self.core.permits().wake_channel(entry.0);
+        if entry.2.is_some() || expect == method::Kind::CloseOk {
+            self.core.permits().wake_channel(entry.0);
+        }
         if let Some(action) = entry.2 {
             self.core.detach(access, lease, action);
         }

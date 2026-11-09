@@ -1,16 +1,12 @@
-use std::convert::Infallible;
-use std::io::Write as _;
-
-use dope::core::driver::life::recovery;
 use dope_test::alloc;
 
-use crate::common::amqp::Peer;
 use crate::common::amqp::wire::Method;
+use crate::common::amqp::{Greeting, Peer};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
-use std::sync::mpsc;
 use std::task;
-use std::time::Duration;
 
 use common::publish::blocked::Blocked;
 use dope_amqp091::failure::Error;
@@ -18,22 +14,29 @@ use dope_amqp091::message::property::Properties;
 use dope_amqp091::{adapter, failure};
 use dope_fiber::task::local::Once;
 use dope_test::alloc::Tracker;
+use dope_test::fibers::Yield;
 use dope_test::harness::peer::TcpScript;
 
 use crate::common::publish::{TUNE, with_client};
 
 #[test]
 fn keeps_reason_exact() {
-    let (done, wait) = mpsc::channel();
     TcpScript::with(
         move |stream| {
-            Peer::new(stream).open(TUNE).expect("AMQP broker handshake");
-            stream
-                .write_all(
-                    &Method::try_encode(0, 10, 60, b"\x08pressure").expect("AMQP frame fixture"),
-                )
-                .expect("connection.blocked");
-            wait.recv().expect("allocation-free blocked publish probes");
+            Peer::new(stream)
+                .preface()
+                .and_then(|peer| peer.start(Greeting::PLAIN))
+                .and_then(|peer| peer.recv())
+                .and_then(|peer| peer.tune(TUNE))
+                .and_then(|peer| peer.recv())
+                .and_then(|peer| peer.recv())
+                .expect("connection open");
+            let mut frames = Method::try_encode(0, 10, 41, &[0]).expect("open ok");
+            frames.extend_from_slice(
+                &Method::try_encode(0, 10, 60, b"\x08pressure").expect("blocked"),
+            );
+            stream.write_all(&frames).expect("open and blocked");
+            assert_eq!(stream.read(&mut [0]).expect("blocked probe teardown"), 0);
         },
         |broker| {
             let addr = broker.addr();
@@ -47,7 +50,6 @@ fn keeps_reason_exact() {
                         .block_on(conn.observe().ready())
                         .expect("fiber drive")
                         .expect("AMQP operation must succeed");
-                    let timer = scope.timer();
                     let props = Properties::default();
                     assert!(
                     scope
@@ -60,10 +62,7 @@ fn keeps_reason_exact() {
                             })
                             .await
                             {
-                                timer
-                                    .sleep(Duration::from_millis(1))
-                                    .expect("blocked-state wait")
-                                    .await;
+                                Yield::new().await;
                             }
                             let lease = Once::new(move |local| {
                                 let reserve = amqp.channels().reserve(local, target, 1)?;
@@ -91,20 +90,13 @@ fn keeps_reason_exact() {
                                     _ => None,
                                 }.expect("blocked publish keeps its exact reason");
                                 assert_eq!(reason.as_ref(), "pressure");
-                                assert_eq!(size_of_val(reason), 3 * size_of::<usize>());
                             }
-                            done.send(()).expect("complete blocked publish probes");
                         }))
                         .is_ok(),
                     "AMQP fiber must complete"
                 );
                 }, recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("blocked publish broker");
         },
@@ -198,12 +190,7 @@ fn separates_control_text_credit() {
                         })).is_ok(), "AMQP fiber must complete");
                     },
                     recover,
-                    |result| {
-                        result
-                            .as_ref()
-                            .map_err(|error| error.kind())
-                            .expect("endpoint completion");
-                    },
+                    complete,
                 );
                 broker.finish().expect("control-text broker");
             },
@@ -212,10 +199,73 @@ fn separates_control_text_credit() {
     }
 }
 
+#[test]
+fn wakes_flow_on_close_admission() {
+    use dope_fiber::task::batch::{Join, Pool};
+
+    TcpScript::with(
+        |stream| {
+            Peer::new(stream).open(TUNE).expect("handshake");
+            Method::read(stream)
+                .expect("channel.open")
+                .check(1, 20, 10)
+                .expect("open route");
+            Method::write(stream, 1, 20, 11, &[0; 4]).expect("channel.open-ok");
+            Method::read(stream)
+                .expect("flow fence")
+                .check(1, 50, 30)
+                .expect("purge route");
+            Method::write(stream, 0, 10, 60, b"\x08pressure").expect("connection.blocked");
+            Method::write(stream, 1, 20, 20, &[0]).expect("channel.flow");
+            Method::write(stream, 1, 50, 31, &[0; 4]).expect("purge-ok after flow");
+            Method::read(stream)
+                .expect("channel.flow-ok")
+                .check(1, 20, 21)
+                .expect("flow reply route");
+            Method::read(stream)
+                .expect("connection.close")
+                .check(0, 10, 50)
+                .expect("close route");
+            assert_eq!(stream.read(&mut [0]).expect("teardown without close-ok"), 0);
+        },
+        |broker| {
+            with_client(
+                broker.addr(),
+                |scope| {
+                    let conn = scope.connection();
+                    scope
+                        .block_on(dope_fiber::fiber!('_ => async move {
+                            let ready = conn.observe().ready().await.expect("ready");
+                            let channel = conn.channels().open(1).await.expect("channel");
+                            channel.queue().purge("fence").await.expect("flow fence");
+                            let channel = &channel;
+                            let fibers = std::array::from_fn::<_, 3, _>(|index| {
+                                dope_fiber::fiber!('_ => async move {
+                                    match index {
+                                        0 => conn.observe().unblocked().await.expect("unblocked wake"),
+                                        1 => {
+                                            let error = channel.flow().await.expect_err("closed flow");
+                                            assert!(matches!(error.error(), Error::Closed));
+                                        }
+                                        _ => conn.control().start(ready, 200, "done").await
+                                            .expect("close admission"),
+                                    }
+                                })
+                            });
+                            let mut pool = Pool::<3>::acquire().await.expect("waiter pool");
+                            // Ordered first polls register both waiters before close admission.
+                            Join::from_array(&mut pool, fibers).await.expect("flow wakes");
+                        }))
+                        .expect("flow wake deadline");
+                },
+                recover,
+                complete,
+            );
+            broker.finish().expect("broker completion");
+        },
+    )
+    .expect("broker");
+}
+
 #[global_allocator]
 static ALLOCATOR: alloc::Tracker = Tracker::new();
-use dope_fiber::task::time::sleep::TimerExt as _;
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
-}

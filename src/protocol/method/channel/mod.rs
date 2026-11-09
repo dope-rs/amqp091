@@ -3,9 +3,8 @@ use o3::buffer::{self};
 
 use crate::failure;
 use crate::failure::wire::Fault;
-use crate::protocol::method::Spec as _;
 use crate::protocol::wire::text::{fields, resident, short};
-use crate::protocol::wire::{Write, frame, reader, schema};
+use crate::protocol::wire::{reader, schema};
 use crate::protocol::{class, method, wire};
 
 mod event;
@@ -100,14 +99,6 @@ pub struct FlowOk {
 
 impl method::Spec for FlowOk {
     const ID: method::Id = FLOW_OK;
-}
-
-impl FlowOk {
-    pub(crate) fn read(reader: &mut reader::Reader<'_>) -> Result<Self, fields::Decode> {
-        Ok(Self {
-            active: reader.read::<u8>()? & 1 == 1,
-        })
-    }
 }
 
 impl method::Args for FlowOk {
@@ -205,8 +196,6 @@ impl method::Unit for CloseOk {
     const KIND: method::Kind = method::Kind::CloseOk;
 }
 
-impl method::Encode for CloseOk {
-    fn write<S: Write + AsMut<[u8]> + ?Sized>(&self, out: &mut S, channel: u16) {
-        frame::Encoder::new(out).method(channel, Self::ID.bytes());
-    }
+impl method::Args for CloseOk {
+    fn write_args<S: wire::Put>(&self, _: &mut S) {}
 }

@@ -1,16 +1,11 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
-
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::Method;
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
-use std::io::{self, Read as _, Write as _};
 use std::time::Duration;
 
-use dope::core::platform::wake;
 use dope_amqp091::failure;
-use dope_fiber::task::time::sleep::TimerExt as _;
 use dope_test::harness::peer::{AcceptScript, TcpScript};
 
 use crate::common::recovery::TUNE;
@@ -64,12 +59,7 @@ fn retains_close_when_egress_is_full() {
                 })).expect("fiber completion");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
@@ -82,9 +72,6 @@ fn retains_disconnect_cause() {
     const CODE: u16 = 320;
     const TEXT: &str = "scenario rollover";
 
-    let (ready, release) = wake::Ends::blocking()
-        .expect("first readiness gate")
-        .split();
     AcceptScript::with(
         move |acceptor| {
             let mut first = acceptor.accept().expect("first connection");
@@ -97,9 +84,10 @@ fn retains_disconnect_cause() {
             Peer::new(&mut first)
                 .open(TUNE)
                 .expect("AMQP broker handshake");
-            ready
-                .wait_timeout(Duration::from_secs(10))
-                .expect("first readiness observed");
+            Method::read(&mut first)
+                .expect("first ready channel request")
+                .check(1, 20, 10)
+                .expect("Channel.Open");
             let mut args = Vec::with_capacity(TEXT.len() + 7);
             args.extend_from_slice(&CODE.to_be_bytes());
             args.push(TEXT.len().try_into().expect("short close text"));
@@ -124,23 +112,19 @@ fn retains_disconnect_cause() {
             Peer::new(&mut second)
                 .open(TUNE)
                 .expect("AMQP broker handshake");
-            io::copy(&mut second, &mut io::sink()).expect("endpoint teardown");
+            while second.read(&mut [0; 256]).expect("endpoint teardown") != 0 {}
         },
         move |broker| {
             with(
                 broker.addr(),
                 move |rt| {
                     let conn = rt.connection();
-                    let timer = rt.timer();
-
                     assert!(rt.block_on(dope_fiber::fiber!('_ => async move {
-                    conn.observe().ready().await.expect("first ready");
-                    release.notify().expect("first readiness observed");
-
-                    while conn.observe().read(|view| view.generation()).await != 2 {
-                        timer.sleep(Duration::from_millis(1)).expect("reconnect wait").await;
-                    }
+                    let ready = conn.observe().ready().await.expect("first ready");
+                    assert!(conn.channels().open_in(ready, 1).await.is_err());
+                    conn.observe().ready().await.expect("reconnected ready");
                     conn.observe().read(|view| {
+                        assert_eq!(view.generation(), 2);
                         let cause = (view.last_exit()).expect("generation 1 disconnect cause");
                         assert_eq!(cause.generation(), 1);
                         let (reply_code, reply_text, class_id, method_id,) = match cause.error() { failure::Error::Server {
@@ -155,19 +139,10 @@ fn retains_disconnect_cause() {
                     }).await;
                 })).is_ok(), "AMQP fiber must complete");
                 }, recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("scripted broker thread");
         },
     )
     .expect("scripted broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

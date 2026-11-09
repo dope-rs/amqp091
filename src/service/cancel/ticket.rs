@@ -9,7 +9,7 @@ use crate::state::channels;
 
 #[must_use = "an exact cancellation ticket must be retained or used"]
 pub struct Ticket<'a, 'd, L: Lane<'d, ID>, const ID: u8> {
-    entry: values::Snapshot<'a, registry::Active<'d, ID>, 5, round::Place>,
+    entry: values::Snapshot<'a, registry::Active<'d, ID>, { lanes::Kind::COUNT }, round::Place>,
     identity: L::Identity,
     owner: &'a Coord<'d, ID>,
 }
@@ -78,14 +78,9 @@ impl<'a, 'd, L: Lane<'d, ID>, const ID: u8> Ticket<'a, 'd, L, ID> {
     }
 
     pub(crate) fn cancel(&self) {
-        let queued = self.entry.set(|active| {
-            if active.identity != self.identity.into() {
-                return None;
-            }
-            Some(!self.owner.cancellations.has_pending())
-        });
-        if matches!(queued, Some((round::Insertion::Inserted, true))) {
-            self.owner.waiters.wake_flow();
-        }
+        // Queue membership keeps Coord runnable until this cancellation is drained.
+        let _ = self
+            .entry
+            .set(|active| (active.identity == self.identity.into()).then_some(()));
     }
 }

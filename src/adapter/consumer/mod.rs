@@ -180,10 +180,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Consumers<'o, 'r, 'c, 'b,
                     if route.channel.control().phase == Phase::Closed {
                         return None;
                     }
-                    let freed = match route.channel.consumers().detach(key.raw(), store) {
-                        consumer::Removal::Removed(freed) => freed,
-                        consumer::Removal::Missing => Freed::Available,
-                    };
+                    let freed = route.channel.consumers().detach(key.raw(), store);
                     Some((task::Poll::Ready(None), freed))
                 }
                 Next::Delivery {
@@ -194,13 +191,9 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Consumers<'o, 'r, 'c, 'b,
         });
         match view {
             crate::service::EpochAccess::Live(Some(Some((poll, freed)))) => {
-                match freed {
-                    Freed::Available => {}
-                    Freed::Route => self
-                        .core
-                        .wake_route(target.epoch().raw())
-                        .map_err(failure::Runtime::from)?,
-                }
+                self.core
+                    .wake_route(target.epoch().raw(), freed)
+                    .map_err(failure::Runtime::from)?;
                 Ok(poll)
             }
             crate::service::EpochAccess::Terminal(cause) => Err(cause.branded()),

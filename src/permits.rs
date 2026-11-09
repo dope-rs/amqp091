@@ -41,6 +41,7 @@ impl<'d> Registry<'_, 'd> {
             driver,
             plan.capacity,
             plan.lanes,
+            // The source's borrow carries 'd, bounding the fresh queue scope by its driver.
             (driver, source),
             |(_, source), queue| run(source, Registry(queue)),
         )
@@ -80,6 +81,10 @@ impl<'scope, 'd: 'scope> Registry<'scope, 'd> {
 
     pub(crate) fn wake_credit(&self) -> wake::Once {
         self.0.wake_first()
+    }
+
+    pub(crate) fn cancel(&self, slot: &mut queue::Registration<'_, 'd, fifo::Scope<'scope>>) {
+        self.0.cancel(slot);
     }
 
     pub(crate) fn wake_channel(&self, lane: fifo::Index<'scope>) {

@@ -1,4 +1,4 @@
-use std::{hash, num::NonZero, str};
+use std::{hash, mem, num::NonZero, str};
 
 use o3::buffer::resident::copy;
 use o3::buffer::{self, storage};
@@ -6,7 +6,7 @@ use o3::buffer::{self, storage};
 use crate::failure::{self, wire};
 use crate::protocol::wire::text::resident;
 
-pub(in crate::protocol::wire) mod raw;
+pub(in crate::protocol) mod raw;
 
 /// Admits a short string at compile time and rejects invalid literals.
 #[macro_export]
@@ -30,9 +30,9 @@ pub enum Error {
 }
 
 impl Error {
-    fn into_error(self, kind: Resource) -> failure::Error {
+    fn into_error(self, kind: Resource, max: usize) -> failure::Error {
         match self {
-            Self::Length { actual } => kind.too_long(actual),
+            Self::Length { actual } => kind.too_long(actual, max),
             Self::Nul { offset } => failure::Error::Protocol(wire::Fault::TextNul {
                 kind: kind.encoding(),
                 offset,
@@ -46,6 +46,11 @@ pub struct Short<'a>(pub(in crate::protocol::wire::text) &'a str);
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Name<'a>(Short<'a>);
+
+pub(crate) struct InlineName {
+    bytes: [mem::MaybeUninit<u8>; Name::MAX as usize],
+    len: u8,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Resource {
@@ -69,15 +74,7 @@ impl Resource {
         }
     }
 
-    fn too_long(self, len: usize) -> failure::Error {
-        let max = match self {
-            Self::Short => u8::MAX as usize,
-            Self::Queue
-            | Self::Exchange
-            | Self::VirtualHost
-            | Self::BrokerQueue
-            | Self::BrokerConsumer => 127,
-        };
+    fn too_long(self, len: usize, max: usize) -> failure::Error {
         failure::Error::Encoding(wire::Encode::Length {
             kind: self.encoding(),
             actual: len,
@@ -102,7 +99,7 @@ impl<'a> Short<'a> {
     pub const EMPTY: Self = Self("");
 
     pub fn new(value: &'a str) -> Result<Self, failure::Error> {
-        Self::try_new(value).map_err(|error| error.into_error(Resource::Short))
+        Self::try_new(value).map_err(|error| error.into_error(Resource::Short, u8::MAX as usize))
     }
 
     pub const fn try_new(value: &'a str) -> Result<Self, Error> {
@@ -110,9 +107,9 @@ impl<'a> Short<'a> {
     }
 
     pub fn resource(value: &'a str, kind: Resource) -> Result<Name<'a>, failure::Error> {
-        Self::check(value, 127)
+        Self::check(value, usize::from(Name::MAX))
             .map(Name)
-            .map_err(|error| error.into_error(kind))
+            .map_err(|error| error.into_error(kind, usize::from(Name::MAX)))
     }
 
     pub fn value(self) -> &'a str {
@@ -152,9 +149,7 @@ impl<'a> Short<'a> {
             }
         };
         // SAFETY: copying the validated text preserves UTF-8 and its short-string bounds.
-        Ok(resident::Exact(unsafe {
-            buffer::raw::Text::from_utf8(owner)
-        }))
+        Ok(resident::Exact(unsafe { buffer::raw::utf8(owner) }))
     }
 
     const fn check(value: &'a str, max: usize) -> Result<Self, Error> {
@@ -176,14 +171,16 @@ impl<'a> Short<'a> {
 }
 
 impl<'a> Name<'a> {
+    const MAX: u8 = 127;
+
     pub const EMPTY: Self = Self(Short::EMPTY);
 
     pub(in crate::protocol) fn new(
         value: Short<'a>,
         kind: Resource,
     ) -> Result<Self, failure::Error> {
-        if value.len() > 127 {
-            return Err(kind.too_long(usize::from(value.len())));
+        if value.len() > Self::MAX {
+            return Err(kind.too_long(usize::from(value.len()), usize::from(Self::MAX)));
         }
         Ok(Self(value))
     }

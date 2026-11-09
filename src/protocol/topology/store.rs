@@ -54,8 +54,7 @@ pub(crate) struct QueueHold<'c, 'b, 'd, const ID: u8> {
 
 /// One outstanding credit in the sole store of this key kind in its port scope.
 pub(crate) struct Hold<'c, K: Key> {
-    owner: K::Owner,
-    scope: marker::PhantomData<fn(&'c ()) -> &'c ()>,
+    scope: marker::PhantomData<fn(&'c K) -> &'c K>,
 }
 
 pub(crate) enum Upsert<K, H> {
@@ -73,9 +72,7 @@ pub(crate) trait Release<'c, 'd, const ID: u8> {
 }
 
 pub(crate) trait Key: Copy + Eq {
-    type Owner: Copy;
-
-    fn new(raw: u32, owner: Self::Owner) -> Self;
+    fn new(raw: u32) -> Self;
 
     fn get(self) -> usize;
 }
@@ -85,7 +82,6 @@ pub(crate) struct Store<'c, T, K: Key> {
     identities: flat::Table<K>,
     limit: usize,
     held: usize,
-    owner: K::Owner,
     scope: marker::PhantomData<fn(&'c ()) -> &'c ()>,
 }
 
@@ -116,9 +112,8 @@ impl<'c, 'b, 'd, const ID: u8> Unindexed<'c, 'b, 'd, ID> {
 }
 
 impl<'d, const ID: u8> Key for Exchange<'d, ID> {
-    type Owner = Owner<'d, ID>;
-    fn new(raw: u32, owner: Self::Owner) -> Self {
-        Self(raw, owner)
+    fn new(raw: u32) -> Self {
+        Self(raw, Owner::new())
     }
 
     fn get(self) -> usize {
@@ -127,9 +122,8 @@ impl<'d, const ID: u8> Key for Exchange<'d, ID> {
 }
 
 impl<'d, const ID: u8> Key for QueueBinding<'d, ID> {
-    type Owner = Owner<'d, ID>;
-    fn new(raw: u32, owner: Self::Owner) -> Self {
-        Self(raw, owner)
+    fn new(raw: u32) -> Self {
+        Self(raw, Owner::new())
     }
 
     fn get(self) -> usize {
@@ -138,9 +132,8 @@ impl<'d, const ID: u8> Key for QueueBinding<'d, ID> {
 }
 
 impl<'d, const ID: u8> Key for Link<'d, ID> {
-    type Owner = Owner<'d, ID>;
-    fn new(raw: u32, owner: Self::Owner) -> Self {
-        Self(raw, owner)
+    fn new(raw: u32) -> Self {
+        Self(raw, Owner::new())
     }
 
     fn get(self) -> usize {
@@ -162,7 +155,6 @@ impl<'c, T, K: Key> Store<'c, T, K> {
     pub(super) fn try_new<'d>(
         cap: capacity::Count,
         ids: map::Plan,
-        owner: K::Owner,
         _: &permits::Registry<'c, 'd>,
     ) -> Result<Self, alloc::Error> {
         Ok(Self {
@@ -170,7 +162,6 @@ impl<'c, T, K: Key> Store<'c, T, K> {
             identities: flat::Table::try_new(ids)?,
             limit: cap.get(),
             held: 0,
-            owner,
             scope: marker::PhantomData,
         })
     }
@@ -181,17 +172,14 @@ impl<'c, T, K: Key> Store<'c, T, K> {
         }
         self.held += 1;
         Ok(Hold {
-            owner: self.owner,
-            scope: self.scope,
+            scope: marker::PhantomData,
         })
     }
 
     /// Only reserve creates this noncopyable credit, after incrementing this
     /// scope's sole matching store. Every successful commit or undo consumes it.
-    fn release(&mut self, hold: Hold<'c, K>) {
-        let Hold { owner, .. } = hold;
+    fn release(&mut self, _hold: Hold<'c, K>) {
         self.held -= 1;
-        self.owner = owner;
     }
 
     pub(super) fn upsert(
@@ -231,12 +219,12 @@ impl<'c, T, K: Key> Store<'c, T, K> {
                 {
                     return Err((value, plan, wire::Capacity::TopologyMetadata));
                 }
-                let key = K::new(self.values.len() as u32, self.owner);
+                let key = K::new(self.values.len() as u32);
                 entry.insert(key);
                 // SAFETY: the retained hold, or the Existing admission above,
                 // proves len < limit. Construction reserved at least limit;
                 // this exclusive store preserves that capacity and length.
-                unsafe { alloc::raw::VecExt::vacancy(&mut self.values) }.insert(value);
+                (unsafe { alloc::raw::VecExt::vacancy(&mut self.values) })(value);
             }
             None => return Err((value, plan, wire::Capacity::TopologyMetadata)),
         }
@@ -262,7 +250,7 @@ impl<'c, T, K: Key> Store<'c, T, K> {
     fn remove_value(&mut self, key: K, key_fn: impl Fn(&T) -> u64) -> T {
         use o3::depot::raw::Admit as _;
 
-        let tail = K::new((self.values.len() - 1) as u32, self.owner);
+        let tail = K::new((self.values.len() - 1) as u32);
         // SAFETY: both callers admitted this exact live index while retaining
         // this exclusive store; removing its directory entry did not mutate values.
         let (value, moved) =
@@ -292,7 +280,7 @@ impl<'c, T, K: Key> Store<'c, T, K> {
         while index < self.values.len() {
             if remove(&self.values[index]) {
                 let hash = key_fn(&self.values[index]);
-                let key = K::new(index as u32, self.owner);
+                let key = K::new(index as u32);
                 let (entry, ()) = flat::Table::member(unsafe {
                     // SAFETY: the dense element retains its exact directory
                     // membership in this exclusive store throughout removal.
@@ -327,13 +315,23 @@ impl<'c, 'd, const ID: u8> QueueStore<'c, 'd, ID> {
         values: &'c slab::Cell<queue::Declare<'b, 'd>, queue::Tag, { u32::MAX }, false>,
         name: short::Short<'_>,
     ) -> Option<queue::Key<'d, ID>> {
+        self.key_at(values, name, Fingerprint::of(name.value().as_bytes()).get())
+    }
+
+    pub(super) fn key_at<'b>(
+        &self,
+        values: &'c slab::Cell<queue::Declare<'b, 'd>, queue::Tag, { u32::MAX }, false>,
+        name: short::Short<'_>,
+        hash: u64,
+    ) -> Option<queue::Key<'d, ID>> {
         self.names
-            .get(Fingerprint::of(name.value().as_bytes()).get(), |key| {
+            .get(hash, |key| {
                 values
                     .entry(key.into_parts().0.parts())
                     .is_some_and(|entry| {
                         let queue = entry.value();
-                        queue.user_name() == name || queue.server_name() == name
+                        short::Short::from(queue.user_name()) == name
+                            || short::Short::from(queue.server_name()) == name
                     })
             })
             .copied()
@@ -346,7 +344,7 @@ impl<'c, 'd, const ID: u8> QueueStore<'c, 'd, ID> {
         value: queue::Declare<'b, 'd>,
     ) -> queue::Key<'d, ID> {
         let name = value.server_name();
-        let hash = Fingerprint::of(name.value().as_bytes()).get();
+        let hash = value.hash();
         // SAFETY: this scope's slab and directory share one admitted capacity.
         // Every name refers to a live row, while this retained reservation keeps
         // one slot unpublished: names <= live rows < capacity. The exclusive
@@ -419,7 +417,7 @@ impl<'c, 'd, const ID: u8> QueueStore<'c, 'd, ID> {
     ) -> Result<QueueHold<'c, 'b, 'd, ID>, failure::Error> {
         let entry = values
             .vacancy()
-            .ok_or(failure::Error::Capacity(wire::Capacity::TopologyMetadata))?;
+            .ok_or_else(|| failure::Error::Capacity(wire::Capacity::TopologyMetadata))?;
         Ok(QueueHold {
             entry,
             owner: self.owner,

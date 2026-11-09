@@ -15,7 +15,7 @@ use crate::service::content::ops::{FailureOwner, Input, Ops as _};
 use crate::service::content::wait::Attempt;
 use crate::service::method::Ops as _;
 use crate::service::{self, port};
-use crate::state::channel::{self, change};
+use crate::state::channel;
 use crate::state::conn::{self, phase, status};
 use crate::state::{channels, epoch, shared};
 
@@ -26,12 +26,6 @@ pub(crate) trait SessionOps<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> {
         region: &mut region::Token<region::Identity<'d>>,
         f: impl for<'a> FnOnce(&'a mut shared::Edit<'_, 'r, 'c, 'b, 'd, ID>) -> R,
     ) -> R;
-    fn with_channel<R>(
-        &self,
-        region: &mut region::Token<region::Identity<'d>>,
-        id: u16,
-        f: impl for<'a> FnOnce(&'a mut channel::Session<'r, 'c, 'b, 'd, ID>) -> R,
-    ) -> Option<R>;
     fn with_lease<R>(
         &self,
         region: &mut region::Token<region::Identity<'d>>,
@@ -63,7 +57,7 @@ pub(crate) trait SessionOps<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> {
             egress::Enqueue::Committed => Ok(()),
             egress::Enqueue::Rejected(reject) => {
                 let (load, error) = reject.into_parts();
-                load.into_inner().recycle();
+                drop(load.into_inner());
                 service::Admission::new(self.port()).sync();
                 Err(failure::Error::Egress(error))
             }
@@ -116,17 +110,6 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> SessionOps<'o, 'r, 'c, 'b
         self.port().session.write(local::Access::new(region), f)
     }
 
-    fn with_channel<R>(
-        &self,
-        region: &mut region::Token<region::Identity<'d>>,
-        id: u16,
-        f: impl for<'a> FnOnce(&'a mut channel::Session<'r, 'c, 'b, 'd, ID>) -> R,
-    ) -> Option<R> {
-        self.with_shared(region, |shared| {
-            shared.routes.with_id(id, |view| f(view.channel))
-        })
-    }
-
     fn with_lease<R>(
         &self,
         region: &mut region::Token<region::Identity<'d>>,
@@ -173,33 +156,26 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> SessionOps<'o, 'r, 'c, 'b
         sink: &mut egress::Queue<'_, '_, 'd, { client::IOV_CAP }, pool::Cursor>,
         region: &mut region::Token<region::Identity<'d>>,
     ) {
-        let cause =
-            match self.with_shared(region, |shared| shared.connection.try_fail(epoch, error)) {
-                Ok(cause) => cause,
-                Err(error) => {
-                    self.fail_session(
-                        close,
-                        FailureOwner::Immediate(epoch),
-                        recovery::Fault::terminal(error),
-                        region,
-                    );
-                    return;
-                }
-            };
+        let broken_frame = matches!(&error, failure::Error::Frame(_));
         let stores = self.port().content.stores();
-        let freed = self.with_shared(region, |shared| {
-            let mut freed = channel::Freed::Available;
-            shared.routes.for_each(|chan, graph| {
-                freed = freed.merge(chan.change(
-                    graph,
-                    stores,
-                    change::Event::TransportEnded { cause: &cause },
-                ));
-            });
-            freed
-        });
-        self.port().coordination().waiters().wake_all();
-        self.port().admission().wake_all();
+        let freed = match self.with_shared(region, |shared| {
+            shared.connection.try_fail(epoch, error).map(|cause| {
+                shared.recovery.reset();
+                shared.routes.transport_ended(cause, stores)
+            })
+        }) {
+            Ok(freed) => freed,
+            Err(error) => {
+                self.fail_session(
+                    close,
+                    FailureOwner::Immediate(epoch),
+                    recovery::Fault::terminal(error),
+                    region,
+                );
+                return;
+            }
+        };
+        self.port().wake_all();
         if let Err(error) = self.wake_route(epoch, freed) {
             self.fail_session(
                 close,
@@ -228,6 +204,8 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> SessionOps<'o, 'r, 'c, 'b
                 recovery::Fault::session(error),
                 region,
             );
+        } else if broken_frame {
+            close(status::Retirement::Permanent.drain(close::Reason::Protocol));
         }
     }
 
@@ -266,7 +244,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> SessionOps<'o, 'r, 'c, 'b
             }
             shared::Start::Applied => {}
             shared::Start::Route { epoch } => {
-                if let Err(error) = self.port().content.wake_route(epoch.token()) {
+                if let Err(error) = self.wake_route(epoch, channel::Freed::Route) {
                     self.fail_session(
                         close,
                         FailureOwner::Immediate(epoch),
@@ -277,6 +255,8 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> SessionOps<'o, 'r, 'c, 'b
                 }
             }
         }
+        let logic = self.logic();
+        logic.codec.set_max(logic.config.tune.frame.get());
         let admit = self
             .port()
             .encode(|frame| frame::Encoder::new(frame).preface())
@@ -299,7 +279,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> SessionOps<'o, 'r, 'c, 'b
         turn: Attempt<'d, ID>,
         parts: &mut service::Turn<'_, '_, 'd, ID>,
     ) -> Input<'d, ID> {
-        let epoch = epoch::Id::new(parts.conn_id);
+        let epoch = parts.conn_id;
         let (valid, closing) = self.with_shared(parts.driver.region_token(), |shared| {
             let state = shared.connection.lifecycle.status();
             (
@@ -371,16 +351,12 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> SessionOps<'o, 'r, 'c, 'b
         let change = self.with_shared(region, |shared| {
             shared.disconnect(epoch, reason.into(), self.port().content.stores())
         });
-        match change {
-            shared::Disconnect::Ignored => return,
-            shared::Disconnect::Applied {
-                freed: channel::Freed::Available | channel::Freed::Route,
-            } => {}
+        if change == conn::Change::Ignored {
+            return;
         }
-        if let Err(error) = self.port().content.cancel(epoch.token()) {
+        if let Err(error) = self.port().content.cancel(epoch) {
             self.port().fail(local::Access::new(region), epoch, error);
         }
-        self.port().coordination().waiters().wake_all();
-        self.port().admission().wake_all();
+        self.port().wake_all();
     }
 }

@@ -1,6 +1,4 @@
-use crate::protocol::method::Spec as _;
-use crate::protocol::wire::{Write, frame};
-use crate::protocol::{class, method};
+use crate::protocol::{class, method, wire};
 
 pub(super) const SELECT: method::Id = method::Id::new(class::TX, 10);
 pub(super) const SELECT_OK: method::Id = method::Id::new(class::TX, 11);
@@ -15,10 +13,8 @@ impl method::Spec for Select {
     const ID: method::Id = SELECT;
 }
 
-impl method::Encode for Select {
-    fn write<S: Write + AsMut<[u8]> + ?Sized>(&self, out: &mut S, channel: u16) {
-        frame::Encoder::new(out).method(channel, Self::ID.bytes());
-    }
+impl method::Args for Select {
+    fn write_args<S: wire::Put>(&self, _: &mut S) {}
 }
 
 impl method::Request for Select {
@@ -45,10 +41,8 @@ impl method::Spec for Commit {
     const ID: method::Id = COMMIT;
 }
 
-impl method::Encode for Commit {
-    fn write<S: Write + AsMut<[u8]> + ?Sized>(&self, out: &mut S, channel: u16) {
-        frame::Encoder::new(out).method(channel, Self::ID.bytes());
-    }
+impl method::Args for Commit {
+    fn write_args<S: wire::Put>(&self, _: &mut S) {}
 }
 
 impl method::Request for Commit {
@@ -75,10 +69,8 @@ impl method::Spec for Rollback {
     const ID: method::Id = ROLLBACK;
 }
 
-impl method::Encode for Rollback {
-    fn write<S: Write + AsMut<[u8]> + ?Sized>(&self, out: &mut S, channel: u16) {
-        frame::Encoder::new(out).method(channel, Self::ID.bytes());
-    }
+impl method::Args for Rollback {
+    fn write_args<S: wire::Put>(&self, _: &mut S) {}
 }
 
 impl method::Request for Rollback {

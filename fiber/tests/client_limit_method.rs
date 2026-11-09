@@ -1,21 +1,23 @@
-use std::convert::Infallible;
-use std::io::{ErrorKind, Read as _, Write as _};
+use dope_test::harness::peer;
+use std::time::Duration;
 
-use dope::core::driver::life::recovery;
+use dope::core::driver::schedule::ready::wake::queue;
+use dope::manifold::{client::close, timing};
 use dope_amqp091::config;
 use dope_amqp091::message::property::Properties;
 
 use crate::common::amqp::Peer;
+use crate::common::amqp::app::{Endpoint, Policy};
 use crate::common::amqp::wire::Method;
 use crate::common::fiber::{Pinned, poll_once};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
-
-use std::sync::mpsc;
 
 use dope_amqp091::adapter::publish;
 use dope_amqp091::failure;
 use dope_test::fibers::Yield;
-use dope_test::harness::peer::TcpScript;
+use dope_test::harness::peer::{AcceptScript, TcpScript};
 
 use crate::common::client::*;
 
@@ -63,7 +65,7 @@ fn drop_releases_capacity() {
                     let conn = rt.connection();
                     assert!(
                         rt.block_on(dope_fiber::fiber!('_ => async move {
-                            wait_ready(conn).await.expect("ready");
+                            conn.observe().ready().await.expect("ready");
                             let channel = conn.channels().open(1).await.expect("open channel");
 
                             let mut first = Pinned::new(channel.queue().purge("first"));
@@ -86,12 +88,7 @@ fn drop_releases_capacity() {
                         "AMQP fiber must complete"
                     );
                 }, recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
@@ -142,7 +139,7 @@ fn queues_after_stream() {
                 |rt| {
                     let conn = rt.connection();
                     assert!(rt.block_on(dope_fiber::fiber!('_ => async move {
-                        let ready = wait_ready(conn).await.expect("ready");
+                        let ready = conn.observe().ready().await.expect("ready");
                         let channel = conn.channels().open(1).await.expect("open channel");
                         let properties = Properties::default();
                         let mut streamed = Pinned::new(channel.basic().publish(publish::Request {
@@ -186,12 +183,7 @@ fn queues_after_stream() {
                     })).is_ok(), "AMQP fiber must complete");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
@@ -201,19 +193,32 @@ fn queues_after_stream() {
 
 #[test]
 fn drop_quarantines_borrow() {
-    let (sent, seen) = mpsc::channel();
-    let (closed, close_rx) = mpsc::channel();
-    TcpScript::with(
-        move |stream| {
+    AcceptScript::with(
+        move |acceptor| {
+            let mut first = acceptor.accept().expect("first connection");
+            let stream = &mut first;
+            stream
+                .read_wait(Some(Duration::from_secs(10)))
+                .expect("first read timeout");
+            stream
+                .write_wait(Some(Duration::from_secs(10)))
+                .expect("first write timeout");
             Peer::new(stream).open(TUNE).expect("AMQP broker handshake");
-            Method::read(stream).expect("AMQP method").check(1, 20, 10).expect("AMQP method route");
+            Method::read(stream)
+                .expect("AMQP method")
+                .check(1, 20, 10)
+                .expect("AMQP method route");
             stream
                 .write_all(
                     &Method::try_encode(1, 20, 11, &[0, 0, 0, 0]).expect("AMQP frame fixture"),
                 )
                 .expect("channel open ok");
-            Method::read(stream).expect("AMQP method").check(1, 60, 40).expect("AMQP method route");
-            sent.send(()).expect("publish send observation");
+            Method::read(stream)
+                .expect("AMQP method")
+                .check(1, 60, 40)
+                .expect("AMQP method route");
+            Method::write(stream, 0, 10, 60, b"\x04sent")
+                .expect("publish observed before cancellation");
 
             let mut bytes = [0; 4096];
             loop {
@@ -221,12 +226,29 @@ fn drop_quarantines_borrow() {
                     Ok(0) => break,
                     Ok(_) => {}
                     Err(error) => {
-                        assert_eq!(error.kind(), ErrorKind::ConnectionReset);
+                        assert!(matches!(error, peer::Error::Syscall(error) if error.is_reset()));
                         break;
                     }
                 }
             }
-            closed.send(()).expect("publish close observation");
+            drop(first);
+
+            let mut second = acceptor.accept().expect("reconnected transport");
+            second
+                .read_wait(Some(Duration::from_secs(10)))
+                .expect("second read timeout");
+            second
+                .write_wait(Some(Duration::from_secs(10)))
+                .expect("second write timeout");
+            Peer::new(&mut second)
+                .open(TUNE)
+                .expect("reconnected handshake");
+            Method::read(&mut second)
+                .expect("replayed channel")
+                .check(1, 20, 10)
+                .expect("Channel.Open");
+            Method::write(&mut second, 1, 20, 11, &[0; 4]).expect("replayed channel open ok");
+            assert_eq!(second.read(&mut [0]).expect("endpoint teardown"), 0);
         },
         |broker| {
             let cfg = config::Config::new("guest", "guest")
@@ -238,7 +260,7 @@ fn drop_quarantines_borrow() {
                 |rt| {
                     let conn = rt.connection();
                     assert!(rt.block_on(dope_fiber::fiber!('_ => async move {
-                wait_ready(conn).await.expect("ready");
+                let ready = conn.observe().ready().await.expect("ready");
                 let channel = conn.channels().open(1).await.expect("open channel");
                 let properties = Properties::default();
                 let mut body = [7; 2048];
@@ -250,31 +272,26 @@ fn drop_quarantines_borrow() {
                     body: &body,
                 }));
                 assert!(poll_once(publishing.as_pin()).await.is_pending());
-                loop {
-                    match seen.try_recv() {
-                        Ok(()) => break,
-                        Err(mpsc::TryRecvError::Empty) => Yield::new().await,
-                        disconnected => { disconnected.expect("broker ended before observing publish"); }
-                    }
+                while !conn.observe().read(|view| view.is_blocked()).await {
+                    Yield::new().await;
                 }
                 drop(publishing);
                 body.fill(0);
 
-                loop {
-                    match close_rx.try_recv() {
-                        Ok(()) => break,
-                        Err(mpsc::TryRecvError::Empty) => Yield::new().await,
-                        disconnected => { disconnected.expect("broker ended before publishing close observation"); }
-                    }
-                }
+                conn.observe().retired(ready.epoch()).await.expect("cancelled publish retirement");
+                conn.observe().ready().await.expect("reconnected ready");
+                conn.observe().read(|view| {
+                    assert_eq!(view.generation(), 2);
+                    let cause = view.last_exit().expect("publish cancellation cause");
+                    assert_eq!(cause.generation(), 1);
+                    assert!(matches!(cause.error(), failure::Error::Disconnected(
+                        failure::Reason::Local(close::LocalOrigin::OperationCancelled)
+                    )));
+                }).await;
                 })).is_ok(), "AMQP fiber must complete");
-                }, recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
                 },
+                recover,
+                complete,
             );
             broker.finish().expect("publish cancellation broker");
         },
@@ -282,6 +299,84 @@ fn drop_quarantines_borrow() {
     .expect("spawn publish-cancellation broker");
 }
 
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
+#[test]
+fn abort_discards_partial_publish() {
+    AcceptScript::with(
+        |acceptor| {
+            let mut stream = acceptor.accept().expect("connection");
+            stream
+                .read_wait(Some(Duration::from_secs(10)))
+                .expect("read timeout");
+            stream
+                .write_wait(Some(Duration::from_secs(10)))
+                .expect("write timeout");
+            Peer::new(&mut stream)
+                .open(TUNE)
+                .expect("AMQP broker handshake");
+            Method::read(&mut stream)
+                .expect("channel open")
+                .check(1, 20, 10)
+                .expect("Channel.Open");
+            Method::write(&mut stream, 1, 20, 11, &[0; 4]).expect("channel open ok");
+            match stream.read(&mut [0]) {
+                Ok(read) => assert_eq!(read, 0, "aborted publication reached the wire"),
+                Err(error) => {
+                    assert!(matches!(error, peer::Error::Syscall(error) if error.is_reset()));
+                }
+            }
+            drop(stream);
+            assert_eq!(
+                Redial::observe(acceptor).expect("redial observation"),
+                Redial::Elapsed
+            );
+        },
+        |broker| {
+            let cfg = config::Config::new("guest", "guest")
+                .expect("config")
+                .capacity(config::Capacity::default().egress(config::Egress::new(1, 1024)));
+            Endpoint::new(broker.addr(), cfg)
+                .shutdown(broker.completion())
+                .try_check::<timing::Throughput, _>(
+                    Policy::new(1, 0, Duration::from_secs(10)),
+                    |rt| {
+                        let conn = rt.connection();
+                        rt.until_shutdown(dope_fiber::fiber!('_ => async move {
+                            while !conn.observe().read(|view| view.is_ready()).await {
+                                Yield::new().await;
+                            }
+                            let ready = conn.observe().ready().await.expect("ready");
+                            let channel = conn.channels().open_in(ready, 1).await.expect("channel");
+                            let properties = Properties::default();
+                            let result = channel.basic().publish(publish::Request {
+                                exchange: "",
+                                routing_key: "aborted",
+                                mandatory: false,
+                                properties: &properties,
+                                body: b"body",
+                            }).await;
+                            assert!(matches!(result, Err(failure::Runtime::Local(
+                                failure::Error::Queue(queue::Error::Full { .. })
+                            ))));
+                            while !conn.observe().read(|view| view.is_failed()).await {
+                                Yield::new().await;
+                            }
+                            let error = conn.observe().ready().await.expect_err("permanent abort");
+                            let failure::Runtime::Terminal(cause) = error else {
+                                panic!("missing terminal cause");
+                            };
+                            assert_eq!(cause.generation(), 1);
+                            assert!(matches!(cause.error(), failure::Error::Disconnected(
+                                failure::Reason::Protocol
+                            )));
+                        }))
+                        .expect("broker completion")
+                        .expect("AMQP fiber must complete");
+                    },
+                    recover,
+                    complete,
+                );
+            broker.finish().expect("publish abort broker");
+        },
+    )
+    .expect("spawn publish-abort broker");
 }

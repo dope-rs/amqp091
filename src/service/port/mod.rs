@@ -77,7 +77,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Port<'r, 'c, 'b, 'd, ID> {
             .map_err(service::Build::Allocation)?;
         let compact =
             pool::Pool::try_from(plan.content.compact).map_err(service::Build::Compact)?;
-        let parts = depot::raw::Arena::try_new(plan.content.owners.fragments)
+        let parts = depot::raw::Arena::try_new(plan.content.owners.fragments.get())
             .map_err(service::Build::Allocation)?;
         let ids = resident::Pool::try_new(plan.identities).map_err(service::Build::Allocation)?;
         let (owner, budget, topology) = {
@@ -184,11 +184,11 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Port<'r, 'c, 'b, 'd, ID> {
     }
 }
 
-/// The three waiter fanouts each retain a drain epoch across publications.
+/// The route root includes three waiter drain epochs and six cancellation groups.
 const _: () = {
     assert!(
         std::mem::size_of::<Port<'static, 'static, 'static, 'static>>()
-            == 162 * std::mem::size_of::<usize>()
+            == 166 * std::mem::size_of::<usize>()
     );
     assert!(
         std::mem::align_of::<Port<'static, 'static, 'static, 'static>>()

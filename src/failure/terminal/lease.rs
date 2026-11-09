@@ -1,6 +1,6 @@
 use std::mem;
 
-use o3::depot::arena::pool::{Shared, shared};
+use o3::depot::arena::pool::Shared;
 use o3::mem::rc;
 
 use crate::failure::{self, terminal};
@@ -9,24 +9,10 @@ use crate::protocol::wire::text::resident;
 /// Internal, route-erased retained reference used by channel state.
 #[derive(Debug)]
 #[repr(transparent)]
-pub(crate) struct Lease<'c, 'b, 'd>(
-    Shared<
-        'c,
-        shared::Resident<terminal::Payload<'b, 'd>>,
-        shared::Header<terminal::Payload<'b, 'd>>,
-        shared::Initialized,
-    >,
-);
+pub(crate) struct Lease<'c, 'b, 'd>(Shared<'c, terminal::Payload<'b, 'd>>);
 
 impl<'c, 'b, 'd> Lease<'c, 'b, 'd> {
-    pub(super) const fn new(
-        lease: Shared<
-            'c,
-            shared::Resident<terminal::Payload<'b, 'd>>,
-            shared::Header<terminal::Payload<'b, 'd>>,
-            shared::Initialized,
-        >,
-    ) -> Self {
+    pub(super) const fn new(lease: Shared<'c, terminal::Payload<'b, 'd>>) -> Self {
         Self(lease)
     }
 

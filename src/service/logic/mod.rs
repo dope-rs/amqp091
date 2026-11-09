@@ -21,9 +21,9 @@ use dope::manifold::client::app::admit::Registered;
 use dope::manifold::client::app::connect::Full;
 use dope::manifold::client::app::failure::Controlled;
 use dope::manifold::client::app::{self, request};
-use dope::manifold::client::conn::{Activation, Id};
+use dope::manifold::client::conn::{Activation, Id, Transmit};
 use dope::manifold::client::session::app::drain::Ready;
-use dope::manifold::client::session::codec::mode;
+use dope::manifold::client::session::codec::{self, mode};
 use dope::manifold::client::session::{policy, protocol, response, turns};
 use dope::manifold::client::{attempt, close, port};
 use dope::manifold::service::bindings;
@@ -40,9 +40,11 @@ use crate::config;
 use crate::failure::{self, recovery};
 use crate::protocol::wire::frame;
 use crate::service::content::ops::{FailureOwner, Input, Ops as _};
+use crate::service::content::wait::Blocked;
 use crate::service::logic::session::SessionOps as _;
 use crate::service::{self, Port, runtime};
-use crate::state::{channel, conn, epoch};
+use crate::state::{channel, conn, shared};
+use dope::manifold::client::session::Blocking;
 
 #[doc(hidden)]
 pub struct Logic<'o, 'd, const ID: u8> {
@@ -72,6 +74,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
     type Mode = mode::Discard;
     type Requests = request::Enabled;
     type Response = response::Immediate;
+    type Receipt = conn::phase::Phase;
     type Send = pool::Cursor;
 
     fn codec<'a>(
@@ -79,18 +82,146 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
     ) -> &'a Self::Codec {
         &owner.logic().codec
     }
+
+    fn receipt(
+        _: &State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        _: Id<'d, KeyTag<ID>>,
+        state: &Self::ConnState,
+        _: &region::Token<region::Identity<'d>>,
+    ) -> Self::Receipt {
+        state.phase
+    }
+
+    fn received<'e>(
+        owner: &mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        receipt: Self::Receipt,
+        has_prefix: bool,
+        context: &mut turns::Context<'_, 'e, 'd, Self::ConnState, Self::Send, KeyTag<ID>>,
+    ) {
+        if receipt == conn::phase::Phase::Ready {
+            return;
+        }
+        context.state.received = receipt;
+        if !has_prefix {
+            let epoch = context.conn_id;
+            owner.with_shared(context.region(), |shared| {
+                if let conn::Input::Unbound(_, phase) = &mut shared.connection.input
+                    && shared
+                        .connection
+                        .lifecycle
+                        .status()
+                        .can_accept(epoch, conn::status::Input::Frame)
+                {
+                    *phase = receipt;
+                }
+            });
+        }
+    }
+
+    fn stalled<'e>(
+        owner: &mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        cause: &dope::manifold::app::receive::Failure,
+        context: &mut turns::Context<'_, 'e, 'd, Self::ConnState, Self::Send, KeyTag<ID>>,
+    ) -> dope::manifold::client::session::Blocking {
+        use dope::manifold::app::receive::Failure;
+        let resource = match cause {
+            Failure::Staging(error) => owner.port().content.retry_staging(error),
+            _ => None,
+        };
+        let resource = match resource {
+            Some(resource) => resource,
+            _ => return Blocking::Unsupported,
+        };
+        let attempt = owner
+            .port()
+            .content
+            .attempt(context.conn_id, context.wake_target());
+        block(owner, attempt.block(resource), context)
+    }
 }
 
 impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
     protocol::Plain<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, KeyTag<ID>, 1> for Logic<'o, 'd, ID>
 {
+    fn parse<'id, 'e, 'input, R: buffer::Cursor + hold::raw::Retain<'d>>(
+        owner: &mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        input: codec::Input<'id, 'input, 'd, R>,
+        context: &mut turns::Context<'_, 'e, 'd, Self::ConnState, Self::Send, KeyTag<ID>>,
+    ) -> Result<codec::Parse<'id, frame::Inbound<'input, 'd, R>>, scope::Error>
+    where
+        'd: 'input,
+    {
+        let bytes = input.as_slice();
+        let parsed = codec::Stateless::parse(&owner.logic().codec, input);
+        let epoch = context.conn_id;
+        let mut parts = context.parts();
+        owner.with_shared(parts.driver.region_token(), |shared| {
+            let status = shared.connection.lifecycle.status();
+            if !status.can_accept(epoch, conn::status::Input::Frame) {
+                return;
+            }
+            let bound = match shared.connection.input {
+                conn::Input::Held(_) => return,
+                conn::Input::Partial(bound) => bound,
+                input => {
+                    let generation = match input {
+                        conn::Input::Unbound(generation, _) => generation,
+                        _ => shared.routes.generation(),
+                    };
+                    let phase = match &shared.connection.input {
+                        conn::Input::Unbound(_, phase) => phase,
+                        _ => &parts.state.received,
+                    };
+                    let Some([tag, high, low]) = bytes.first_chunk::<3>().copied() else {
+                        shared.connection.input = conn::Input::Unbound(generation, *phase);
+                        return;
+                    };
+                    let channel = u16::from_be_bytes([high, low]);
+                    if channel == 0 {
+                        conn::Owner::Connection {
+                            phase: *phase,
+                            closing: status.is_closing(),
+                        }
+                    } else {
+                        let lease = shared.routes.lease(channel).filter(|lease| {
+                            generation.is_some_and(|generation| generation.admits(*lease))
+                        });
+                        match lease {
+                            Some(lease) => {
+                                let (sent, published) = if tag == frame::Type::METHOD {
+                                    shared
+                                        .routes
+                                        .project(lease, |view| {
+                                            let sent = view.channel.method_state().methods.sent();
+                                            (sent, view.channel.publish().published())
+                                        })
+                                        .unwrap_or((None, 0))
+                                } else {
+                                    (None, 0)
+                                };
+                                conn::Owner::Channel {
+                                    lease,
+                                    sent,
+                                    published,
+                                }
+                            }
+                            None => conn::Owner::Unknown,
+                        }
+                    }
+                }
+            };
+            shared.connection.input = conn::Input::Held(bound);
+        });
+        parsed
+    }
+
     fn reject<'e>(
         owner: &mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
         cause: scope::Error,
         context: &mut turns::Context<'_, 'e, 'd, Self::ConnState, Self::Send, KeyTag<ID>>,
     ) -> response::Direct {
         let mut parts = context.parts();
-        let epoch = epoch::Id::new(parts.conn_id);
+        let epoch = parts.conn_id;
         let mut close = |plan| parts.close.request(plan);
         owner.fail_session(
             &mut close,
@@ -115,22 +246,48 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
             let mut parts = context.parts();
             owner.respond(head, attempt, &mut parts)
         };
-        match input {
+        let delivery = match input {
             Input::Committed => response::Direct::Committed,
-            Input::Blocked(blocked) => match owner.port().content.register(blocked) {
-                Ok(()) => response::Direct::RetryInput,
-                Err(error) => {
-                    let mut parts = context.parts();
-                    let mut close = |plan| parts.close.request(plan);
-                    owner.fail_session(
-                        &mut close,
-                        FailureOwner::Immediate(epoch::Id::new(parts.conn_id)),
-                        recovery::Fault::terminal(error.into()),
-                        parts.driver.region_token(),
-                    );
-                    response::Direct::Committed
-                }
+            Input::Blocked(blocked) => match block(owner, blocked, context) {
+                Blocking::Registered => response::Direct::RetryInput,
+                Blocking::Unsupported => response::Direct::Committed,
             },
+        };
+        if delivery == response::Direct::Committed {
+            let received = context.state.received;
+            owner.with_shared(context.region(), |shared| {
+                if shared
+                    .connection
+                    .lifecycle
+                    .status()
+                    .can_accept(conn, conn::status::Input::Frame)
+                {
+                    shared.connection.input =
+                        conn::Input::Unbound(shared.routes.generation(), received);
+                }
+            });
+        }
+        delivery
+    }
+}
+
+fn block<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, 'e, const ID: u8>(
+    owner: &mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Logic<'o, 'd, ID>, KeyTag<ID>, 1>,
+    blocked: Blocked<'d, ID>,
+    context: &mut turns::Context<'_, 'e, 'd, conn::Transport, pool::Cursor, KeyTag<ID>>,
+) -> Blocking {
+    match owner.port().content.register(blocked) {
+        Ok(()) => Blocking::Registered,
+        Err(error) => {
+            let mut parts = context.parts();
+            let mut close = |plan| parts.close.request(plan);
+            owner.fail_session(
+                &mut close,
+                FailureOwner::Immediate(parts.conn_id),
+                recovery::Fault::terminal(error.into()),
+                parts.driver.region_token(),
+            );
+            Blocking::Unsupported
         }
     }
 }
@@ -170,12 +327,55 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
         )
     }
 
-    fn flush() -> impl for<'a, 'x, 'y, 'z> Call<(
-        &'a mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
-        &'x mut turns::Context<'y, 'z, 'd, Self::ConnState, Self::Send, KeyTag<ID>>,
-    )> {
-        output::Flush::<_>::Ready(
-            |owner: &mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>| {
+    fn flush() -> Option<
+        impl for<'a, 'x, 'y, 'z> Call<
+            output::BoundArgs<
+                'a,
+                'x,
+                'y,
+                'z,
+                'o,
+                'd,
+                Port<'r, 'c, 'b, 'd, ID>,
+                Self,
+                KeyTag<ID>,
+                1,
+            >,
+        >,
+    > {
+        Some(
+            |(owner, context, input): output::BoundArgs<
+                '_,
+                '_,
+                '_,
+                '_,
+                'o,
+                'd,
+                Port<'r, 'c, 'b, 'd, ID>,
+                Self,
+                KeyTag<ID>,
+                1,
+            >| {
+                let epoch = context.conn_id;
+                let received = context.state.received;
+                let ready = owner.with_shared(context.region(), |shared| {
+                    if !shared
+                        .connection
+                        .lifecycle
+                        .status()
+                        .can_accept(epoch, conn::status::Input::Frame)
+                    {
+                        return false;
+                    }
+                    shared
+                        .connection
+                        .input
+                        .settle(input, shared.routes.generation(), received)
+                });
+                if ready {
+                    owner.port().admission().wake_credit();
+                    owner.port().coordination().waiters().wake_flow();
+                }
                 service::Admission::new(owner.root().domain()).sync();
             },
         )
@@ -191,7 +391,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
                 &State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
                 Self::Send,
             )| {
-                payload.recycle();
+                drop(payload);
                 service::Admission::new(owner.root().domain()).sync();
             },
         )
@@ -209,7 +409,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
         _: socket::Addr,
         mut ctx: turns::Startup<'_, 'e, 'd, Self::ConnState, Self::Send, KeyTag<ID>>,
     ) {
-        let epoch = epoch::Id::new(ctx.connection());
+        let epoch = ctx.connection();
         let until = ctx.lifetime.expires_at();
         let mut close = |plan| ctx.close.request(plan);
         owner.connect(
@@ -234,9 +434,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
     ) {
         let change = owner.with_shared(driver.region_token(), |shared| shared.reject(Some(cause)));
         if change == conn::Change::Applied {
-            let coord = owner.port().coordination();
-            coord.waiters().wake_all();
-            owner.port().admission().wake_all();
+            owner.port().wake_all();
         }
     }
 }
@@ -246,13 +444,49 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
 {
     type Drain = Ready;
 
+    fn take_close(
+        owner: &State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        conn: Id<'d, KeyTag<ID>>,
+    ) -> Option<close::Directive> {
+        owner.root().domain().transport.take_close(conn)
+    }
+
+    fn transmit_failed(
+        owner: &State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        conn: Id<'d, KeyTag<ID>>,
+        failure: Transmit,
+        regions: &mut (
+            region::Token<region::Identity<'d>>,
+            region::Token<region::Identity<'d, 1>>,
+        ),
+    ) -> Option<Transmit> {
+        let source = conn;
+        let stores = owner.port().content.stores();
+        let change = owner.with_shared(&mut regions.0, |shared| {
+            shared.fail(
+                source,
+                recovery::Fault::session(failure::Error::Transmit(failure)),
+                // Preserve the generation's first cause when a later send failure is fatal.
+                || None,
+                stores,
+            )
+        });
+        match change {
+            shared::Failure::Ignored => Some(failure),
+            shared::Failure::Applied(_) => {
+                owner.port().wake_all();
+                None
+            }
+        }
+    }
+
     fn io_fail<'e>(
         owner: &mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
         errno: Errno,
         context: &mut turns::Context<'_, 'e, 'd, Self::ConnState, Self::Send, KeyTag<ID>>,
     ) {
         let mut parts = context.parts();
-        let epoch = epoch::Id::new(parts.conn_id);
+        let epoch = parts.conn_id;
         let mut close = |plan| parts.close.request(plan);
         owner.fail_session(
             &mut close,
@@ -274,7 +508,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
             .transport
             .retire(conn, work, region, |tagged| {
                 let (frame, _) = tagged.into_parts();
-                frame.recycle();
+                drop(frame);
             })
     }
 
@@ -289,7 +523,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
         ),
     ) {
         let region = &mut regions.0;
-        let epoch = epoch::Id::new(conn);
+        let epoch = conn;
         owner.with_shared(region, |shared| shared.retire(epoch, reason.into()));
     }
 
@@ -300,7 +534,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
         _: close::Reason,
         region: &mut region::Token<region::Identity<'d>>,
     ) -> close::Policy {
-        let epoch = epoch::Id::new(conn);
+        let epoch = conn;
         owner.with_shared(region, |shared| {
             shared
                 .connection
@@ -323,7 +557,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
     ) {
         let reason = context.reason();
         let (drained, _, region) = context.into_parts();
-        owner.disconnect(epoch::Id::new(drained.connection()), reason, region);
+        owner.disconnect(drained.connection(), reason, region);
     }
 }
 
@@ -336,12 +570,11 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
         _: &mut region::Token<region::Identity<'d, 1>>,
     ) {
         let endpoint = owner;
-        endpoint.port().coordination().waiters().wake_flow();
         owner.root().domain().transport.drain_tagged(
             requests,
             |region, auth| match auth {
-                runtime::Authority::Connection => true,
-                runtime::Authority::Channel(lease) => endpoint.with_shared(region, |shared| {
+                None => true,
+                Some(lease) => endpoint.with_shared(region, |shared| {
                     match shared
                         .routes
                         .project(lease, |route| route.channel.control().phase)
@@ -357,7 +590,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
             },
             |rejected| {
                 let (frame, _) = rejected.into_parts();
-                frame.recycle();
+                drop(frame);
             },
         );
         service::Admission::new(endpoint.port()).sync();
@@ -388,9 +621,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
     }
 
     fn shutdown(owner: &mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>) {
-        let coord = owner.port().coordination();
-        coord.waiters().wake_all();
-        owner.port().admission().wake_all();
+        owner.port().wake_all();
     }
 
     fn progress(
@@ -400,15 +631,19 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
     ) -> schedule::Progress<'d> {
         let endpoint = owner;
         let coord = endpoint.port().coordination();
-        if coord.waiters().has_pending() || endpoint.port().admission().has_pending() {
+        if coord.waiters().has_pending()
+            || endpoint.port().admission().has_pending()
+            || coord.cancellations.has_pending()
+        {
             return schedule::Progress::Runnable;
         }
         if endpoint
             .port()
             .session
             .read(local::Read::new(region), |shared| {
-                shared.recovery.is_runnable()
+                shared.recovery.runnable().is_some() && shared.connection.input.is_ready()
             })
+            && endpoint.port().replay_available()
         {
             return schedule::Progress::Runnable;
         }

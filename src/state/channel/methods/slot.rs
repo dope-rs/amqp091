@@ -23,10 +23,10 @@ struct Variant<T> {
 
 impl<'b, 'd> Variant<entry::Pending<'b, 'd>> {
     fn read<'a, 'c>(
-        live: depot::raw::Proof<(&'a Entry<'c, 'b, 'd>, links::Index), Initialized<Plane>>,
+        live: depot::raw::Proof<&'a Entry<'c, 'b, 'd>, Initialized<Plane>>,
     ) -> &'a entry::Pending<'b, 'd> {
         // SAFETY: Plane retains the Pending variant; repr(u8) gives its repr(C) tag/payload layout.
-        unsafe { &(*ptr::from_ref(&live.source().state).cast::<Self>()).value }
+        unsafe { &(*ptr::from_ref(&live.into_inner().state).cast::<Self>()).value }
     }
 }
 
@@ -74,22 +74,6 @@ pub(in crate::state::channel::methods) struct Slot<'a, 'c, 'b, 'd, P = ()> {
     pub(super) order: &'a mut keyed::Fifo<MethodKey, Plane>,
 }
 
-struct Projected<'a, 's, 'c, 'b, 'd, P>(
-    depot::raw::Proof<(&'a Slot<'s, 'c, 'b, 'd, P>, links::Index), Initialized<Plane>>,
-);
-
-// SAFETY: consumption preserves the live neighbor's exact key, link, plane, and slab loan.
-unsafe impl<'a, P> depot::raw::KeyBorrow<'a, Plane> for Projected<'a, '_, '_, '_, '_, P> {
-    type Key = MethodKey;
-
-    fn parts(self) -> (Self::Key, &'a keyed::Link<MethodKey, Plane>) {
-        // SAFETY: the retained native guard owns this live neighbor's exact slab.
-        let live = unsafe { self.0.map(|(slot, index)| (&slot.entry, index)) };
-        let (key, entry) = slab::Occupied::project(live);
-        (MethodKey::from_raw(key), &entry.link)
-    }
-}
-
 impl<'c, 'b, 'a, 'd> Slot<'a, 'c, 'b, 'd> {
     pub(super) fn try_new<const ID: u8>(
         owner: &'a mut methods::Methods<'c, 'b, 'd, ID>,
@@ -115,7 +99,9 @@ impl<'c, 'b, 'a, 'd> Slot<'a, 'c, 'b, 'd> {
         let live = keyed::Fifo::first(owner)?;
         // SAFETY: projection retains the original root's shared storage borrow.
         let live = unsafe { live.map(|(owner, index)| (&owner.pending, index)) };
-        Some(Variant::read(slab::Store::value(live)))
+        let live = slab::Store::value(live);
+        // SAFETY: the selected entry retains this exact FIFO's Pending plane.
+        Some(Variant::read(unsafe { live.map(|(entry, _)| entry) }))
     }
 
     pub(super) fn front<const ID: u8>(
@@ -126,8 +112,21 @@ impl<'c, 'b, 'a, 'd> Slot<'a, 'c, 'b, 'd> {
         store::Store<'d>,
     )> {
         let live = keyed::Fifo::first(owner)?;
+        Some(Self::select(live))
+    }
+
+    pub(super) fn select<const ID: u8>(
+        live: depot::raw::Proof<
+            (&'a mut methods::Methods<'c, 'b, 'd, ID>, links::Index),
+            Initialized<Plane>,
+        >,
+    ) -> (
+        Queued<'a, 'c, 'b, 'd, Plane>,
+        &'a mut flight::Flight<'c, 'b, 'd, ID>,
+        store::Store<'d>,
+    ) {
         // SAFETY: splitting this original root retains the same storage, queue,
-        // flight, and driver lifetimes alongside the initialized head proof.
+        // flight, and driver lifetimes alongside the initialized member proof.
         let live = unsafe {
             live.map(|(owner, index)| {
                 (
@@ -140,10 +139,10 @@ impl<'c, 'b, 'a, 'd> Slot<'a, 'c, 'b, 'd> {
             })
         };
         let (entry, (order, flight, wakes)) = slab::Occupied::from_live(live);
-        // SAFETY: the retained FIFO head is a member of this exact original root.
+        // SAFETY: the retained FIFO member belongs to this exact original root.
         let cursor =
             unsafe { keyed::Slot::from_source(depot::raw::Proof::new(Slot { entry, order })) };
-        Some((cursor, flight, wakes))
+        (cursor, flight, wakes)
     }
 
     pub(super) fn insert<const FRONT: bool>(
@@ -236,10 +235,7 @@ unsafe impl<'c, 'b, 'a, 'd, P> depot::raw::KeyFinish<false, Plane> for Slot<'a, 
     type Output = Detached<'a, 'c, 'b, 'd, P>;
 
     unsafe fn finish(self) -> Self::Output {
-        Detached {
-            slot: self.entry,
-            order: self.order,
-        }
+        Detached { slot: self.entry }
     }
 }
 
@@ -258,10 +254,13 @@ unsafe impl<P> depot::raw::KeyOwner<Plane> for Slot<'_, '_, '_, '_, P> {
         self.order
     }
 
-    fn entry<'b>(
-        live: depot::raw::Proof<(&'b Self, links::Index), Initialized<Plane>>,
-    ) -> keyed::Entry<'b, MethodKey, Plane> {
-        keyed::Entry::from_source(Projected(live))
+    fn link(
+        live: depot::raw::Proof<(&Self, links::Index), Initialized<Plane>>,
+    ) -> &keyed::Link<MethodKey, Plane> {
+        // SAFETY: the retained native guard owns this live neighbor's exact slab.
+        let live = unsafe { live.map(|(slot, index)| (&slot.entry, index)) };
+        let (_, entry) = slab::Occupied::project(live);
+        &entry.link
     }
 }
 
@@ -271,31 +270,11 @@ pub(in crate::state::channel::methods) struct Detached<'a, 'c, 'b, 'd, P = ()> {
         entries::Busy<'a, Entry<'c, 'b, 'd>, { u32::MAX }, entries::Exclusive<false>, 1, P>,
         Request,
     >,
-    order: &'a mut keyed::Fifo<MethodKey, Plane>,
 }
 
-const _: () = assert!(mem::size_of::<Detached<'_, '_, '_, '_>>() == 3 * mem::size_of::<usize>());
+const _: () = assert!(mem::size_of::<Detached<'_, '_, '_, '_>>() == 2 * mem::size_of::<usize>());
 
 impl<'c, 'b, 'd, P> Detached<'_, 'c, 'b, 'd, P> {
-    pub(super) fn pending(&self) -> &entry::Pending<'b, 'd> {
-        // SAFETY: the consuming unlink retained this slot's Pending variant and owner.
-        unsafe {
-            &(*ptr::from_ref(&self.slot.get().state).cast::<Variant<entry::Pending<'b, 'd>>>())
-                .value
-        }
-    }
-
-    pub(super) fn restore(self) {
-        // SAFETY: Detached retains the completed removal from this exact order.
-        unsafe {
-            keyed::Slot::<_, _, false>::from_source(depot::raw::Proof::new(Slot {
-                entry: self.slot,
-                order: self.order,
-            }))
-        }
-        .push::<true>();
-    }
-
     pub(super) fn discard(self) {
         self.slot.discard();
     }
@@ -305,7 +284,9 @@ impl<'c, 'b, 'd, P> Detached<'_, 'c, 'b, 'd, P> {
         outcome: Result<protocol::Response<'b, 'd, consumer::Key>, terminal::Outcome<'c, 'b, 'd>>,
         wakes: store::Store<'d>,
     ) {
-        if self.pending().origin == entry::Origin::User {
+        // SAFETY: consuming unlink retained this slot's Pending variant and owner.
+        let pending = Variant::read(unsafe { depot::raw::Proof::new(self.slot.get()) });
+        if pending.origin == entry::Origin::User {
             let (slot, Entry { link, state }) = self.slot.take();
             let state = mem::ManuallyDrop::new(state);
             // SAFETY: Detached owns this exact Pending variant until its consuming reply.
@@ -333,6 +314,18 @@ pub(in crate::state::channel::methods) struct Member<'a, 'c, 'b, 'd, P = ()>(
 );
 
 impl<'c, 'b, 'a, 'd, P> Member<'a, 'c, 'b, 'd, P> {
+    pub(super) fn get(&self) -> &entry::Pending<'b, 'd> {
+        // SAFETY: Member retains this exact queued Pending variant and its owner.
+        Variant::read(unsafe { depot::raw::Proof::new(self.0.entry.get()) })
+    }
+
+    pub(super) fn remove(self) -> Detached<'a, 'c, 'b, 'd, P> {
+        // SAFETY: Member retains membership in this exact exclusively borrowed FIFO.
+        keyed::Slot::from_source(unsafe { depot::raw::Proof::new(self.0) })
+            .remove()
+            .release()
+    }
+
     pub(super) fn send(self) -> Result<&'a mut entry::Pending<'b, 'd>, Method> {
         self.pending().send()
     }

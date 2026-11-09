@@ -18,8 +18,17 @@ impl<'b, 'd, const ID: u8> Record<'b, 'd, ID> {
         budget: &Budget<'d>,
         queue: Option<queue::Key<'d, ID>>,
         encoded: wire::Encoded<'_, consume::Layout>,
+        name: short::Name<'_>,
     ) -> Result<Self, failure::Error> {
-        let record = bytes::Bytes::capture(budget, encoded)?;
+        let record = if name.is_empty() == encoded.field(consume::Layout::QUEUE).is_empty() {
+            bytes::Bytes::capture(budget, encoded)?
+        } else {
+            bytes::Bytes::<consume::Layout>::capture_with(
+                budget,
+                encoded,
+                bytes::Patch::default().with(consume::Layout::QUEUE, name.into()),
+            )?
+        };
         Ok(Self {
             record,
             queue,

@@ -1,4 +1,3 @@
-pub(super) use access::Access;
 pub(crate) use next::Next;
 use o3::depot::arena::linked::slots;
 use o3::depot::capacity;
@@ -9,7 +8,6 @@ use crate::state::channel::Freed;
 use crate::state::channel::consumer::delivery::queue::Queue;
 use crate::state::channel::consumer::delivery::{self};
 
-mod access;
 mod next;
 pub(super) mod queue;
 
@@ -36,7 +34,7 @@ pub(crate) enum Route<'r, 'c, 'b, 'd> {
 
 impl<'c, 'b, 'd> Store<'c, 'b, 'd> {
     pub(crate) fn try_new(capacity: capacity::Count) -> Result<Self, alloc::Error> {
-        Ok(Self(depot::raw::Arena::try_new(capacity)?))
+        Ok(Self(depot::raw::Arena::try_new(capacity.get())?))
     }
 
     pub(crate) fn vacant<'r>(&'r self) -> Option<Vacant<'r, 'c, 'b, 'd>> {

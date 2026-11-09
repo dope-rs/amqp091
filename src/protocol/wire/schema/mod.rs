@@ -1,7 +1,6 @@
 pub(crate) use field::Field;
 
 use crate::failure::wire::Fault;
-use crate::protocol::wire::Fingerprint;
 
 mod field;
 
@@ -26,52 +25,30 @@ impl Offset {
 }
 
 pub(crate) trait Proof: Copy {
-    type Retained: Stored;
-
     const FIELDS: usize;
 
     fn offsets(&self) -> &[Offset];
 
+    fn offsets_mut(&mut self) -> &mut [Offset];
+
     fn validate(&self, cap: usize) -> Result<(), Fault>;
 
-    fn retained(self) -> Self::Retained;
-}
-
-pub(crate) trait Identified: Proof {
-    fn start(&self) -> Offset;
-
-    fn fingerprint(&self) -> Fingerprint;
-}
-
-pub(crate) trait Stored: Copy {
-    fn offsets(&self) -> &[Offset];
-}
-
-pub(crate) trait Suffixed: Stored {
-    fn start(&self) -> Offset;
-}
-
-impl<const N: usize> Stored for [Offset; N] {
-    fn offsets(&self) -> &[Offset] {
-        self
-    }
+    fn shift_suffix(&mut self, _delta: i64) {}
 }
 
 impl<const N: usize> Proof for [Offset; N] {
-    type Retained = Self;
-
     const FIELDS: usize = N;
 
     fn offsets(&self) -> &[Offset] {
         self
     }
 
-    fn validate(&self, _cap: usize) -> Result<(), Fault> {
-        Ok(())
+    fn offsets_mut(&mut self) -> &mut [Offset] {
+        self
     }
 
-    fn retained(self) -> Self::Retained {
-        self
+    fn validate(&self, _cap: usize) -> Result<(), Fault> {
+        Ok(())
     }
 }
 
@@ -79,36 +56,27 @@ impl<const N: usize> Proof for [Offset; N] {
 pub(crate) struct Identity<const N: usize> {
     offsets: [Offset; N],
     start: Offset,
-    fingerprint: Fingerprint,
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct Suffix<const N: usize> {
-    offsets: [Offset; N],
-    start: Offset,
+pub(crate) trait Suffixed: Proof {
+    fn start(&self) -> Offset;
 }
 
 impl<const N: usize> Identity<N> {
-    pub(in crate::protocol::wire) const fn new(
-        offsets: [Offset; N],
-        start: Offset,
-        hash: Fingerprint,
-    ) -> Self {
-        Self {
-            offsets,
-            start,
-            fingerprint: hash,
-        }
+    pub(in crate::protocol::wire) const fn new(offsets: [Offset; N], start: Offset) -> Self {
+        Self { offsets, start }
     }
 }
 
 impl<const N: usize> Proof for Identity<N> {
-    type Retained = Suffix<N>;
-
     const FIELDS: usize = N;
 
     fn offsets(&self) -> &[Offset] {
         &self.offsets
+    }
+
+    fn offsets_mut(&mut self) -> &mut [Offset] {
+        &mut self.offsets
     }
 
     fn validate(&self, cap: usize) -> Result<(), Fault> {
@@ -121,31 +89,12 @@ impl<const N: usize> Proof for Identity<N> {
         Ok(())
     }
 
-    fn retained(self) -> Self::Retained {
-        Suffix {
-            offsets: self.offsets,
-            start: self.start,
-        }
+    fn shift_suffix(&mut self, delta: i64) {
+        self.start = Offset::new((i64::from(self.start.get()) + delta) as u32);
     }
 }
 
-impl<const N: usize> Identified for Identity<N> {
-    fn start(&self) -> Offset {
-        self.start
-    }
-
-    fn fingerprint(&self) -> Fingerprint {
-        self.fingerprint
-    }
-}
-
-impl<const N: usize> Stored for Suffix<N> {
-    fn offsets(&self) -> &[Offset] {
-        &self.offsets
-    }
-}
-
-impl<const N: usize> Suffixed for Suffix<N> {
+impl<const N: usize> Suffixed for Identity<N> {
     fn start(&self) -> Offset {
         self.start
     }
@@ -205,7 +154,4 @@ impl Layout for Empty {
 const _: () = assert!(std::mem::size_of::<<Empty as Layout>::Proof>() == 0);
 const _: () = assert!(std::mem::size_of::<<queues::Declaration as Layout>::Proof>() == 4);
 const _: () = assert!(std::mem::size_of::<<exchange::Declare as Layout>::Proof>() == 8);
-const _: () = {
-    assert!(std::mem::size_of::<<queues::Binding as Layout>::Proof>() == 24);
-    assert!(std::mem::size_of::<<<queues::Binding as Layout>::Proof as Proof>::Retained>() == 16);
-};
+const _: () = assert!(std::mem::size_of::<<queues::Binding as Layout>::Proof>() == 16);

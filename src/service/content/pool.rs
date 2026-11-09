@@ -1,6 +1,6 @@
 use std::mem;
 
-use o3::buffer::{pool, resident};
+use o3::buffer::{hold, pool};
 use o3::depot::arena::pool::recycle;
 use o3::depot::capacity;
 use o3::{alloc, depot};
@@ -24,7 +24,7 @@ pub(crate) struct Pool<'b, 'd> {
     pub(super) compact: &'b pool::Pool,
     delivery: release::Store<entry::Entry<'b, 'd>, wake::Wake<'b, 'd>>,
     returned: release::Store<entry::Entry<'b, 'd>, wake::Wake<'b, 'd>>,
-    pub(super) fragments: &'b depot::raw::Arena<resident::Shared<'d>>,
+    pub(super) fragments: &'b depot::raw::Arena<hold::Retained<'d>>,
     owners: capacity::Count,
 }
 
@@ -59,7 +59,7 @@ impl<'b, 'd> Pool<'b, 'd> {
     pub(in crate::service) fn try_new(
         owners: Owners,
         compact: &'b pool::Pool,
-        segments: &'b depot::raw::Arena<resident::Shared<'d>>,
+        segments: &'b depot::raw::Arena<hold::Retained<'d>>,
         wake: wake::Wake<'b, 'd>,
     ) -> Result<Self, alloc::Error> {
         let Owners {

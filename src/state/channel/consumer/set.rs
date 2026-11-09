@@ -1,7 +1,6 @@
 use dope::core::driver::schedule::ready::wake;
 use dope::core::driver::{self};
 use o3::alloc;
-use o3::depot::arena::hash::runtime::entry;
 use wake::store;
 
 use crate::protocol::topology::records::consumer::Record;
@@ -18,18 +17,6 @@ pub(crate) struct Set<'b, 'd, const ID: u8> {
     registry: Registry<'b, 'd, ID>,
 }
 
-#[must_use = "consumer retirement can free a blocked route"]
-pub(crate) enum Retire {
-    Started(channel::Freed),
-    Missing,
-}
-
-#[must_use = "consumer removal can free a blocked route"]
-pub(crate) enum Removal {
-    Removed(channel::Freed),
-    Missing,
-}
-
 impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
     pub(crate) fn try_new(
         plan: consumer::Plan,
@@ -42,7 +29,7 @@ impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
     }
 
     pub(crate) fn drain<'r, 'c>(&mut self, store: &'r Store<'c, 'b, 'd>) -> channel::Freed {
-        self.registry.deliveries(store, self.wakes).clear()
+        self.registry.clear(store)
     }
 
     pub(crate) fn close(&mut self) {
@@ -55,41 +42,29 @@ impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
         }
     }
 
-    pub(crate) fn reopen(&mut self) {
-        for index in 0..self.registry.slots.capacity() {
-            let Some(mut entry) = self.registry.slots.entry_at(index) else {
-                continue;
-            };
-            let slot = entry.get_mut();
-            slot.waker.clear();
-            if slot.status == Status::Active {
-                slot.status = Status::Recovering;
-            }
-        }
-    }
-
+    #[must_use = "consumer retirement can free a blocked route"]
     pub(crate) fn retire<'r, 'c>(
         &mut self,
         key: consumer::Key,
         store: &'r Store<'c, 'b, 'd>,
-    ) -> Retire {
-        let Some((slot, freed)) = self.registry.begin_retire(key, store) else {
-            return Retire::Missing;
-        };
+        replay: impl FnOnce() -> bool,
+    ) -> Option<channel::Freed> {
+        let (slot, freed) = self.registry.begin_retire(key, store, replay)?;
         slot.waker.clear();
-        Retire::Started(freed)
+        Some(freed)
     }
 
+    #[must_use = "consumer removal can free a blocked route"]
     pub(crate) fn detach<'r, 'c>(
         &mut self,
         key: consumer::Key,
         store: &'r Store<'c, 'b, 'd>,
-    ) -> Removal {
+    ) -> channel::Freed {
         let Some((slot, freed)) = self.registry.remove(key, store) else {
-            return Removal::Missing;
+            return channel::Freed::Available;
         };
         slot.waker.clear();
-        Removal::Removed(freed)
+        freed
     }
 
     pub(crate) fn cancel<'r, 'c>(
@@ -110,7 +85,7 @@ impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
         wake: wake::Waker<'d>,
         store: &'r Store<'c, 'b, 'd>,
     ) -> Next<'c, 'b, 'd> {
-        self.registry.deliveries(store, self.wakes).next(key, wake)
+        self.registry.next(store, self.wakes, key, wake)
     }
 
     pub(crate) fn reserve<'r, 'c>(
@@ -118,15 +93,11 @@ impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
         tag: &str,
         store: &'r Store<'c, 'b, 'd>,
     ) -> Option<Route<'r, 'c, 'b, 'd>> {
-        self.registry.deliveries(store, self.wakes).reserve(tag)
+        self.registry.reserve(store, tag)
     }
 
-    pub(crate) fn route<'r, 'c>(
-        &mut self,
-        claim: Claim<'r, 'c, 'b, 'd>,
-        store: &'r Store<'c, 'b, 'd>,
-    ) {
-        self.registry.deliveries(store, self.wakes).route(claim);
+    pub(crate) fn route<'r, 'c>(&mut self, claim: Claim<'r, 'c, 'b, 'd>) {
+        self.registry.route(claim, self.wakes);
     }
 
     pub(crate) fn rollback(&mut self, undo: Option<consumer::Rollback>) {
@@ -179,10 +150,7 @@ impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
                     entry.get_mut().status = Status::Recovering;
                 }
                 Status::Untracked | Status::Replaying => {
-                    let mut staged = match entry {
-                        entry::Entry::Indexed(entry) => entry.unindex(),
-                        entry::Entry::Staged(staged) => staged,
-                    };
+                    let mut staged = entry.unindex();
                     staged.get_mut().status = Status::Canceled;
                     self.wakes.wake_once(&staged.get_mut().waker);
                     continue;
@@ -222,18 +190,10 @@ fn forget_if<'b, 'd, const ID: u8>(
                 entry.get_mut().status = Status::Untracked;
             }
             Status::Recovering | Status::Replaying => {
-                let mut staged = match entry {
-                    entry::Entry::Indexed(entry) => entry.unindex(),
-                    entry::Entry::Staged(staged) => staged,
-                };
+                let mut staged = entry.unindex();
                 staged.get_mut().status = Status::Canceled;
             }
             Status::Pending | Status::Untracked | Status::Canceled | Status::Retiring => {}
         }
     }
 }
-
-const _: () = {
-    assert!(std::mem::size_of::<Retire>() == std::mem::size_of::<Option<channel::Freed>>());
-    assert!(std::mem::size_of::<Removal>() == std::mem::size_of::<Option<channel::Freed>>());
-};

@@ -2,6 +2,7 @@
 
 pub mod app;
 mod error;
+pub mod io;
 pub use error::Error;
 mod greeting;
 pub use greeting::Greeting;

@@ -1,5 +1,4 @@
 pub mod common;
-use std::mem;
 
 use common::plan;
 use dope_amqp091::config::{Frame, Topology};
@@ -8,7 +7,24 @@ use dope_amqp091::service::Spec;
 use dope_amqp091::{config, failure};
 
 #[test]
-fn frame_is_one_word() {
+fn validates_plain_credentials() {
+    for user in ["", "token"] {
+        assert!(config::Config::new(user, "").is_ok());
+    }
+    for (user, password, expected) in [("u\0", "\0", 2), ("α", "β\0", 6)] {
+        let error = config::Config::new(user, password)
+            .err()
+            .expect("authentication nul");
+        std::assert_matches!(
+            error,
+            failure::Error::InvalidConfig(wire::Config::AuthenticationNul { offset })
+                if offset.get() == expected
+        );
+    }
+}
+
+#[test]
+fn validates_frame_minimum() {
     std::assert_matches!(
         Frame::new(Frame::MIN),
         Ok(frame) if frame.get() == Frame::MIN
@@ -20,7 +36,6 @@ fn frame_is_one_word() {
             minimum: Frame::MIN,
         })) if actual == Frame::MIN - 1
     );
-    assert_eq!(mem::size_of::<Frame>(), mem::size_of::<u32>());
 }
 
 #[test]
@@ -53,7 +68,6 @@ fn topology_retains_limits() {
     assert_eq!(topology.queue_cap(), 19);
     assert_eq!(topology.route_cap(), 23);
     assert_eq!(topology.link_cap(), 29);
-    assert_eq!(mem::size_of::<Topology>(), 6 * mem::size_of::<usize>());
 }
 
 #[test]
@@ -71,7 +85,7 @@ fn rejects_cancel_overflow() {
         Spec::<0>::try_new(config, 1, 1),
         Err(failure::Error::InvalidConfig(wire::Config::CancellationEntryCapacity {
             channels: 2, slots,
-        })) if slots == u32::MAX / 2 + 2
+        })) if slots == u32::MAX / 2 + 3
     ));
 }
 

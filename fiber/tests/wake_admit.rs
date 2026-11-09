@@ -1,22 +1,16 @@
-use std::convert::Infallible;
-use std::io::Write as _;
-
-use dope::core::driver::life::recovery;
 use dope::core::driver::schedule;
-use dope_test::harness::support::gates::Barrier;
 
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::Method;
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
-
-use std::num::NonZero;
-use std::time::Duration;
 
 use common::wake::Flow;
 use dope::core::driver::schedule::ready::wake::{fanout, queue};
-use dope::core::platform::wake;
 use dope_amqp091::failure::Error;
-use dope_amqp091::protocol::method::channel;
+use dope_amqp091::protocol::method::{channel, queue as method_queue};
+use dope_amqp091::protocol::wire::text::short;
 use dope_amqp091::{adapter, failure};
 use dope_fiber::task::batch::{Join, Pool};
 use dope_fiber::task::local::Once;
@@ -28,13 +22,8 @@ use crate::common::wake::{Fault, Open, Ready, TUNE, with_client};
 fn drains_disconnect() {
     const WIDTH: usize = schedule::LIMIT + 17;
 
-    let (open, notify) = wake::Ends::blocking().expect("arrival pipe").split();
-    let gate = Barrier::new(
-        NonZero::<usize>::new(WIDTH).expect("waiter width is positive"),
-        Some(notify),
-    );
     TcpScript::with(
-        move |stream| {
+        |stream| {
             Peer::new(stream).open(TUNE).expect("AMQP broker handshake");
             Method::read(&mut *stream)
                 .expect("channel.open")
@@ -45,8 +34,10 @@ fn drains_disconnect() {
                     &Method::try_encode(1, 20, 11, &[0, 0, 0, 0]).expect("AMQP frame fixture"),
                 )
                 .expect("channel.open-ok");
-            open.wait_timeout(Duration::from_secs(10))
-                .expect("test gate");
+            Method::read(stream)
+                .expect("second channel after every credit waiter registered")
+                .check(2, 20, 10)
+                .expect("channel.open route");
         },
         |broker| {
             let addr = broker.addr();
@@ -59,7 +50,6 @@ fn drains_disconnect() {
                     let target = ((scope.block_on(Ready {
                         state: amqp.connection().observe(),
                         wait: fanout::Registration::new(),
-                        gate: None,
                     }))
                     .expect("AMQP operation must succeed"))
                     .expect("AMQP operation must succeed");
@@ -73,23 +63,48 @@ fn drains_disconnect() {
                     .expect("AMQP operation must succeed");
 
                     let guard = ((scope.block_on(Once::new(move |local| {
-                        amqp.methods().reserve(local, target, lease, channel::Open)
+                        amqp.methods().reserve(
+                            local,
+                            target,
+                            lease,
+                            method_queue::Purge {
+                                queue: short::Name::EMPTY,
+                            },
+                        )
                     })))
                     .expect("AMQP operation must succeed"))
                     .expect("AMQP operation must succeed");
-                    let fibers = [(); WIDTH].map(|()| Flow {
+                    let mut opening = scope
+                        .block_on(Once::new(|mut access| {
+                            let second = amqp
+                                .channels()
+                                .reserve(access.reborrow(), target, 2)?
+                                .commit();
+                            amqp.methods()
+                                .reserve(access, target, second, channel::Open)
+                        }))
+                        .expect("fiber drive")
+                        .expect("second channel reservation");
+                    let mut head = Some(&mut opening);
+                    // The last child opens channel 2; channel 1's guard remains unpolled.
+                    let fibers = std::array::from_fn::<_, WIDTH, _>(|index| Flow {
                         adapter: amqp,
                         target: target.epoch(),
                         lease,
                         credit: queue::Registration::new(),
-                        gate: Some(&gate),
+                        head: if index + 1 == WIDTH {
+                            head.take()
+                        } else {
+                            None
+                        },
                     });
                     let mut pool = ((scope.block_on(Pool::<WIDTH>::acquire()))
                         .expect("batch pool"))
                     .expect("batch pool");
-                    let items = ((scope.block_on(Join::from_array(&mut pool, fibers)))
-                        .expect("batch root"))
-                    .expect("batch root");
+                    let items = scope
+                        .block_on(Join::from_array(&mut pool, fibers))
+                        .expect("batch root")
+                        .expect("batch root");
                     assert_eq!(items.len(), WIDTH);
                     let mut shared = None;
                     for item in items {
@@ -113,19 +128,10 @@ fn drains_disconnect() {
                     drop(guard);
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker completion");
         },
     )
     .expect("spawn disconnect broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

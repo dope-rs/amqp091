@@ -1,3 +1,5 @@
+use std::task::Poll;
+
 use dope::core::driver::route::KeyTag;
 use dope::core::driver::schedule::app;
 use dope::manifold::client::close;
@@ -7,6 +9,7 @@ use o3::depot::arena::slab::key;
 use o3::mem::quota;
 
 use crate::adapter::channel;
+use crate::service::cancel::Signal;
 use crate::service::logic::session::SessionOps as _;
 use crate::state::channel::cancel::Outcome;
 use crate::state::channel::{consumer, methods};
@@ -17,7 +20,6 @@ enum Action<'d, const ID: u8> {
     Collect(channels::Lease<'d, ID>),
     RetireConsumer(channels::Lease<'d, ID>, consumer::Key),
     CloseAbandonedOpen(channels::Lease<'d, ID>),
-    CloseTransport(epoch::Id<'d, ID>),
     Fail(epoch::Id<'d, ID>, failure::Error),
 }
 
@@ -34,12 +36,66 @@ pub(super) fn run<'turn, 'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>(
     region: &mut region::Token<region::Identity<'d>>,
 ) {
     loop {
-        let (signal, turn) = match endpoint.port().coordination().drain(work) {
+        let target = endpoint.with_shared(region, |shared| {
+            if shared.connection.input.is_ready() {
+                shared.connection.lifecycle.status().epoch()
+            } else {
+                None
+            }
+        });
+        let cancellations = &endpoint.port().coordination().cancellations;
+        let (signal, turn) = match work.claim(|| cancellations.pop(target.is_some())) {
             quota::Admission::Item(item) => item,
-            quota::Admission::Empty | quota::Admission::Exhausted => return,
+            quota::Admission::Empty => return,
+            quota::Admission::Exhausted => {
+                if target.is_some() && cancellations.has_control() {
+                    work.defer();
+                }
+                return;
+            }
         };
-        let lease = signal.lease();
-        let (kind, id) = signal.local();
+        let (lease, kind, id) = match signal {
+            Signal::Cancel {
+                lease,
+                kind,
+                identity,
+            } => (lease, kind, identity),
+            Signal::Control(retry) => {
+                let Some(target) = target else {
+                    unreachable!("control");
+                };
+                let lease = retry.lease();
+                let result = turn.run(|| {
+                    let next = endpoint.with_shared(region, |shared| {
+                        shared
+                            .routes
+                            .project(lease, |view| {
+                                view.channel.method_state().methods.next::<false>().1
+                            })
+                            .flatten()
+                    });
+                    match next {
+                        Some(next) => endpoint
+                            .port()
+                            .control()
+                            .write(target, lease)
+                            .send(local::Access::new(region), next),
+                        None => Ok(Poll::Ready(())),
+                    }
+                });
+                match result {
+                    Ok(Poll::Pending) => return,
+                    Ok(Poll::Ready(())) => retry.complete(),
+                    Err(cause) => {
+                        retry.complete();
+                        endpoint
+                            .port()
+                            .fail(local::Access::new(region), target, cause);
+                    }
+                }
+                continue;
+            }
+        };
         let action = turn.run(|| {
             endpoint.with_shared(region, |shared| {
                 let (index, out) = shared
@@ -88,11 +144,16 @@ pub(super) fn run<'turn, 'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>(
                         let Some(target) = ready else {
                             return Some((Action::Collect(lease), None));
                         };
-                        shared.retire(
+                        let retire = shared.retire(
                             target,
                             failure::Reason::Local(close::LocalOrigin::OperationCancelled),
                         );
-                        (Action::CloseTransport(target), None)
+                        endpoint
+                            .port()
+                            .transport
+                            .close(target, retire.abort(close::Reason::Protocol));
+                        endpoint.port().coordination().waiters().wake_all();
+                        return None;
                     }
                     Outcome::Confirm | Outcome::Reservation => (Action::Collect(lease), None),
                 };
@@ -138,13 +199,6 @@ pub(super) fn run<'turn, 'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>(
                     .port()
                     .control()
                     .close(local::Access::new(region), channel::Lease::from_raw(lease));
-            }
-            Action::CloseTransport(target) => {
-                endpoint
-                    .port()
-                    .transport
-                    .close(target.token(), close::Reason::Protocol);
-                endpoint.port().coordination().waiters().wake_all();
             }
         }
     }

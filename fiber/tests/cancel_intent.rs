@@ -1,29 +1,23 @@
-use std::convert::Infallible;
-use std::io::Write as _;
 use std::time::Duration;
 
-use dope::core::driver::life::recovery;
-use dope::core::platform::wake;
 use dope_amqp091::config;
 use dope_amqp091::message::ack;
 use dope_amqp091::message::field::Table;
 use dope_amqp091_fiber::channel::basic;
-use dope_fiber::task::time::sleep::TimerExt as _;
 
-use crate::common::amqp::Peer;
 use crate::common::amqp::wire::Method;
-use crate::common::fiber::{Pinned, poll_once, wait};
+use crate::common::amqp::{Peer, Tune};
+use crate::common::fiber::{Pinned, poll_once};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use dope_test::harness::peer::AcceptScript;
 
 use crate::common::cancel::*;
-use crate::common::client::check_no_frame;
 
 #[test]
 fn drops_uncommitted() {
-    let (observed, notify) = wake::Ends::blocking().expect("broker observations").split();
-    let (dropped, release) = wake::Ends::blocking().expect("drop barrier").split();
     const TAG: &str = "transport-intent";
 
     AcceptScript::with(
@@ -36,7 +30,7 @@ fn drops_uncommitted() {
                 .write_wait(Some(Duration::from_secs(10)))
                 .expect("first write timeout");
             Peer::new(&mut first)
-                .open(TUNE)
+                .open(Tune::new(2, 4096, 0))
                 .expect("AMQP broker handshake");
             Method::read(&mut first)
                 .expect("AMQP method")
@@ -58,10 +52,17 @@ fn drops_uncommitted() {
                 .expect("AMQP method")
                 .check(1, 60, 20)
                 .expect("AMQP method route");
-            notify.notify().expect("consume request");
-            dropped
-                .wait_timeout(Duration::from_secs(10))
-                .expect("future drop");
+            Method::read(&mut first)
+                .expect("request observation channel")
+                .check(2, 20, 10)
+                .expect("request observation route");
+            Method::write(&mut first, 2, 20, 11, &[0, 0, 0, 0])
+                .expect("request observation reply");
+            Method::read(&mut first)
+                .expect("future drop close")
+                .check(2, 20, 40)
+                .expect("future drop route");
+            Method::write(&mut first, 2, 20, 41, &[]).expect("future drop reply");
             drop(first);
 
             let mut second = broker.accept().expect("recovered connection");
@@ -72,7 +73,7 @@ fn drops_uncommitted() {
                 .write_wait(Some(Duration::from_secs(10)))
                 .expect("second write timeout");
             Peer::new(&mut second)
-                .open(TUNE)
+                .open(Tune::new(2, 4096, 0))
                 .expect("AMQP broker handshake");
             Method::read(&mut second)
                 .expect("AMQP method")
@@ -90,8 +91,12 @@ fn drops_uncommitted() {
             second
                 .write_all(&Method::try_encode(1, 60, 11, &[]).expect("AMQP frame fixture"))
                 .expect("recovered basic.qos-ok");
-            check_no_frame(&second, "uncommitted consumer replay").expect("AMQP fixture");
-            notify.notify().expect("replay observation");
+            Method::read(&mut second)
+                .expect("post-replay purge")
+                .check(1, 50, 30)
+                .expect("uncommitted consumer was not replayed");
+            Method::write(&mut second, 1, 50, 31, &0u32.to_be_bytes())
+                .expect("post-replay reply");
 
             Method::read(&mut second)
                 .expect("AMQP method")
@@ -106,7 +111,12 @@ fn drops_uncommitted() {
             second
                 .write_all(&Method::try_encode(1, 60, 31, &ok).expect("AMQP frame fixture"))
                 .expect("replacement cancel-ok");
-            notify.notify().expect("replacement cancel-ok written");
+            Method::write(&mut second, 0, 10, 50, &[0, 200, 0, 0, 0, 0, 0])
+                .expect("retirement after replacement cancel-ok");
+            Method::read(&mut second)
+                .expect("connection.close-ok")
+                .check(0, 10, 51)
+                .expect("replacement cancellation processed");
         },
         move |broker| {
             let addr = broker.addr();
@@ -118,7 +128,7 @@ fn drops_uncommitted() {
                 .deliveries(1)
                 .returns(1);
             let cap = config::Capacity::default()
-                .channels(1)
+                .channels(2)
                 .channel(chan)
                 .egress(config::Egress::new(2, 4096));
             let config = config::Config::new("guest", "guest")
@@ -130,13 +140,11 @@ fn drops_uncommitted() {
                 config,
                 |rt| {
                     let conn = rt.connection();
-                    let timer = rt.timer();
                     let run = dope_fiber::fiber!('_ => async move {
                         let target = conn
                             .observe().ready()
                             .await
                             .expect("first ready");
-                        let epoch = conn.observe().read(|view| view.generation()).await;
                         let chan = conn
                             .channels().open_in(target, 1)
                             .await
@@ -157,17 +165,12 @@ fn drops_uncommitted() {
                             arguments: &args,
                         }));
                         assert!(poll_once(op.as_pin()).await.is_pending());
-                        wait(&observed).await.expect("request wait");
+                        let barrier = conn.channels().open(2).await.expect("consume request observed");
                         drop(op);
-                        release.notify().expect("future dropped");
-
-                        while conn.observe().read(|view| view.generation()).await == epoch {
-                            timer
-                                .sleep(Duration::from_millis(10))
-                                .expect("generation wait")
-                                .await;
-                        }
-                        wait(&observed).await.expect("no replay wait");
+                        barrier.close(200, "").await.expect("future drop observed");
+                        conn.observe().retired(target.epoch()).await.expect("first retirement");
+                        let recovered = conn.observe().ready().await.expect("topology replay");
+                        chan.queue().purge("replayed").await.expect("no consumer replay");
                         let next = chan
                             .basic()
                             .consume(basic::Consume {
@@ -181,26 +184,15 @@ fn drops_uncommitted() {
                             .await
                             .expect("replacement consumer");
                         drop(next);
-                        wait(&observed)
-                            .await
-                            .expect("replacement cancel-ok written");
+                        conn.observe().retired(recovered.epoch()).await.expect("replacement cancellation retired");
                     });
                     assert!(rt.block_on(run).is_ok(), "AMQP fiber must complete");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("transport intent broker");
         },
     )
     .expect("transport intent broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

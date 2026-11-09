@@ -1,3 +1,3 @@
-mod id;
+use dope::{core::driver::route, manifold::client::conn};
 
-pub(crate) use id::Id;
+pub(crate) type Id<'d, const ROUTE: u8> = conn::Id<'d, route::KeyTag<ROUTE>>;

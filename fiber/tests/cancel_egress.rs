@@ -1,21 +1,16 @@
-use std::convert::Infallible;
-use std::io::Write as _;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
-
-use dope::core::driver::life::recovery;
 use dope_amqp091::config;
 use dope_amqp091::message::ack;
 use dope_amqp091::message::ack::Disposition;
 use dope_amqp091::message::field::Table;
 use dope_amqp091_fiber::channel::basic;
-use dope_fiber::task::time::sleep::TimerExt as _;
 use dope_test::alloc;
 use dope_test::alloc::Tracker;
 
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::Method;
 
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use dope_test::harness::peer::TcpScript;
@@ -24,11 +19,8 @@ use crate::common::cancel::*;
 
 #[test]
 fn cancels_when_full() {
-    let done = AtomicBool::new(false);
     const TAG: &str = "drop-root";
 
-    let done = &done;
-    let peer = done;
     TcpScript::with(
         move |stream| {
             Peer::new(stream).open(TUNE).expect("AMQP broker handshake");
@@ -68,7 +60,16 @@ fn cancels_when_full() {
             stream
                 .write_all(&Method::try_encode(1, 60, 31, &ok).expect("AMQP frame fixture"))
                 .expect("basic.cancel-ok");
-            peer.store(true, Ordering::Release);
+            stream
+                .write_all(
+                    &Method::try_encode(0, 10, 50, &[0, 200, 0, 0, 0, 0, 0])
+                        .expect("AMQP frame fixture"),
+                )
+                .expect("retirement after cancel race");
+            Method::read(stream)
+                .expect("connection.close-ok")
+                .check(0, 10, 51)
+                .expect("cancel race processed before retirement");
         },
         |broker| {
             let addr = broker.addr();
@@ -92,10 +93,9 @@ fn cancels_when_full() {
                 config,
                 |rt| {
                     let conn = rt.connection();
-                    let timer = rt.timer();
                     assert!(
                         rt.block_on(dope_fiber::fiber!('_ => async move {
-                            conn.observe().ready().await.expect("ready");
+                            let target = conn.observe().ready().await.expect("ready");
                             let channel = conn.channels().open(1).await.expect("channel open");
                             let args = Table::new();
                             let mut consumer = channel
@@ -131,21 +131,14 @@ fn cancels_when_full() {
                             first.await.expect("fill egress");
                             second.await.expect("fill egress");
 
-                            while !done.load(Ordering::Acquire) {
-                                timer.sleep(Duration::from_millis(1)).expect("cancel wait").await;
-                            }
+                            conn.observe().retired(target.epoch()).await.expect("cancel race retirement");
                         }))
                         .is_ok(),
                         "AMQP fiber must complete"
                     );
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker completion");
         },
@@ -155,7 +148,3 @@ fn cancels_when_full() {
 
 #[global_allocator]
 static ALLOCATOR: alloc::Tracker = Tracker::new();
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
-}

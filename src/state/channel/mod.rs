@@ -1,7 +1,9 @@
 use dope::core::driver;
 use o3::alloc;
 
-use crate::protocol::topology;
+use crate::failure::{self, wire};
+use crate::protocol::{method, topology};
+use crate::service::Waiters;
 use crate::state::channel::methods::turn;
 use crate::state::{layout, limits};
 
@@ -75,6 +77,7 @@ impl<'r, 'c, 'b, 'd> Stores<'r, 'c, 'b, 'd> {
 
 pub(crate) struct Control {
     pub phase: Phase,
+    pub flow_reply: Option<bool>,
     flow_active: bool,
     confirms_enabled: bool,
 }
@@ -83,6 +86,7 @@ impl Control {
     fn new() -> Self {
         Self {
             phase: Phase::Closed,
+            flow_reply: None,
             flow_active: true,
             confirms_enabled: false,
         }
@@ -92,8 +96,17 @@ impl Control {
         self.flow_active
     }
 
-    pub(crate) fn set_flow(&mut self, active: bool) {
+    pub(crate) fn try_flow(
+        &mut self,
+        active: bool,
+        publishing: bool,
+    ) -> Result<bool, failure::Error> {
+        if self.flow_reply.is_some() {
+            return Err(failure::Error::Capacity(wire::Capacity::Method));
+        }
         self.flow_active = active;
+        self.flow_reply = publishing.then_some(active);
+        Ok(publishing)
     }
 
     pub(crate) fn has_confirms(&self) -> bool {
@@ -102,10 +115,6 @@ impl Control {
 
     pub(crate) fn enable(&mut self) {
         self.confirms_enabled = true;
-    }
-
-    fn disable(&mut self) {
-        self.confirms_enabled = false;
     }
 }
 
@@ -129,14 +138,6 @@ struct Epoch<'r, 'c, 'b, 'd> {
 }
 
 impl<'r, 'c, 'b, 'd, const ID: u8> Session<'r, 'c, 'b, 'd, ID> {
-    fn clear(&mut self, stores: Stores<'r, 'c, 'b, 'd>) -> Freed {
-        self.epoch.inbound.clear();
-        self.stable
-            .consumers
-            .drain(stores.deliveries)
-            .merge(stores.returns.drain(&mut self.epoch.returns))
-    }
-
     pub(crate) fn try_new(
         position: std::num::NonZero<u16>,
         limits: limits::Limits,
@@ -209,7 +210,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Session<'r, 'c, 'b, 'd, ID> {
         stores: Stores<'r, 'c, 'b, 'd>,
     ) -> facets::Content<'_, 'r, 'c, 'b, 'd, ID> {
         facets::Content {
-            phase: self.epoch.control.phase,
+            phase: self.protocol().phase,
             inbound: &mut self.epoch.inbound,
             returns: &mut self.epoch.returns,
             consumers: &mut self.stable.consumers,
@@ -235,15 +236,29 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Session<'r, 'c, 'b, 'd, ID> {
     }
 
     pub(crate) fn protocol(&self) -> facets::Protocol {
-        let want = match self.stable.methods.head() {
-            methods::Head::Sent(kind) => Some(kind),
-            methods::Head::Empty | methods::Head::Waiting => None,
-        };
         facets::Protocol {
-            phase: self.epoch.control.phase,
-            expected: want,
+            phase: match self.epoch.control.phase {
+                Phase::Closing
+                    if !matches!(
+                        self.stable.methods.head(),
+                        methods::Head::Sent(method::Kind::CloseOk)
+                    ) =>
+                {
+                    Phase::Open
+                }
+                phase => phase,
+            },
             inbound_idle: self.epoch.inbound.is_idle(),
         }
+    }
+
+    pub(crate) fn begin_close(&mut self, waiters: &Waiters<'d>) {
+        self.epoch.control.phase = Phase::Closing;
+        waiters.wake_flow();
+    }
+
+    pub(crate) fn close_sent(&mut self, stores: Stores<'r, 'c, 'b, 'd>) {
+        self.epoch.returns.wake(stores.returns);
     }
 
     pub(crate) fn has_replay(&self, topo: &topology::State<'_, 'c, 'b, 'd, ID>) -> bool {
@@ -258,22 +273,26 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Session<'r, 'c, 'b, 'd, ID> {
     ) -> Freed {
         match event {
             change::Event::Reopened => {
-                let freed = self.clear(stores);
-                self.stable.consumers.reopen();
+                self.epoch.inbound.clear();
+                let freed = stores.returns.drain(&mut self.epoch.returns);
                 self.stable.confirm.retire_epoch();
                 self.stable.publishing.retire_epoch();
+                self.epoch.control = Control::new();
                 self.epoch.control.phase = Phase::Open;
-                self.epoch.control.set_flow(true);
-                self.epoch.control.disable();
                 freed
             }
             event @ (change::Event::TransportEnded { .. } | change::Event::ChannelClosed) => {
                 self.epoch.control.phase = Phase::Closed;
                 self.stable.publishing.retire_epoch();
-                let mut freed = self.clear(stores);
+                self.epoch.inbound.clear();
+                let freed = self
+                    .stable
+                    .consumers
+                    .drain(stores.deliveries)
+                    .merge(stores.returns.drain(&mut self.epoch.returns));
                 if let change::Event::TransportEnded { cause } = event {
-                    freed = freed.merge(self.method_turn(stores).fail(topo, cause));
-                    if self.epoch.control.has_confirms() {
+                    self.method_turn(stores).fail(topo, cause);
+                    if !self.stable.confirm.is_empty() {
                         self.stable.confirm.fail_all(cause);
                     }
                 } else {

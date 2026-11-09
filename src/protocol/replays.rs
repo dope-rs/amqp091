@@ -1,7 +1,8 @@
+use crate::message::field;
 use crate::protocol::method::{self, basic, channel, confirm};
 use crate::protocol::topology::records::{self, consumer, exchange, queue};
 use crate::protocol::wire::schema::consume;
-use crate::protocol::wire::schema::queues::{Binding, Declaration};
+use crate::protocol::wire::schema::queues::Binding;
 use crate::protocol::wire::text::short;
 use crate::protocol::wire::{self, Write, bytes, frame};
 
@@ -50,12 +51,16 @@ impl<'a, 'b, 'd, const ID: u8> method::Spec for Queue<'a, 'b, 'd, ID> {
 impl<const ID: u8> method::Args for Queue<'_, '_, '_, ID> {
     fn write_args<S: wire::Put>(&self, out: &mut S) {
         if self.current {
-            self.record.wire().write_with(
-                out,
-                bytes::Patch::default().with(Declaration::QUEUE, self.record.server_name()),
-            );
+            method::queue::Inspect {
+                queue: self.record.server_name(),
+                durable: false,
+                exclusive: false,
+                auto_delete: false,
+                arguments: &field::Table::new(),
+            }
+            .write_args(out);
         } else {
-            out.extend(self.record.wire().bytes.as_slice());
+            out.extend(self.record.wire().as_slice());
         }
     }
 }
@@ -82,7 +87,7 @@ impl<'a, 'd, const ID: u8> method::Spec for QueueBind<'a, 'd, ID> {
 impl<const ID: u8> method::Args for QueueBind<'_, '_, ID> {
     fn write_args<S: wire::Put>(&self, out: &mut S) {
         let mut patch = bytes::Patch::default().with(Binding::QUEUE, self.queue);
-        if self.spec.name().is_empty() && self.spec.routing_key().is_empty() {
+        if self.spec.routing_key().is_none() {
             patch = patch.with(Binding::ROUTING_KEY, self.queue);
         }
         self.spec.wire().write_with(out, patch);
@@ -131,6 +136,7 @@ pub(crate) enum Action<'d, K, const ID: u8> {
 
 pub(crate) enum Step<'a, 'b, 'd, K, const ID: u8> {
     Open,
+    Close,
     Confirm,
     Qos(records::Qos),
     Exchange(&'a exchange::Declare<'d>),
@@ -167,6 +173,7 @@ impl<'a, 'b, 'd, K: Copy, const ID: u8> Step<'a, 'b, 'd, K, ID> {
     pub(crate) fn intent(&self) -> Action<'d, K, ID> {
         match self {
             Self::Open => Action::Plain(method::Kind::Open),
+            Self::Close => Action::Plain(method::Kind::CloseOk),
             Self::Confirm => Action::Plain(method::Kind::Confirm),
             Self::Qos(_) => Action::Plain(method::Kind::Qos),
             Self::Exchange(_) => Action::Plain(method::Kind::ExchangeDeclare),
@@ -183,6 +190,13 @@ impl<'a, 'b, 'd, K: Copy, const ID: u8> Step<'a, 'b, 'd, K, ID> {
 
         match self {
             Self::Open => channel::Open.write(out, channel),
+            Self::Close => channel::CloseRef {
+                reply_code: 200,
+                reply_text: short::Short::EMPTY,
+                class_id: 0,
+                method_id: 0,
+            }
+            .write(out, channel),
             Self::Confirm => confirm::Select.write(out, channel),
             Self::Qos(spec) => basic::Qos {
                 prefetch_size: spec.prefetch_size,
@@ -193,14 +207,14 @@ impl<'a, 'b, 'd, K: Copy, const ID: u8> Step<'a, 'b, 'd, K, ID> {
             Self::Exchange(record) => frame::Encoder::new(out).method_with(
                 channel,
                 <Declare<'d> as method::Spec>::ID.bytes(),
-                |out| out.extend(record.wire().bytes.as_slice()),
+                |out| out.extend(record.wire().as_slice()),
             ),
             Self::Queue(method) => method.write(out, channel),
             Self::QueueBind(method) => method.write(out, channel),
             Self::ExchangeBind(record) => frame::Encoder::new(out).method_with(
                 channel,
                 <Bind<'d> as method::Spec>::ID.bytes(),
-                |out| out.extend(record.wire().bytes.as_slice()),
+                |out| out.extend(record.wire().as_slice()),
             ),
             Self::Consume(method) => method.write(out, channel),
         }

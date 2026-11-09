@@ -1,11 +1,10 @@
-use std::io;
-use std::io::{Read, Write};
+use crate::common::amqp::io::{Read, Write};
 
 use crate::common::amqp::wire::Frame;
 use crate::common::amqp::wire::encoded::Encoded;
 use crate::common::amqp::wire::header::Header;
 use crate::common::amqp::wire::route::Route;
-use crate::common::amqp::wire::segments::Segments;
+use crate::common::amqp::wire::segments;
 use crate::common::amqp::{Error, wire};
 
 /// One independently decoded AMQP method frame.
@@ -19,9 +18,7 @@ impl Method {
         method: u16,
         args: &[u8],
     ) -> Result<Vec<u8>, Error> {
-        let len = 4_usize
-            .checked_add(args.len())
-            .ok_or(Error::Capacity { length: args.len() })?;
+        let len = args.len() + 4;
         let mut encoded = Encoded::try_new(super::METHOD, channel, len)?;
         encoded.extend(&class.to_be_bytes());
         encoded.extend(&method.to_be_bytes());
@@ -36,19 +33,14 @@ impl Method {
         class: u16,
         method: u16,
         args: &[u8],
-    ) -> io::Result<()> {
-        let len = 4_usize.checked_add(args.len()).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "AMQP method payload is too large",
-            )
-        })?;
+    ) -> Result<(), Error> {
+        let len = args.len() + 4;
         let header = Header::new(wire::METHOD, channel, len)?;
         let class = class.to_be_bytes();
         let method = method.to_be_bytes();
         let route = [class[0], class[1], method[0], method[1]];
         let tail = [wire::END];
-        Segments::new([header.bytes(), &route, args, &tail]).write(sink)
+        segments::write([header.bytes(), &route, args, &tail], sink)
     }
 
     pub(crate) fn write_parts(
@@ -57,21 +49,16 @@ impl Method {
         class: u16,
         method: u16,
         args: &[&[u8]],
-    ) -> io::Result<()> {
+    ) -> Result<(), Error> {
         if args.len() > 5 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "too many AMQP method argument segments",
-            ));
+            return Err(Error::Parts(args.len()));
         }
         let mut len = 4_usize;
         for arg in args {
-            len = len.checked_add(arg.len()).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "AMQP method payload is too large",
-                )
-            })?;
+            let Some(next) = len.checked_add(arg.len()) else {
+                return Err(Error::Capacity { length: arg.len() });
+            };
+            len = next;
         }
         let header = Header::new(wire::METHOD, channel, len)?;
         let class = class.to_be_bytes();
@@ -84,11 +71,11 @@ impl Method {
         let end = args.len() + 2;
         parts[2..end].copy_from_slice(args);
         parts[7] = &tail;
-        Segments::new(parts).write(sink)
+        segments::write(parts, sink)
     }
 
     /// Reads one complete method frame and owns its payload once.
-    pub fn read(source: &mut impl Read) -> io::Result<Self> {
+    pub fn read(source: &mut impl Read) -> Result<Self, Error> {
         Self::try_from(Frame::read(source)?)
     }
 
@@ -125,20 +112,14 @@ impl Method {
 }
 
 impl TryFrom<Frame> for Method {
-    type Error = io::Error;
+    type Error = Error;
 
     fn try_from(frame: Frame) -> Result<Self, Self::Error> {
         if frame.frame_type() != super::METHOD {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "expected an AMQP method frame",
-            ));
+            return Err(Error::FrameType(frame.frame_type()));
         }
         if frame.payload().len() < 4 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "AMQP method payload is truncated",
-            ));
+            return Err(Error::MethodLength(frame.payload().len()));
         }
         Ok(Self(frame.1, frame.2))
     }

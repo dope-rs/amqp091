@@ -1,5 +1,5 @@
-use std::io;
-use std::io::Read;
+use crate::common::amqp::Error;
+use crate::common::amqp::io::Read;
 
 use crate::common::amqp::wire::input::Input;
 use crate::common::amqp::wire::route::Route;
@@ -11,19 +11,13 @@ pub(crate) struct Incoming<'a, IO> {
 }
 
 impl<'a, IO: Read> Incoming<'a, IO> {
-    pub(crate) fn read(source: &'a mut IO) -> io::Result<Self> {
+    pub(crate) fn read(source: &'a mut IO) -> Result<Self, Error> {
         let (header, mut input) = Input::read(source)?;
         if header.frame_type() != super::METHOD {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "expected an AMQP method frame",
-            ));
+            return Err(Error::FrameType(header.frame_type()));
         }
         if header.length() < 4 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "AMQP method payload is truncated",
-            ));
+            return Err(Error::MethodLength(header.length() as usize));
         }
         let mut bytes = [0; 4];
         input.read_exact(&mut bytes)?;
@@ -39,11 +33,11 @@ impl<'a, IO: Read> Incoming<'a, IO> {
         self.route
     }
 
-    pub(crate) fn discard(self) -> io::Result<()> {
+    pub(crate) fn discard(self) -> Result<(), Error> {
         self.input.discard()
     }
 
-    pub(crate) fn compare(self, expected: &[&[u8]]) -> io::Result<()> {
+    pub(crate) fn compare(self, expected: &[&[u8]]) -> Result<(), Error> {
         self.input.compare(expected)
     }
 }

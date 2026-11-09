@@ -2,7 +2,7 @@ use dope::core::driver::route::KeyTag;
 use dope::manifold::client::{self, close};
 use dope::manifold::service::bindings::endpoint::State;
 use dope::net::link::egress;
-use o3::base::cell::region;
+use o3::base::cell::{local, region};
 use o3::buffer;
 use o3::buffer::hold::scope;
 use o3::buffer::pool;
@@ -15,16 +15,14 @@ use crate::service::content::ops::{self, Ops as _};
 use crate::service::content::wait::Attempt;
 use crate::service::logic::session::SessionOps as _;
 use crate::state::channel::consumer::access;
-use crate::state::channel::methods::flight;
-use crate::state::channel::{Freed, Phase, change};
+use crate::state::channel::methods::{self, flight};
+use crate::state::channel::{Phase, change};
 use crate::state::conn::status::Retirement;
-use crate::state::conn::{Transport, phase};
-use crate::state::{channels, epoch};
+use crate::state::conn::{Owner, Transport, phase};
+use crate::state::epoch;
 use crate::{failure, protocol, service};
 
-pub(in crate::service) mod commit;
 mod gates;
-mod pending;
 
 pub(crate) trait Ops<'o, 'r, 'c, 'b, 'd, const ID: u8> {
     fn recv<'input, R: buffer::Cursor + 'input>(
@@ -56,7 +54,7 @@ pub(crate) trait Ops<'o, 'r, 'c, 'b, 'd, const ID: u8> {
 
     fn recv_chan(
         &mut self,
-        lease: channels::Lease<'d, ID>,
+        gate: gates::Channel<'d, ID>,
         server: channel::Event<'_, 'd>,
         attempt: Attempt<'d, ID>,
         parts: &mut service::Turn<'_, '_, 'd, ID>,
@@ -75,37 +73,57 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
         parts: &mut service::Turn<'_, '_, 'd, ID>,
     ) -> Result<ops::Input<'d, ID>, failure::Error> {
         let budget = self.port().budget();
-        match pending::Pending::inspect(channel, payload)? {
-            pending::Pending::Connection(pending) => {
-                let region = parts.driver.region_token();
-                let Some(event) = pending.admit(budget, parts.state.phase, closing)? else {
-                    return Ok(ops::Input::Committed);
-                };
-                let mut close = |next| parts.close.request(next);
-                self.recv_conn(
-                    event,
-                    epoch::Id::new(parts.conn_id),
-                    parts.state,
-                    &mut close,
-                    &mut parts.sink,
-                    region,
-                )?;
-                Ok(ops::Input::Committed)
+        let (bytes, args) = payload
+            .try_split::<{ method::Id::SIZE }>()
+            .map_err(|cause| failure::Error::Protocol(Fault::MethodSize(cause)))?;
+        let id = method::Id::from_bytes(*bytes);
+        if let Some(channel) = frame::Channel::new(channel) {
+            let kind = if id.is_conn() {
+                Err(failure::Error::Protocol(Fault::ConnectionChannel {
+                    channel: channel.get(),
+                }))
+            } else {
+                method::Kind::identify(id)
+            };
+            if closing {
+                kind?;
+                return Ok(ops::Input::Committed);
             }
-            pending::Pending::Channel(pending) => {
-                let Some((gate, event)) = pending.admit(budget, |channel, kind| {
-                    if closing {
-                        kind?;
-                        return Ok(None);
-                    }
-                    self.admit_chan(channel, kind, parts.state, parts.driver.region_token())
-                })?
-                else {
-                    return Ok(ops::Input::Committed);
-                };
-                self.recv_chan(gate.into_lease(), event, attempt, parts)
-            }
+            let Some((gate, kind)) =
+                self.admit_chan(channel, kind, parts.state, parts.driver.region_token())?
+            else {
+                return Ok(ops::Input::Committed);
+            };
+            let event = channel::Event::decode(&args, kind, budget)?;
+            return self.recv_chan(gate, event, attempt, parts);
         }
+        if !id.is_conn() {
+            return Err(failure::Error::Protocol(Fault::ChannelZero));
+        }
+        let kind = conn::Kind::identify(id.method())?;
+        let region = parts.driver.region_token();
+        let (receipt, admitted_close) =
+            self.with_shared(region, |shared| match shared.connection.input.owner() {
+                Some(Owner::Connection { phase, closing }) => (phase, closing),
+                _ => unreachable!("input"),
+            });
+        if closing && !matches!(kind, conn::Kind::Close | conn::Kind::CloseOk) {
+            return Ok(ops::Input::Committed);
+        }
+        if !gates::connection(kind, parts.state.phase, receipt, admitted_close)? {
+            return Ok(ops::Input::Committed);
+        }
+        let event = conn::Event::decode(&args, kind, budget)?;
+        let mut close = |next| parts.close.request(next);
+        self.recv_conn(
+            event,
+            parts.conn_id,
+            parts.state,
+            &mut close,
+            &mut parts.sink,
+            region,
+        )?;
+        Ok(ops::Input::Committed)
     }
 
     fn admit_chan(
@@ -124,13 +142,33 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
             }));
         }
         let admit = self.with_shared(region, |shared| {
-            let lease = shared.routes.lease(channel.get())?;
+            let Owner::Channel {
+                lease,
+                sent,
+                published,
+            } = shared.connection.input.owner()?
+            else {
+                return None;
+            };
             shared.routes.project(lease, |view| {
+                let current = view
+                    .channel
+                    .method_state()
+                    .methods
+                    .sent()
+                    .map(|(key, _)| key);
                 let state = view.channel.protocol();
-                (lease, state.phase, state.expected, state.inbound_idle)
+                (
+                    lease,
+                    state.phase,
+                    sent,
+                    current,
+                    state.inbound_idle,
+                    published,
+                )
             })
         });
-        let Some((lease, phase, expected, idle)) = admit else {
+        let Some((lease, phase, expected, current, idle, published)) = admit else {
             kind?;
             return Err(failure::Error::Protocol(Fault::ChannelUnknown {
                 channel: channel.get(),
@@ -138,7 +176,10 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
         };
         let closing = phase == Phase::Closing;
         let close = matches!(&kind, Ok(method::Kind::Close | method::Kind::CloseOk));
-        if closing && !close && !matches!(&kind, Ok(kind) if expected == Some(*kind)) {
+        if closing
+            && !close
+            && !matches!(&kind, Ok(kind) if expected.map(|(_, expected)| expected) == Some(*kind))
+        {
             return Ok(None);
         }
         if !idle && !(closing && close) {
@@ -146,7 +187,8 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
             return Err(failure::Error::Protocol(Fault::ContentInterrupted));
         }
         let kind = kind?;
-        gates::Channel::check(kind, phase, expected, lease).map(|gate| Some((gate, kind)))
+        gates::Channel::check(kind, phase, expected, current, lease, published)
+            .map(|gate| Some((gate, kind)))
     }
 
     fn recv_conn(
@@ -187,33 +229,26 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
                 });
                 // The broker's cause remains primary if its reply cannot be queued.
                 let owner = match self.send_method(out, region, 0, &CloseOk) {
-                    Ok(()) => ops::FailureOwner::Reply(commit::Commit::new(epoch)),
+                    Ok(()) => ops::FailureOwner::Reply(epoch),
                     Err(_) => ops::FailureOwner::Immediate(epoch),
                 };
                 self.fail_session(close, owner, failure, region);
                 Ok(())
             }
             conn::Event::CloseOk(_) => {
-                let cause =
-                    self.with_shared(region, |shared| shared.connection.finish_close(epoch))?;
-                let reason = if matches!(cause.error(), failure::Error::Closed) {
-                    close::Reason::Local(close::LocalOrigin::ApiRequest)
-                } else {
-                    close::Reason::Protocol
-                };
-                close(Retirement::Permanent.abort(reason));
                 let stores = self.port().content.stores();
                 let freed = self.with_shared(region, |shared| {
-                    let mut freed = Freed::Available;
-                    shared.routes.for_each(|c, topology| {
-                        freed = freed.merge(c.change(
-                            topology,
-                            stores,
-                            change::Event::TransportEnded { cause: &cause },
-                        ));
-                    });
-                    freed
-                });
+                    shared.connection.finish_close(epoch).map(|cause| {
+                        let directive = if matches!(cause.error(), failure::Error::Closed) {
+                            Retirement::Permanent
+                                .drain(close::Reason::Local(close::LocalOrigin::ApiRequest))
+                        } else {
+                            Retirement::Permanent.abort(close::Reason::Protocol)
+                        };
+                        close(directive);
+                        shared.routes.transport_ended(&cause, stores)
+                    })
+                })?;
                 self.wake_route(epoch, freed)?;
                 self.port().coordination().waiters().wake_closed();
                 Ok(())
@@ -232,18 +267,19 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
 
     fn recv_chan(
         &mut self,
-        lease: channels::Lease<'d, ID>,
+        gate: gates::Channel<'d, ID>,
         server: channel::Event<'_, 'd>,
         attempt: Attempt<'d, ID>,
         parts: &mut service::Turn<'_, '_, 'd, ID>,
     ) -> Result<ops::Input<'d, ID>, failure::Error> {
-        let epoch = epoch::Id::new(parts.conn_id);
+        let (lease, published) = gate.into_parts();
+        let epoch = parts.conn_id;
         let out = &mut parts.sink;
         let region = parts.driver.region_token();
         let mut request = |next| parts.close.request(next);
         let close = &mut request;
 
-        use method::channel::{CloseOk, FlowOk};
+        use method::channel::CloseOk;
 
         let store = &self.port().content;
         let stores = store.stores();
@@ -257,23 +293,27 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
                                 .change(view.topology, stores, change::Event::Reopened)
                         })
                     })
-                    .ok_or(failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
+                    .ok_or_else(|| failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
                 self.wake_route(epoch, freed)?;
-                self.complete(lease, ok, epoch, region)?;
+                self.complete(lease, || ok.into(), epoch, region)?;
                 Ok(())
             }
             channel::Event::Flow(f) => {
-                self.send_method(out, region, channel, &FlowOk { active: f.active })?;
-                self.with_lease(region, lease, |c| c.control().set_flow(f.active))
-                    .ok_or(failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
+                let pending = self
+                    .with_lease(region, lease, |c| {
+                        let c = c.publish();
+                        c.control.try_flow(f.active, c.publishing.is_active())
+                    })
+                    .ok_or_else(|| failure::Error::Protocol(Fault::ChannelUnknown { channel }))??;
+                if !pending {
+                    self.port()
+                        .flow(local::Access::new(region), epoch, lease, f.active)?;
+                }
                 if f.active {
                     self.port().coordination().waiters().wake_flow();
                 }
                 Ok(())
             }
-            channel::Event::FlowOk(flow) => Err(failure::Error::UnexpectedFlowOk {
-                active: flow.active,
-            }),
             channel::Event::Close(remote) => {
                 let err = failure::Error::Server {
                     reply_code: remote.reply_code,
@@ -287,13 +327,13 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
                             .routes
                             .project(lease, |view| view.channel.has_replay(view.topology))
                     })
-                    .ok_or(failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
+                    .ok_or_else(|| failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
                 // The broker's cause remains primary if its reply cannot be queued.
                 let owner = match self.send_method(out, region, channel, &CloseOk) {
-                    Ok(()) => ops::FailureOwner::Reply(commit::Commit::new(epoch)),
+                    Ok(()) => ops::FailureOwner::Reply(epoch),
                     Err(_) => ops::FailureOwner::Immediate(epoch),
                 };
-                if replay && err.is_not_found() {
+                if replay {
                     self.fail_session(close, owner, recovery::Fault::channel(err), region);
                 } else {
                     self.fail_session(close, owner, recovery::Fault::terminal(err), region);
@@ -301,38 +341,43 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
                 Ok(())
             }
             channel::Event::CloseOk(ok) => {
-                let (freed, done) = self
+                let (freed, done, replay) = self
                     .with_shared(region, |shared| {
                         shared.routes.project(lease, |view| {
-                            let freed = view.channel.change(
-                                view.topology,
-                                stores,
-                                change::Event::ChannelClosed,
-                            );
-                            let mut turn = view.channel.method_turn(stores);
-                            let done = turn.complete(
-                                view.topology,
-                                <CloseOk as method::Reply>::KIND,
-                                protocol::Response::from(ok),
-                            );
-                            (freed, done)
+                            let done = view
+                                .channel
+                                .method_turn(stores)
+                                .complete(view.topology, protocol::Response::from(ok));
+                            let replay = matches!(&done, Ok((methods::Next::Replay { .. }, _)));
+                            let freed = if replay {
+                                view.channel.control().phase = Phase::Closed;
+                                crate::state::channel::Freed::Available
+                            } else {
+                                view.channel.change(
+                                    view.topology,
+                                    stores,
+                                    change::Event::ChannelClosed,
+                                )
+                            };
+                            (freed, done, replay)
                         })
                     })
-                    .ok_or(failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
+                    .ok_or_else(|| failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
                 self.wake_route(epoch, freed)?;
                 let (done, _) = done?;
                 self.apply_next(lease, done, epoch, region)?;
-                self.with_shared(region, |shared| {
-                    shared.routes.project(lease, |view| view.topology.clear())
-                })
-                .ok_or(failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
-                self.with_shared(region, |shared| shared.routes.collect(lease));
+                if !replay {
+                    self.with_shared(region, |shared| {
+                        shared.routes.project(lease, |view| view.topology.clear())
+                    })
+                    .ok_or_else(|| failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
+                    self.with_shared(region, |shared| shared.routes.collect(lease));
+                }
                 Ok(())
             }
-            channel::Event::ExchangeDeclare(ok) => self.complete(lease, ok, epoch, region),
-            channel::Event::ExchangeDelete(ok) => self.complete(lease, ok, epoch, region),
-            channel::Event::ExchangeBind(ok) => self.complete(lease, ok, epoch, region),
-            channel::Event::ExchangeUnbind(ok) => self.complete(lease, ok, epoch, region),
+            channel::Event::Done(kind) => {
+                self.complete(lease, || protocol::Response::Empty(kind), epoch, region)
+            }
             channel::Event::QueueDeclare(view) => {
                 let name = view.try_queue()?;
                 let queue = self
@@ -344,9 +389,12 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
                                 .retain_queue(route.topology, name)
                         })
                     })
-                    .ok_or(failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
+                    .ok_or_else(|| failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
                 match queue {
-                    Ok(queue) => self.complete(lease, view.retain(queue), epoch, region),
+                    Ok(queue) => {
+                        let done = view.retain(queue);
+                        self.complete(lease, || done.into(), epoch, region)
+                    }
                     Err(flight::Fault::Mismatch(mismatch)) => {
                         let error = failure::Error::QueueName {
                             expected: mismatch.into_name(),
@@ -359,11 +407,8 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
                     Err(flight::Fault::Retain(error)) => Err(failure::Error::Retain(error)),
                 }
             }
-            channel::Event::QueueBind(ok) => self.complete(lease, ok, epoch, region),
-            channel::Event::QueueUnbind(ok) => self.complete(lease, ok, epoch, region),
-            channel::Event::QueuePurge(ok) => self.complete(lease, ok, epoch, region),
-            channel::Event::QueueDelete(ok) => self.complete(lease, ok, epoch, region),
-            channel::Event::Qos(ok) => self.complete(lease, ok, epoch, region),
+            channel::Event::QueuePurge(ok) => self.complete(lease, || ok.into(), epoch, region),
+            channel::Event::QueueDelete(ok) => self.complete(lease, || ok.into(), epoch, region),
             channel::Event::Consume(view) => {
                 let tag = view.tag();
                 let done = self.with_shared(region, |shared| {
@@ -374,8 +419,8 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
                         )
                     })
                 });
-                let (index, next) =
-                    done.ok_or(failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
+                let (index, next) = done
+                    .ok_or_else(|| failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
                 let next = match next {
                     Ok(next) => next,
                     Err(access::Fault::Mismatch(mismatch)) => {
@@ -399,11 +444,11 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
                 let done = self.with_shared(region, |shared| {
                     shared.routes.project(lease, |route| {
                         let mut turn = route.channel.method_turn(stores);
-                        (route.index.lane(), turn.cancel(route.topology, ok))
+                        (route.index.lane(), turn.cancel(ok))
                     })
                 });
-                let (index, done) =
-                    done.ok_or(failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
+                let (index, done) = done
+                    .ok_or_else(|| failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
                 match done {
                     Ok(next) => {
                         self.apply_next(lease, next, epoch, region)?;
@@ -419,26 +464,30 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
                 let tag = c_msg.consumer_tag();
                 let freed = self
                     .with_lease(region, lease, |c| c.content(stores).cancel(tag.value()))
-                    .ok_or(failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
+                    .ok_or_else(|| failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
                 self.wake_route(epoch, freed)?;
                 Ok(())
             }
-            channel::Event::Recover(ok) => self.complete(lease, ok, epoch, region),
             channel::Event::Ack(a) => self
                 .with_lease(region, lease, |c| {
-                    c.confirm()
-                        .complete(a.delivery_tag, a.multiple, protocol::Confirmation::Ack)
+                    c.confirm().complete(
+                        published,
+                        a.delivery_tag,
+                        a.multiple,
+                        protocol::Confirmation::Ack,
+                    )
                 })
-                .ok_or(failure::Error::Protocol(Fault::ChannelUnknown { channel }))?,
+                .ok_or_else(|| failure::Error::Protocol(Fault::ChannelUnknown { channel }))?,
             channel::Event::Nack(n) => self
                 .with_lease(region, lease, |c| {
                     c.confirm().complete(
+                        published,
                         n.delivery_tag,
                         n.multiple,
                         protocol::Confirmation::Nack { requeue: n.requeue },
                     )
                 })
-                .ok_or(failure::Error::Protocol(Fault::ChannelUnknown { channel }))?,
+                .ok_or_else(|| failure::Error::Protocol(Fault::ChannelUnknown { channel }))?,
             channel::Event::Deliver(delivery) => {
                 return self
                     .with_lease(region, lease, |channel| {
@@ -453,7 +502,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
                             }
                         }
                     })
-                    .ok_or(failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
+                    .ok_or_else(|| failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
             }
             channel::Event::Return(returned) => {
                 return self
@@ -469,16 +518,13 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
                             }
                         }
                     })
-                    .ok_or(failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
+                    .ok_or_else(|| failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
             }
             channel::Event::Confirm(ok) => {
                 self.with_lease(region, lease, |c| c.confirm().enable())
-                    .ok_or(failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
-                self.complete(lease, ok, epoch, region)
+                    .ok_or_else(|| failure::Error::Protocol(Fault::ChannelUnknown { channel }))?;
+                self.complete(lease, || ok.into(), epoch, region)
             }
-            channel::Event::TxSelect(ok) => self.complete(lease, ok, epoch, region),
-            channel::Event::TxCommit(ok) => self.complete(lease, ok, epoch, region),
-            channel::Event::TxRollback(ok) => self.complete(lease, ok, epoch, region),
         };
         done.map(|()| ops::Input::Committed)
     }

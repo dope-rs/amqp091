@@ -4,6 +4,8 @@ use o3::mem::rc;
 
 use crate::failure::wire::{self, turn};
 use crate::protocol::topology;
+use crate::protocol::wire::Fingerprint;
+use crate::protocol::wire::schema::queues;
 use crate::protocol::wire::text::{resident, short};
 use crate::state::channel::{consumer, methods};
 
@@ -147,6 +149,12 @@ impl<'c, 'b, 'd, const ID: u8> Flight<'c, 'b, 'd, ID> {
         Self { head: None }
     }
 
+    pub(super) fn replays(&self, key: consumer::Key) -> bool {
+        self.head.as_ref().is_some_and(
+            |head| matches!(head.response, Prepared::ConsumerReplay(actual) if actual == key),
+        )
+    }
+
     pub(super) fn check(&self, key: methods::MethodKey) -> Result<(), wire::Fault> {
         let Some(head) = self.head.as_ref() else {
             return Ok(());
@@ -207,9 +215,9 @@ impl<'c, 'b, 'd, const ID: u8> Flight<'c, 'b, 'd, ID> {
             let phase = head.response.phase();
             if let Prepared::Work(work) = &head.response {
                 let name = match work {
-                    topology::Work::QueueDeclare(queue, _) if !queue.user_name().is_empty() => {
-                        queue.try_user().map_err(Fault::Retain)?
-                    }
+                    topology::Work::QueueDeclare(queue, _) => queue
+                        .try_field(queues::Declaration::QUEUE)
+                        .map_err(Fault::Retain)?,
                     topology::Work::QueueRedeclare { key: queue, .. } => topo
                         .queue_name(*queue)
                         .map_err(Fault::Retain)?
@@ -231,9 +239,30 @@ impl<'c, 'b, 'd, const ID: u8> Flight<'c, 'b, 'd, ID> {
             }
             match mem::replace(&mut head.response, Prepared::None) {
                 Prepared::Identity { writer, work } => {
+                    let hash = Fingerprint::of(value.value().as_bytes()).get();
+                    let (name, work) = match work {
+                        Some(topology::Work::QueueDeclare(record, plan)) => {
+                            let (stored, name) = writer.commit_pair(value.into(), hash);
+                            let key = topo.declare(record, plan, Some(stored));
+                            (
+                                name,
+                                Some(topology::Work::QueueRedeclare {
+                                    key,
+                                    update_current: false,
+                                }),
+                            )
+                        }
+                        work => {
+                            let name = writer.commit(value.into(), hash);
+                            if work.is_none() {
+                                topo.inspect(value, hash);
+                            }
+                            (name, work)
+                        }
+                    };
                     let release = work.is_none();
-                    head.response = work.map_or(Prepared::None, Prepared::Work);
-                    (writer.commit(value.into()).into(), release)
+                    head.response = work.map_or_else(|| Prepared::None, Prepared::Work);
+                    (name.into(), release)
                 }
                 Prepared::Refresh(refresh) => {
                     let (key, name) = refresh.commit(topo, value);

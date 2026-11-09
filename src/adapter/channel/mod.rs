@@ -17,10 +17,9 @@ use crate::adapter::core::egress;
 use crate::adapter::{self, conn, core};
 use crate::failure;
 use crate::protocol::method::{self, channel};
-use crate::service::cancel::pending::reap;
 use crate::service::cancel::{self};
 use crate::state::channel::cancel::lanes;
-use crate::state::channel::{Freed, returns};
+use crate::state::channel::returns;
 use crate::state::{channels, shared};
 
 #[repr(transparent)]
@@ -119,37 +118,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Channels<'o, 'r, 'c, 'b, 
         target: conn::Ready<'d, ID>,
         id: u16,
     ) -> Result<Reservation<'o, 'c, 'd, ID>, failure::Runtime<'c, 'b, 'd, ID>> {
-        match core::Gate::new(self.core, target).with(
-            access,
-            |state| -> Result<Reservation<'o, 'c, 'd, ID>, failure::Error> {
-                self.reap(state, Some(id))?;
-                state.routes.reserve(
-                    id,
-                    state.connection.negotiated().channel_max,
-                    |index, raw| {
-                        Ok(Reservation {
-                            cancellation: o3::mem::Lease::open(
-                                self.core.cancel().issue(
-                                    index,
-                                    raw,
-                                    lanes::Slot::<lanes::Reservation>::ZERO,
-                                    raw,
-                                )?,
-                                (),
-                            ),
-                            scope: marker::PhantomData,
-                        })
-                    },
-                )
-            },
-        ) {
-            crate::service::EpochAccess::Live(Ok(slot)) => Ok(slot),
-            crate::service::EpochAccess::Live(Err(error)) => Err(failure::Runtime::from(error)),
-            crate::service::EpochAccess::Terminal(cause) => Err(cause.branded()),
-            crate::service::EpochAccess::Unknown => {
-                Err(failure::Runtime::from(failure::Error::Closed))
-            }
-        }
+        self.admit::<true>(access, target, id)
     }
 
     pub fn next(
@@ -157,26 +126,39 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Channels<'o, 'r, 'c, 'b, 
         access: local::Access<'_, region::Identity<'d>>,
         target: conn::Ready<'d, ID>,
     ) -> Result<Reservation<'o, 'c, 'd, ID>, failure::Runtime<'c, 'b, 'd, ID>> {
+        self.admit::<false>(access, target, 0)
+    }
+
+    fn admit<const EXACT: bool>(
+        self,
+        access: local::Access<'_, region::Identity<'d>>,
+        target: conn::Ready<'d, ID>,
+        id: u16,
+    ) -> Result<Reservation<'o, 'c, 'd, ID>, failure::Runtime<'c, 'b, 'd, ID>> {
         match core::Gate::new(self.core, target).with(
             access,
             |state| -> Result<Reservation<'o, 'c, 'd, ID>, failure::Error> {
-                self.reap(state, None)?;
-                state
-                    .routes
-                    .next(state.connection.negotiated().channel_max, |index, raw| {
-                        Ok(Reservation {
-                            cancellation: o3::mem::Lease::open(
-                                self.core.cancel().issue(
-                                    index,
-                                    raw,
-                                    lanes::Slot::<lanes::Reservation>::ZERO,
-                                    raw,
-                                )?,
-                                (),
-                            ),
-                            scope: marker::PhantomData,
-                        })
+                self.reap(state, EXACT.then_some(id))?;
+                let max = state.connection.negotiated().channel_max;
+                let init = |index, raw| {
+                    Ok(Reservation {
+                        cancellation: o3::mem::Lease::open(
+                            self.core.cancel().issue(
+                                index,
+                                raw,
+                                lanes::Slot::<lanes::Reservation>::ZERO,
+                                raw,
+                            )?,
+                            (),
+                        ),
+                        scope: marker::PhantomData,
                     })
+                };
+                if EXACT {
+                    state.routes.reserve(id, max, init)
+                } else {
+                    state.routes.next(max, init)
+                }
             },
         ) {
             crate::service::EpochAccess::Live(Ok(slot)) => Ok(slot),
@@ -201,16 +183,17 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Channels<'o, 'r, 'c, 'b, 
                 let Some(index) = state.routes.project(lease, |route| route.index) else {
                     return Ok(());
                 };
-                self.core
-                    .cancel()
-                    .reap::<lanes::Reservation>(index, lease, |item| {
-                        state.routes.collect(item.lease());
-                        reap::Decision::Remove
-                    })?;
+                let _ = self.core.cancel().try_reap::<lanes::Reservation, _>(
+                    index,
+                    lease,
+                    |held, _| {
+                        state.routes.collect(held);
+                        Some(())
+                    },
+                )?;
             }
-            None => self.core.cancel().reap_any::<lanes::Reservation>(|item| {
-                state.routes.collect(item.lease());
-                reap::Decision::Remove
+            None => self.core.cancel().reap_any(|lease| {
+                state.routes.collect(lease);
             }),
         }
         Ok(())
@@ -221,9 +204,9 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Channels<'o, 'r, 'c, 'b, 
         access: local::Access<'_, region::Identity<'d>>,
         id: u16,
     ) -> Option<Lease<'c, 'd, ID>> {
-        self.core
-            .shared()
-            .write(access, |state| state.routes.lease(id).map(Lease::from_raw))
+        self.core.shared().read(access.read(), |state| {
+            state.routes.lease(id).map(Lease::from_raw)
+        })
     }
 
     pub fn release(
@@ -239,6 +222,8 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Channels<'o, 'r, 'c, 'b, 
 
     /// Waits for exact channel order and transport credit while the caller
     /// retains the semantic method value.
+    /// After `Pending`, retain `credit` for the next poll or pass it to
+    /// [`Self::cancel_send`] before abandoning the operation.
     pub fn poll_send<M: method::Encode>(
         self,
         access: local::Access<'_, region::Identity<'d>>,
@@ -256,6 +241,13 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Channels<'o, 'r, 'c, 'b, 
             credit,
             wake,
         )
+    }
+
+    /// Cancels a pending send and wakes at most one successor in its original
+    /// channel or transport-credit lane. The wake is a retry hint; its recipient
+    /// must recheck admission.
+    pub fn cancel_send(self, credit: &mut queue::Registration<'o, 'd, fifo::Scope<'c>>) {
+        self.core.permits().cancel(credit);
     }
 
     pub fn flow_active(
@@ -305,13 +297,9 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Channels<'o, 'r, 'c, 'b, 
                 returned: item,
                 freed,
             }))) => {
-                match freed {
-                    Freed::Available => {}
-                    Freed::Route => self
-                        .core
-                        .wake_route(target.epoch().raw())
-                        .map_err(failure::Runtime::from)?,
-                }
+                self.core
+                    .wake_route(target.epoch().raw(), freed)
+                    .map_err(failure::Runtime::from)?;
                 Ok(Some(item))
             }
             crate::service::EpochAccess::Live(Some(Ok(returns::Next::Pending))) => Ok(None),

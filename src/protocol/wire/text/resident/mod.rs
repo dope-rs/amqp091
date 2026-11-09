@@ -1,5 +1,5 @@
 use std::hash::{Hash, Hasher};
-use std::{mem, str};
+use std::mem;
 
 use o3::buffer::resident;
 use o3::depot::arena::pool::{Shared, Unique, shared};
@@ -11,6 +11,7 @@ pub use short::Short;
 use crate::protocol::wire::Fingerprint;
 use crate::protocol::wire::text::{self, short::Buf};
 
+mod raw;
 mod short;
 
 const CAPACITY: usize = 255;
@@ -18,7 +19,7 @@ const CAPACITY: usize = 255;
 #[derive(Debug)]
 struct Inline {
     len: u8,
-    bytes: [u8; CAPACITY],
+    bytes: [mem::MaybeUninit<u8>; CAPACITY],
     hash: u64,
 }
 
@@ -26,25 +27,13 @@ impl Default for Inline {
     fn default() -> Self {
         Self {
             len: 0,
-            bytes: [0; CAPACITY],
+            bytes: [mem::MaybeUninit::uninit(); CAPACITY],
             hash: Fingerprint::new().get(),
         }
     }
 }
 
 impl Inline {
-    fn initialize(&mut self, value: text::short::Short<'_>) {
-        for (target, byte) in self.bytes.iter_mut().zip(value.value().bytes()) {
-            *target = byte;
-        }
-        self.len = value.len();
-        self.hash = Fingerprint::of(value.value().as_bytes()).get();
-    }
-
-    fn as_slice(&self) -> &[u8] {
-        &self.bytes[..self.len as usize]
-    }
-
     const fn hash(&self) -> u64 {
         self.hash
     }
@@ -55,16 +44,12 @@ pub(crate) struct Pool(shared::Store<Inline>);
 
 #[must_use = "an identity writer must be committed, restored, or released"]
 #[repr(transparent)]
-pub(crate) struct Writer<'d>(
-    Unique<'d, shared::Resident<Inline>, shared::Header<Inline>, shared::Initialized>,
-);
+pub(crate) struct Writer<'d>(Unique<'d, shared::Resident<Inline>, (), shared::Initialized>);
 
 #[must_use = "dropping the final identity lease recycles its slot"]
 #[derive(Debug)]
 #[repr(transparent)]
-pub struct Identity<'d>(
-    Shared<'d, shared::Resident<Inline>, shared::Header<Inline>, shared::Initialized>,
-);
+pub struct Identity<'d>(Shared<'d, Inline>);
 
 impl Pool {
     pub(crate) fn try_new(cap: capacity::Count) -> Result<Self, alloc::Error> {
@@ -81,14 +66,15 @@ impl<'d> Writer<'d> {
     pub(crate) fn commit_pair(
         mut self,
         value: text::short::Short<'_>,
+        hash: u64,
     ) -> (Identity<'d>, Identity<'d>) {
-        self.0.initialize(value);
+        self.0.initialize(value, hash);
         let (first, second) = self.0.freeze_pair();
         (Identity(first), Identity(second))
     }
 
-    pub(crate) fn commit(mut self, value: text::short::Short<'_>) -> Identity<'d> {
-        self.0.initialize(value);
+    pub(crate) fn commit(mut self, value: text::short::Short<'_>, hash: u64) -> Identity<'d> {
+        self.0.initialize(value, hash);
         let lease = self.0.freeze();
         Identity(lease)
     }
@@ -109,9 +95,7 @@ impl Identity<'_> {
     }
 
     pub fn as_str(&self) -> &str {
-        let bytes = self.0.as_slice();
-        // SAFETY: Short proves NUL-free UTF-8 of at most CAPACITY bytes, copied unchanged.
-        unsafe { str::from_utf8_unchecked(bytes) }
+        self.0.as_str()
     }
 }
 
@@ -173,7 +157,7 @@ impl<'d> Exact<'d> {
     pub(crate) fn from_owned(value: Buf) -> Self {
         let owner = resident::Exact::from_plain(value.0);
         // SAFETY: Buf validates UTF-8 before publishing its immutable owner.
-        Self(unsafe { buffer::raw::Text::from_utf8(owner) })
+        Self(unsafe { buffer::raw::utf8(owner) })
     }
 
     pub fn as_str(&self) -> &str {

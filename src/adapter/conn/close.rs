@@ -46,25 +46,24 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'text, 'd: 'b, const ID: u8> Close<'text, 'o, '
         mut wake: wake::Waker<'d>,
     ) -> task::Poll<Result<(), failure::Runtime<'c, 'b, 'd, ID>>> {
         loop {
-            let state = mem::replace(&mut self.state, State::Done);
-            match state {
-                State::Start(mut start) => match start.step(access.reborrow(), wake) {
-                    step::Step::Pending => {
-                        self.state = State::Start(start);
-                        return task::Poll::Pending;
-                    }
+            match &mut self.state {
+                State::Start(start) => match start.step(access.reborrow(), wake) {
+                    step::Step::Pending => return task::Poll::Pending,
                     step::Step::Ready((core, target), next) => {
                         self.state = State::Wait(Wait::new(core, target));
                         wake = next;
                     }
-                    step::Step::Error(error) => return task::Poll::Ready(Err(error)),
-                },
-                State::Wait(mut wait) => match wait.poll(access.reborrow(), wake) {
-                    task::Poll::Pending => {
-                        self.state = State::Wait(wait);
-                        return task::Poll::Pending;
+                    step::Step::Error(error) => {
+                        self.state = State::Done;
+                        return task::Poll::Ready(Err(error));
                     }
-                    task::Poll::Ready(output) => return task::Poll::Ready(output),
+                },
+                State::Wait(wait) => match wait.poll(access.reborrow(), wake) {
+                    task::Poll::Pending => return task::Poll::Pending,
+                    task::Poll::Ready(output) => {
+                        self.state = State::Done;
+                        return task::Poll::Ready(output);
+                    }
                 },
                 State::Done => {
                     return task::Poll::Ready(Err(failure::Runtime::from(failure::Error::Polled)));
@@ -126,7 +125,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Wait<'o, 'r, 'c, 'b, 'd, 
 
 const _: () = assert!(
     mem::size_of::<Close<'static, 'static, 'static, 'static, 'static, 'static, 0>>()
-        == 8 * mem::size_of::<usize>()
+        == 9 * mem::size_of::<usize>()
 );
 const _: () = assert!(
     mem::size_of::<Wait<'static, 'static, 'static, 'static, 'static, 0>>()

@@ -3,7 +3,6 @@ use o3::base::cell::{local, region};
 use crate::adapter::channel::{Lease, receipt};
 use crate::adapter::{conn, core};
 use crate::protocol::wire::Writer;
-use crate::state::shared;
 use crate::{failure, service};
 
 mod view;
@@ -53,17 +52,6 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8, K: core::Capability>
         receipt::Receipt::new(self.core(), self.epoch(), self.lease)
     }
 
-    pub(in crate::adapter) fn read<R>(
-        self,
-        access: local::Read<'_, region::Identity<'d>>,
-        f: impl for<'s> FnOnce(&'s shared::Session<'r, 'c, 'b, 'd, ID>) -> R,
-    ) -> service::EpochAccess<'c, 'b, 'd, R>
-    where
-        K: core::Allows<core::State>,
-    {
-        self.gate.read(access, f)
-    }
-
     pub(in crate::adapter) fn with<R>(
         self,
         access: local::Access<'_, region::Identity<'d>>,
@@ -106,7 +94,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8, K: core::Capability>
     pub(in crate::adapter) fn try_frame<P, R, D>(
         self,
         access: local::Access<'_, region::Identity<'d>>,
-        encode: impl FnOnce(&mut Writer) -> P,
+        encode: impl FnOnce(&mut Writer, local::Access<'_, region::Identity<'d>>) -> P,
         commit: impl for<'conn, 'a, 's, 'v> FnOnce(
             View<'conn, 'a, 's, 'v, 'r, 'c, 'b, 'd, ID>,
             &[u8],

@@ -40,8 +40,8 @@ pub(super) struct Content<'b, 'd> {
 pub(super) struct Entry<'b, 'd> {
     pub(super) kind: Kind,
     pub(super) content: Option<Content<'b, 'd>>,
-    pub(super) text: [u8; fields::PACKED_CAPACITY],
     resource: resource::Entry,
+    pub(super) text: [mem::MaybeUninit<u8>; fields::PACKED_CAPACITY],
 }
 
 impl Entry<'_, '_> {
@@ -71,7 +71,7 @@ impl recycle::Recycle for Entry<'_, '_> {
         Self {
             kind: Kind { empty: () },
             content: None,
-            text: [0; fields::PACKED_CAPACITY],
+            text: [mem::MaybeUninit::uninit(); fields::PACKED_CAPACITY],
             resource,
         }
     }

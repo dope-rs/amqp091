@@ -2,11 +2,14 @@ use std::mem;
 
 use crate::failure::{self, wire};
 use crate::protocol::method::{self, conn};
+use crate::state::channel::methods::MethodKey;
 use crate::state::conn::phase::Phase;
 use crate::state::{channel, channels};
 
-#[repr(transparent)]
-pub(in crate::service) struct Channel<'d, const ID: u8>(channels::Lease<'d, ID>);
+pub(in crate::service) struct Channel<'d, const ID: u8> {
+    lease: channels::Lease<'d, ID>,
+    published: u64,
+}
 
 pub(super) fn connection_phase(phase: Phase) -> wire::ConnPhase {
     match phase {
@@ -21,11 +24,9 @@ pub(super) fn connection_phase(phase: Phase) -> wire::ConnPhase {
 pub(super) fn connection(
     kind: conn::Kind,
     phase: Phase,
+    receipt: Phase,
     closing: bool,
 ) -> Result<bool, failure::Error> {
-    if closing && !matches!(kind, conn::Kind::Close | conn::Kind::CloseOk) {
-        return Ok(false);
-    }
     let valid = match kind {
         conn::Kind::Start => phase == Phase::Start,
         conn::Kind::Secure | conn::Kind::Tune => phase == Phase::Tune,
@@ -37,9 +38,15 @@ pub(super) fn connection(
         conn::Kind::CloseOk => phase == Phase::Ready && closing,
         conn::Kind::Blocked | conn::Kind::Unblocked => phase == Phase::Ready,
     };
-    if valid {
+    if valid
+        && (!matches!(
+            kind,
+            conn::Kind::Start | conn::Kind::Secure | conn::Kind::Tune | conn::Kind::Open
+        ) || receipt == phase)
+    {
         return Ok(true);
     }
+    let phase = if valid { receipt } else { phase };
     let method = match kind {
         conn::Kind::Start => wire::ConnMethod::Start,
         conn::Kind::Secure => wire::ConnMethod::Secure,
@@ -79,9 +86,12 @@ impl<'d, const ID: u8> Channel<'d, ID> {
     pub(super) fn check(
         kind: method::Kind,
         phase: channel::Phase,
-        pending: Option<method::Kind>,
+        pending: Option<(MethodKey, method::Kind)>,
+        current: Option<MethodKey>,
         lease: channels::Lease<'d, ID>,
+        published: u64,
     ) -> Result<Self, failure::Error> {
+        let admitted = Self { lease, published };
         match kind {
             method::Kind::Open => {
                 if phase != channel::Phase::Opening {
@@ -98,7 +108,7 @@ impl<'d, const ID: u8> Channel<'d, ID> {
                     phase,
                     channel::Phase::Opening | channel::Phase::Open | channel::Phase::Closing
                 ) {
-                    Ok(Self(lease))
+                    Ok(admitted)
                 } else {
                     Err(Self::fault(kind, phase, lease))
                 };
@@ -110,7 +120,7 @@ impl<'d, const ID: u8> Channel<'d, ID> {
             | method::Kind::Ack
             | method::Kind::Nack => {
                 return if phase == channel::Phase::Open {
-                    Ok(Self(lease))
+                    Ok(admitted)
                 } else {
                     Err(Self::fault(kind, phase, lease))
                 };
@@ -145,19 +155,29 @@ impl<'d, const ID: u8> Channel<'d, ID> {
             }
         }
         match pending {
-            Some(expected) if expected == kind => Ok(Self(lease)),
+            Some((owner, expected)) if expected == kind => {
+                if current != Some(owner) {
+                    return Err(failure::Error::Protocol(wire::Fault::MethodOrder {
+                        expected: owner.into(),
+                        actual: current.map(Into::into),
+                    }));
+                }
+                Ok(admitted)
+            }
             expected => Err(failure::Error::Protocol(wire::Fault::ChanResponse {
                 channel: lease.id(),
-                expected,
+                expected: expected.map(|(_, kind)| kind),
                 actual: kind,
             })),
         }
     }
 
-    pub(super) fn into_lease(self) -> channels::Lease<'d, ID> {
-        self.0
+    pub(super) fn into_parts(self) -> (channels::Lease<'d, ID>, u64) {
+        (self.lease, self.published)
     }
 }
 
-const _: () =
-    assert!(mem::size_of::<Channel<'static, 0>>() == mem::size_of::<channels::Lease<'static, 0>>());
+const _: () = assert!(
+    mem::size_of::<Channel<'static, 0>>()
+        == mem::size_of::<channels::Lease<'static, 0>>() + mem::size_of::<u64>()
+);

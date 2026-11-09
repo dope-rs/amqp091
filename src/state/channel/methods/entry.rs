@@ -10,7 +10,7 @@ use crate::state::channel::consumer;
 use crate::state::channel::methods::{MethodKey, Plane};
 use crate::state::layout;
 
-pub(super) enum Outbound<'b, 'd> {
+pub(in crate::state::channel) enum Outbound<'b, 'd> {
     None,
     Consumer(consumer::Key),
     Orphan(resident::Short<'b, 'd>),
@@ -49,54 +49,38 @@ pub(crate) struct Entry<'c, 'b, 'd> {
 }
 
 impl<'b, 'd> Pending<'b, 'd> {
-    pub(super) fn user(expect: method::Kind) -> Self {
+    fn new(expect: method::Kind, outbound: Outbound<'b, 'd>, origin: Origin) -> Self {
         Self {
             expect,
-            outbound: Outbound::None,
-            waker: store::Entry::empty(),
-            origin: Origin::User,
-            sent: false,
-        }
-    }
-
-    pub(super) fn replay(expect: method::Kind) -> Self {
-        Self {
-            expect,
-            outbound: Outbound::None,
-            waker: store::Entry::empty(),
-            origin: Origin::Replay,
-            sent: false,
-        }
-    }
-
-    pub(super) fn consumer(key: consumer::Key) -> Self {
-        Self {
-            expect: method::Kind::CancelOk,
-            outbound: Outbound::Consumer(key),
-            waker: store::Entry::empty(),
-            origin: Origin::Detached,
-            sent: false,
-        }
-    }
-
-    pub(super) fn orphan(tag: resident::Short<'b, 'd>, origin: Origin) -> Self {
-        Self {
-            expect: method::Kind::CancelOk,
-            outbound: Outbound::Orphan(tag),
+            outbound,
             waker: store::Entry::empty(),
             origin,
             sent: false,
         }
     }
 
+    pub(super) fn user(expect: method::Kind) -> Self {
+        Self::new(expect, Outbound::None, Origin::User)
+    }
+
+    pub(super) fn replay(expect: method::Kind) -> Self {
+        Self::new(expect, Outbound::None, Origin::Replay)
+    }
+
+    pub(super) fn consumer(key: consumer::Key) -> Self {
+        Self::new(
+            method::Kind::CancelOk,
+            Outbound::Consumer(key),
+            Origin::Detached,
+        )
+    }
+
+    pub(super) fn orphan(tag: resident::Short<'b, 'd>, origin: Origin) -> Self {
+        Self::new(method::Kind::CancelOk, Outbound::Orphan(tag), origin)
+    }
+
     pub(super) fn close() -> Self {
-        Self {
-            expect: method::Kind::CloseOk,
-            outbound: Outbound::Close,
-            waker: store::Entry::empty(),
-            origin: Origin::Detached,
-            sent: false,
-        }
+        Self::new(method::Kind::CloseOk, Outbound::Close, Origin::Detached)
     }
 
     pub(super) fn is_control(&self) -> bool {

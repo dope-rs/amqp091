@@ -1,21 +1,14 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
-
 use crate::common::amqp::Peer;
 use crate::common::amqp::app::Endpoint;
 use crate::common::amqp::wire::Frame;
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
-
-use std::io::Write as _;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use dope::core::io::Reclaimed;
 use dope::manifold::timing;
 use dope_amqp091::message::property::Properties;
 use dope_amqp091::{adapter, config};
-use dope_fiber::task::time::sleep::TimerExt as _;
 use dope_test::fibers::Yield;
 use dope_test::harness::peer::TcpScript;
 
@@ -147,12 +140,7 @@ fn interleaves_by_channel() {
                     },
                     |event| reports.push(event),
                     recover,
-                    |result| {
-                        result
-                            .as_ref()
-                            .map_err(|error| error.kind())
-                            .expect("endpoint completion");
-                    },
+                    complete,
                 );
                 assert!(
                     matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]),
@@ -167,11 +155,8 @@ fn interleaves_by_channel() {
 
 #[test]
 fn held_returns_block() {
-    let sent = AtomicBool::new(false);
     use dope_fiber::abi::race::{Either, Race};
 
-    let sent = &sent;
-    let peer = sent;
     TcpScript::with(
         move |stream| {
             Peer::new(stream)
@@ -198,7 +183,6 @@ fn held_returns_block() {
                     )
                     .expect("basic.return content");
             }
-            peer.store(true, Ordering::Release);
             returned::close_connection(stream).expect("AMQP fixture");
         },
         |broker| {
@@ -218,76 +202,70 @@ fn held_returns_block() {
                     basic::POLICY,
                     |rt| {
                         let conn = rt.connection();
-                        let timer = rt.timer();
-                        assert!(rt.block_on(dope_fiber::fiber!('_ => async move {
-                    let ready = conn.observe().ready().await.expect("ready");
-                    let channel = conn.channels().open(1).await.expect("channel open");
-                    let props = Properties::default();
-                    for (route, body) in [
-                        ("official.return.a", b"a".as_slice()),
-                        ("official.return.b", b"b".as_slice()),
-                        ("official.return.c", b"c".as_slice()),
-                    ] {
-                        channel
-                            .basic()
-                            .publish(adapter::publish::Request {
-                                exchange: basic::EXCHANGE,
-                                routing_key: route,
-                                mandatory: true,
-                                properties: &props,
-                                body,
-                            })
-                            .await
-                            .expect("mandatory publish");
-                    }
-                    while !sent.load(Ordering::Acquire) {
-                        let sleep = (timer.sleep(Duration::from_millis(1))).expect("broker send wait");
-                        sleep.await;
-                    }
+                        assert!(
+                            rt.block_on(dope_fiber::fiber!('_ => async move {
+                                let ready = conn.observe().ready().await.expect("ready");
+                                let channel = conn.channels().open(1).await.expect("channel open");
+                                let props = Properties::default();
+                                for (route, body) in [
+                                    ("official.return.a", b"a".as_slice()),
+                                    ("official.return.b", b"b".as_slice()),
+                                    ("official.return.c", b"c".as_slice()),
+                                ] {
+                                    channel
+                                        .basic()
+                                        .publish(adapter::publish::Request {
+                                            exchange: basic::EXCHANGE,
+                                            routing_key: route,
+                                            mandatory: true,
+                                            properties: &props,
+                                            body,
+                                        })
+                                        .await
+                                        .expect("mandatory publish");
+                                }
+                                let first = channel
+                                    .next_return()
+                                    .await
+                                    .expect("first return state")
+                                    .expect("first basic.return");
+                                let second = channel
+                                    .next_return()
+                                    .await
+                                    .expect("second return state")
+                                    .expect("second basic.return");
+                                assert_eq!(first.routing_key(), "official.return.a");
+                                assert!(first.body() == b"a"[..]);
+                                assert_eq!(second.routing_key(), "official.return.b");
+                                assert!(second.body() == b"b"[..]);
 
-                    let first = channel
-                        .next_return()
-                        .await
-                        .expect("first return state")
-                        .expect("first basic.return");
-                    let second = channel
-                        .next_return()
-                        .await
-                        .expect("second return state")
-                        .expect("second basic.return");
-                    assert_eq!(first.routing_key(), "official.return.a");
-                    assert!(first.body() == b"a"[..]);
-                    assert_eq!(second.routing_key(), "official.return.b");
-                    assert!(second.body() == b"b"[..]);
+                                let result = Race::new(channel.next_return(), Yield::new()).await;
+                                assert!(matches!(result, Either::Right(())));
 
-                    let result = Race::new(channel.next_return(), Yield::new()).await;
-                    assert!(matches!(result, Either::Right(())));
-
-                    first.release();
-                    let third = channel
-                        .next_return()
-                        .await
-                        .expect("third return state")
-                        .expect("third basic.return");
-                    assert_eq!(third.routing_key(), "official.return.c");
-                    assert!(third.body() == b"c"[..]);
-                    assert!(second.body() == b"b"[..]);
-                    second.release();
-                    third.release();
-                    conn
-                        .control()
-                        .close(ready, 200, "official return backpressure complete")
-                        .await
-                        .expect("connection close");
-                })).is_ok(), "AMQP fiber must complete");
+                                first.release();
+                                let third = channel
+                                    .next_return()
+                                    .await
+                                    .expect("third return state")
+                                    .expect("third basic.return");
+                                assert_eq!(third.routing_key(), "official.return.c");
+                                assert!(third.body() == b"c"[..]);
+                                assert!(second.body() == b"b"[..]);
+                                second.release();
+                                third.release();
+                                conn
+                                    .control()
+                                    .close(ready, 200, "official return backpressure complete")
+                                    .await
+                                    .expect("connection close");
+                            }))
+                            .is_ok(),
+                            "AMQP fiber must complete"
+                        );
                     },
-                    |event| reports.push(event), recover,
-                    |result| {
-                        result
-                            .as_ref()
-                            .map_err(|error| error.kind())
-                            .expect("endpoint completion");
-                    },
+                    |event| reports.push(event),
+                    recover,
+                    complete,
                 );
                 assert!(
                     matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]),
@@ -296,7 +274,8 @@ fn held_returns_block() {
             };
             broker.finish().expect("scripted AMQP broker completion");
         },
-    ).expect("scripted AMQP broker");
+    )
+    .expect("scripted AMQP broker");
 }
 
 #[test]
@@ -380,9 +359,7 @@ fn return_waiter_is_exclusive() {
                     })).expect("fiber");
                 },
                 recover,
-                |result| {
-                    result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker completion");
         },
@@ -390,8 +367,9 @@ fn return_waiter_is_exclusive() {
 }
 
 #[test]
-fn close_wakes_return() {
+fn close_wakes_return_and_flow_before_reply() {
     use std::cell::Cell;
+    use std::time::Duration;
 
     use dope_fiber::abi::PollFn;
     use dope_fiber::task::batch::{Join, Pool};
@@ -401,10 +379,29 @@ fn close_wakes_return() {
 
     TcpScript::with(
         |stream| {
-            Peer::new(stream).open(basic::TUNE).expect("handshake");
+            stream.read_wait(Some(Duration::from_secs(10))).expect("read deadline");
+            Peer::new(stream).open(common::client::TUNE).expect("handshake");
             let channel = returned::open_channel(stream).expect("channel");
+            let flow_barrier = returned::open_channel(stream).expect("flow barrier channel");
+            let return_barrier = returned::open_channel(stream).expect("return barrier channel");
+            Method::read(stream).expect("flow barrier").check(flow_barrier, 50, 30)
+                .expect("flow barrier method");
+            Method::write(stream, channel, 20, 20, &[0]).expect("channel flow inactive");
+            Method::read(stream).expect("flow reply").check(channel, 20, 21)
+                .expect("channel flow-ok");
+            Method::write(stream, flow_barrier, 50, 31, &[0; 4]).expect("flow barrier reply");
             Method::read(stream).expect("channel close").check(channel, 20, 40)
                 .expect("close method");
+            let first = Method::read(stream).expect("first waiter wake");
+            let second = Method::read(stream).expect("second waiter wake");
+            first.check(first.channel(), 50, 30).expect("first wake barrier");
+            second.check(second.channel(), 50, 30).expect("second wake barrier");
+            assert!(
+                (first.channel(), second.channel()) == (flow_barrier, return_barrier)
+                    || (first.channel(), second.channel()) == (return_barrier, flow_barrier)
+            );
+            Method::write(stream, flow_barrier, 50, 31, &[0; 4]).expect("flow wake reply");
+            Method::write(stream, return_barrier, 50, 31, &[0; 4]).expect("return wake reply");
             Method::write(stream, channel, 20, 41, &[]).expect("channel close-ok");
             let channel = returned::open_channel(stream).expect("reopened channel");
             Method::read(stream).expect("return barrier").check(channel, 50, 30)
@@ -418,35 +415,54 @@ fn close_wakes_return() {
             common::client::with(
                 broker.addr(),
                 config::Config::new("guest", "guest").expect("config")
-                    .capacity(config::Capacity::default().channels(1)),
+                    .capacity(config::Capacity::default().channels(3)),
                 |rt| {
                     let conn = rt.connection();
                     rt.block_on(dope_fiber::fiber!('_ => async move {
                         let ready = conn.observe().ready().await.expect("ready");
                         let channel = conn.channels().open(1).await.expect("channel");
-                        let registered = Cell::new(false);
+                        let flow_barrier = conn.channels().open(2).await.expect("flow barrier channel");
+                        let return_barrier = conn.channels().open(3).await.expect("return barrier channel");
+                        flow_barrier.queue().purge("flow").await.expect("flow inactive barrier");
+                        let barriers = [&flow_barrier, &return_barrier];
+                        let registered = Cell::new(0_u8);
                         let channel = &channel;
+                        let barriers = &barriers;
                         let registered = &registered;
-                        let waiters = [false, true].map(|closing| dope_fiber::fiber!('_ => async move {
-                            if closing {
-                                while !registered.get() {
+                        let waiters = [0_u8, 1, 2].map(|role| dope_fiber::fiber!('_ => async move {
+                            if role == 2 {
+                                while registered.get() != 3 {
                                     Yield::new().await;
                                 }
                                 channel.close(200, "done").await.expect("channel close");
                             } else {
-                                let mut returned = Pinned::new(channel.next_return());
-                                let result = PollFn::admitted(|admit| {
-                                    let poll = admit.poll(returned.as_pin()).0;
-                                    if poll.is_pending() {
-                                        registered.set(true);
-                                    }
-                                    poll
-                                }).await;
-                                let error = result.err().expect("closed return stream");
+                                let result = if role == 0 {
+                                    let mut flow = Pinned::new(channel.flow());
+                                    PollFn::admitted(|admit| {
+                                        let poll = admit.poll(flow.as_pin()).0;
+                                        if poll.is_pending() {
+                                            registered.set(registered.get() | 1);
+                                        }
+                                        poll
+                                    }).await
+                                } else {
+                                    let mut returned = Pinned::new(channel.next_return());
+                                    let result = PollFn::admitted(|admit| {
+                                        let poll = admit.poll(returned.as_pin()).0;
+                                        if poll.is_pending() {
+                                            registered.set(registered.get() | 2);
+                                        }
+                                        poll
+                                    }).await;
+                                    result.map(|_| ())
+                                };
+                                let error = result.expect_err("closed waiter");
                                 assert!(matches!(error.error(), dope_amqp091::failure::Error::Closed));
+                                barriers[usize::from(role)].queue().purge("closed").await
+                                    .expect("waiter wake barrier");
                             }
                         }));
-                        let mut pool = Pool::<2>::acquire().await.expect("waiter tasks");
+                        let mut pool = Pool::<3>::acquire().await.expect("waiter tasks");
                         Join::from_array(&mut pool, waiters).await.expect("close wake");
                         let channel = conn.channels().open_auto().await.expect("reuse closed channel");
                         let mut next = Pinned::new(channel.next_return());
@@ -459,15 +475,9 @@ fn close_wakes_return() {
                     })).expect("fiber");
                 },
                 recover,
-                |result| {
-                    result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker completion");
         },
     ).expect("broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

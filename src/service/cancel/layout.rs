@@ -15,28 +15,24 @@ impl Layout {
     pub(super) fn try_new(limits: limits::Limits) -> Result<Self, failure::Error> {
         let method = limits.methods.user.raw();
         let count = limits.consumers.raw();
-        let consumer = method
-            .checked_add(count)
-            .ok_or(failure::Error::InvalidConfig(
-                wire::Config::CancellationConsumer {
-                    methods: method,
-                    consumers: count,
-                },
-            ))?;
+        let consumer = method.checked_add(count).ok_or_else(|| {
+            failure::Error::InvalidConfig(wire::Config::CancellationConsumer {
+                methods: method,
+                consumers: count,
+            })
+        })?;
         let count = limits.confirms.raw();
-        let confirm = consumer
-            .checked_add(count)
-            .ok_or(failure::Error::InvalidConfig(
-                wire::Config::CancellationConfirm {
-                    consumer_end: consumer,
-                    confirms: count,
-                },
-            ))?;
-        confirm.checked_add(2).ok_or(failure::Error::InvalidConfig(
-            wire::Config::CancellationSlots {
+        let confirm = consumer.checked_add(count).ok_or_else(|| {
+            failure::Error::InvalidConfig(wire::Config::CancellationConfirm {
+                consumer_end: consumer,
+                confirms: count,
+            })
+        })?;
+        confirm.checked_add(3).ok_or_else(|| {
+            failure::Error::InvalidConfig(wire::Config::CancellationSlots {
                 confirm_end: confirm,
-            },
-        ))?;
+            })
+        })?;
         Ok(Self {
             method_end: method,
             consumer_end: consumer,
@@ -45,7 +41,7 @@ impl Layout {
     }
 
     pub(super) const fn slots(self) -> u32 {
-        self.confirm_end + 2
+        self.confirm_end + 3
     }
 
     pub(super) fn offset(self, kind: lanes::Kind, slot: u32) -> Result<u32, round::Bounds> {
@@ -55,6 +51,7 @@ impl Layout {
             lanes::Kind::Consumer => (self.method_end, self.consumer_end),
             lanes::Kind::Confirm => (self.consumer_end, self.confirm_end),
             lanes::Kind::Publish => (self.confirm_end, self.confirm_end + 1),
+            lanes::Kind::Control => (self.confirm_end + 2, self.confirm_end + 3),
         };
         if slot >= end - base {
             return Err(round::Bounds::Slot {

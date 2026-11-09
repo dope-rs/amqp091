@@ -116,9 +116,9 @@ where
         }
     }
 
-    pub(super) fn cancel(&self) {
-        match &self.phase {
-            Stage::Method(_) => {}
+    pub(super) fn cancel(&mut self) {
+        match &mut self.phase {
+            Stage::Method(method) => method.cancel(),
             Stage::Header(header) => header.stream.cancel(),
             Stage::Body(body) => body.stream.cancel(),
         }
@@ -165,7 +165,10 @@ where
                         phase: Stage::Method(method),
                     });
                 }
-                step::Step::Error(error) => return Poll::Error(error),
+                step::Step::Error(error) => {
+                    method.cancel();
+                    return Poll::Error(error);
+                }
                 step::Step::Ready(start, next) => {
                     wake = next;
                     Stage::Header(method.next(start))
@@ -289,7 +292,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'exchange, 'key, 'properties, 'body, 'd: 'b, co
 
 impl<const ID: u8> Drop for Send<'_, '_, '_, '_, '_, '_, '_, '_, '_, ID> {
     fn drop(&mut self) {
-        if let SendPhase::Active(active) = &self.phase {
+        if let SendPhase::Active(active) = &mut self.phase {
             active.cancel();
         }
     }

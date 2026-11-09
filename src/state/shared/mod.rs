@@ -6,7 +6,7 @@ use dope::net::link::pool::change::opening;
 
 use crate::failure;
 use crate::failure::{recovery, terminal};
-use crate::state::channel::{self, change};
+use crate::state::channel;
 use crate::state::conn::core::Core;
 use crate::state::conn::recovery::Recovery;
 use crate::state::conn::status::Retirement;
@@ -22,12 +22,6 @@ pub(crate) enum Start<'d, const ID: u8> {
     Ignored,
     Applied,
     Route { epoch: epoch::Id<'d, ID> },
-}
-
-#[must_use = "connection change can release a blocked content route"]
-pub(crate) enum Disconnect {
-    Ignored,
-    Applied { freed: channel::Freed },
 }
 
 #[must_use = "connection failure selects the transport retirement"]
@@ -90,18 +84,16 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Edit<'_, 'r, 'c, 'b, 'd, ID> {
         }
     }
 
+    #[must_use = "connection change can release a blocked content route"]
     pub(crate) fn disconnect(
         &mut self,
         target: epoch::Id<'d, ID>,
         reason: failure::Reason,
         stores: channel::Stores<'r, 'c, 'b, 'd>,
-    ) -> Disconnect {
-        let Some(freed) = self.connection.disconnect(target, reason, |cause| {
-            finish(self.recovery, &mut self.routes, cause, stores)
-        }) else {
-            return Disconnect::Ignored;
-        };
-        Disconnect::Applied { freed }
+    ) -> conn::Change {
+        self.connection.disconnect(target, reason, |cause| {
+            let _ = finish(self.recovery, &mut self.routes, cause, stores);
+        })
     }
 
     pub(crate) fn reject(&mut self, cause: Option<opening::Exhaustion>) -> conn::Change {
@@ -125,13 +117,10 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Edit<'_, 'r, 'c, 'b, 'd, ID> {
         take: impl FnOnce() -> Option<terminal::Reservation<'c, 'b, 'd>>,
         stores: channel::Stores<'r, 'c, 'b, 'd>,
     ) -> Failure {
-        let Some(retire) =
-            self.connection.fail(source, error, take, |cause, retire| {
-                match finish(self.recovery, &mut self.routes, cause, stores) {
-                    channel::Freed::Available | channel::Freed::Route => retire,
-                }
-            })
-        else {
+        let Some(retire) = self.connection.fail(source, error, take, |cause, retire| {
+            let _ = finish(self.recovery, &mut self.routes, cause, stores);
+            retire
+        }) else {
             return Failure::Ignored;
         };
         Failure::Applied(retire)
@@ -167,10 +156,7 @@ fn finish<'r, 'c, 'b, 'd, const ID: u8>(
     stores: channel::Stores<'r, 'c, 'b, 'd>,
 ) -> channel::Freed {
     recovery.reset();
-    let mut freed = channel::Freed::Available;
-    routes.for_each(|chan, topo| {
-        freed = freed.merge(chan.change(topo, stores, change::Event::TransportEnded { cause }));
-    });
+    let freed = routes.transport_ended(cause, stores);
     routes.sweep();
     freed
 }
@@ -182,6 +168,5 @@ const _: () = {
             == mem::size_of::<epoch::Id<'static, 0>>()
                 + mem::size_of::<terminal::State<'static, 'static, 'static, 0>>()
     );
-    assert!(mem::size_of::<Disconnect>() == mem::size_of::<conn::Change>());
     assert!(mem::size_of::<Failure>() == 1);
 };

@@ -1,6 +1,6 @@
 use std::marker;
 
-use schema::Identified as _;
+use schema::Suffixed as _;
 
 use crate::failure::wire::Fault;
 use crate::protocol::wire::outputs::{Detached, Fields};
@@ -98,13 +98,20 @@ impl<'a, L: schema::Layout> Encoded<'a, L> {
 
 impl<'a, L: schema::Layout> Encoded<'a, L>
 where
-    L::Proof: schema::Identified,
+    L::Proof: schema::Suffixed,
 {
     pub(crate) fn identity(&self) -> Identity<'a> {
         let proof = self.proof();
         let start = proof.start().get() as usize;
         // SAFETY: new validates this suffix against the same immutable borrow.
         let bytes = unsafe { self.as_slice().get_unchecked(start..) };
-        Identity::new(bytes, proof.fingerprint())
+        Identity::of(bytes)
+    }
+}
+
+impl<'a> Encoded<'a, schema::resource::Layout> {
+    pub(crate) fn name(&self) -> short::Name<'a> {
+        // SAFETY: the sealed resource encoders emit this field from Name.
+        unsafe { short::raw::name(self.field(schema::resource::Layout::NAME)) }
     }
 }

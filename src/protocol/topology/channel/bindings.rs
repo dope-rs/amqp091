@@ -20,12 +20,11 @@ impl<'c, 'd, const ID: u8> Bindings<'c, 'd, ID> {
         q_keys: map::Plan,
         x_cap: capacity::Count,
         x_keys: map::Plan,
-        owner: store::Owner<'d, ID>,
         permits: &crate::permits::Registry<'c, 'd>,
     ) -> Result<Self, alloc::Error> {
         Ok(Self {
-            queues: store::Store::try_new(q_cap, q_keys, owner, permits)?,
-            exchanges: store::Store::try_new(x_cap, x_keys, owner, permits)?,
+            queues: store::Store::try_new(q_cap, q_keys, permits)?,
+            exchanges: store::Store::try_new(x_cap, x_keys, permits)?,
         })
     }
 
@@ -35,7 +34,7 @@ impl<'c, 'd, const ID: u8> Bindings<'c, 'd, ID> {
         queue: Option<queue::Key<'d, ID>>,
         name: short::Short<'_>,
         source: short::Short<'_>,
-        route: short::Short<'_>,
+        route: Option<short::Short<'_>>,
         args: &[u8],
     ) -> Option<store::QueueBinding<'d, ID>> {
         self.queues
@@ -101,41 +100,37 @@ impl<'c, 'd, const ID: u8> Bindings<'c, 'd, ID> {
 
     pub(super) fn remove_queue(
         &mut self,
-        spec: &queue::Unbind<'d, ID>,
+        spec: &queue::Bind<'d, ID>,
         record: Option<&Record<'c, '_, 'd>>,
     ) {
         let args = wire::Identity::of(spec.arguments());
-        for (target, name) in std::iter::once((spec.key(), spec.name()))
-            .chain(record.map(|record| (None, record.value().server_name())))
-        {
-            let hash = need::Binding::hash(
-                target,
-                name,
-                spec.exchange(),
-                spec.routing_key(),
-                args.fingerprint(),
-            );
-            self.queues.remove(
-                hash,
-                |item| {
-                    item.matches(
-                        target,
-                        name,
-                        spec.exchange(),
-                        spec.routing_key(),
-                        args.bytes(),
-                    )
-                },
-                |spec| {
-                    need::Binding::hash(
-                        spec.key(),
-                        spec.name(),
-                        spec.exchange(),
-                        spec.routing_key(),
-                        wire::Fingerprint::of(spec.arguments()),
-                    )
-                },
-            );
+        let route = spec.routing_key();
+        let current = record.map(|record| short::Short::from(record.value().server_name()));
+        let alias = match (route, current) {
+            (None, Some(name)) => Some(Some(name)),
+            (Some(route), Some(name)) if route == name => Some(None),
+            _ => None,
+        };
+        for route in std::iter::once(route).chain(alias) {
+            for (target, name) in
+                std::iter::once((spec.key(), spec.name())).chain(current.map(|name| (None, name)))
+            {
+                let hash =
+                    need::Binding::hash(target, name, spec.exchange(), route, args.fingerprint());
+                self.queues.remove(
+                    hash,
+                    |item| item.matches(target, name, spec.exchange(), route, args.bytes()),
+                    |spec| {
+                        need::Binding::hash(
+                            spec.key(),
+                            spec.name(),
+                            spec.exchange(),
+                            spec.routing_key(),
+                            wire::Fingerprint::of(spec.arguments()),
+                        )
+                    },
+                );
+            }
         }
     }
 

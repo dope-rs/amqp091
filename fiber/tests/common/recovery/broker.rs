@@ -1,4 +1,3 @@
-use std::io::{Read, Write};
 use std::time::Duration;
 
 use dope_test::harness::peer::Stream;
@@ -72,29 +71,17 @@ pub fn channel_close(
 }
 
 pub fn open_named(
-    stream: &mut (impl Read + Write),
+    mut stream: &Stream<'_>,
     channel: u16,
     queue: &str,
     tag: &str,
 ) -> Result<(), Error> {
-    Method::read(stream)
-        .map_err(Error::Io)?
-        .check(channel, 20, 10)?;
-    stream
-        .write_all(&Method::try_encode(channel, 20, 11, &[0, 0, 0, 0])?)
-        .map_err(Error::Io)?;
-    Method::read(stream)
-        .map_err(Error::Io)?
-        .check(channel, 50, 10)?;
-    stream
-        .write_all(&queue_declare_ok(channel, queue, 0, 0)?)
-        .map_err(Error::Io)?;
-    Method::read(stream)
-        .map_err(Error::Io)?
-        .check(channel, 60, 20)?;
-    stream
-        .write_all(&consume_ok(channel, tag)?)
-        .map_err(Error::Io)?;
+    Method::read(&mut stream)?.check(channel, 20, 10)?;
+    stream.write_all(&Method::try_encode(channel, 20, 11, &[0, 0, 0, 0])?)?;
+    Method::read(&mut stream)?.check(channel, 50, 10)?;
+    stream.write_all(&queue_declare_ok(channel, queue, 0, 0)?)?;
+    Method::read(&mut stream)?.check(channel, 60, 20)?;
+    stream.write_all(&consume_ok(channel, tag)?)?;
     Ok(())
 }
 
@@ -112,10 +99,10 @@ pub fn tagged(tag: u64, body: &[u8]) -> Result<Vec<u8>, Error> {
 
 pub fn open_tagged(mut stream: &Stream<'_>) -> Result<(), Error> {
     let limit = Some(Duration::from_secs(5));
-    stream.read_wait(limit).map_err(Error::Io)?;
-    stream.write_wait(limit).map_err(Error::Io)?;
+    stream.read_wait(limit)?;
+    stream.write_wait(limit)?;
     Peer::new(&mut stream).open(TUNE)?;
-    open_named(&mut stream, 1, "q", "tag")
+    open_named(stream, 1, "q", "tag")
 }
 
 pub fn ack_tag(method: &Method) -> Result<u64, Error> {

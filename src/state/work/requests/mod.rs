@@ -8,10 +8,8 @@ use crate::protocol::topology::records::{self, consumer};
 use crate::protocol::topology::{self, need, store};
 use crate::protocol::wire;
 use crate::protocol::wire::schema::{self, consume, queues, resource};
+use crate::protocol::wire::text::short;
 use crate::state::work;
-
-mod seal;
-pub(crate) use seal::Seal;
 
 pub enum Defer {
     Wait,
@@ -20,11 +18,9 @@ pub enum Defer {
 pub enum Plain {}
 pub enum Keep {}
 pub enum Tracked {}
-pub enum Declaration {}
 
-pub trait Source<'d>: method::Request + Seal + Sized {
+pub trait Source<'d>: method::Request + Sized {
     type Policy<const ID: u8>: admit::Admit<'d, Self, ID>;
-    const RETAIN: bool = false;
 }
 
 pub(crate) trait Prepare<'d, const ID: u8>: method::Request {
@@ -37,7 +33,23 @@ pub(crate) trait Prepare<'d, const ID: u8>: method::Request {
 pub(crate) trait Capture<'d, const ID: u8>: method::Request {
     type Schema: schema::Layout;
 
+    fn reference(&self) -> Option<short::Name<'_>> {
+        None
+    }
+
+    fn record<'a>(
+        &self,
+        output: wire::outputs::Fields<'a, Self::Schema>,
+        _queue: short::Name<'_>,
+    ) -> wire::outputs::Fields<'a, Self::Schema, <Self::Schema as schema::Layout>::Proof>
+    where
+        Self: method::Record<Self::Schema>,
+    {
+        method::Record::record(self, output)
+    }
+
     fn capture<'c, 'b>(
+        &self,
         view: wire::Encoded<'_, Self::Schema>,
         budget: &Budget<'d>,
         topo: &mut topology::State<'_, 'c, 'b, 'd, ID>,
@@ -68,21 +80,75 @@ impl<'d> Source<'d> for tx::Rollback {
     type Policy<const ID: u8> = Plain;
 }
 
-impl<'d> Source<'d> for basic::CancelRef<'_> {
-    type Policy<const ID: u8> = Plain;
-}
-
 impl<'d> Source<'d> for basic::Recover {
     type Policy<const ID: u8> = Plain;
 }
 
 impl<'d> Source<'d> for queue::Inspect<'_> {
-    type Policy<const ID: u8> = Plain;
-    const RETAIN: bool = true;
+    type Policy<const ID: u8> = Tracked;
+}
+
+impl<'d, const ID: u8> Capture<'d, ID> for queue::Inspect<'_> {
+    type Schema = schema::Empty;
+
+    fn reference(&self) -> Option<short::Name<'_>> {
+        Some(self.queue)
+    }
+
+    fn record<'a>(
+        &self,
+        output: wire::outputs::Fields<'a, Self::Schema>,
+        queue: short::Name<'_>,
+    ) -> wire::outputs::Fields<'a, Self::Schema> {
+        method::Record::record(
+            &queue::Inspect {
+                queue,
+                durable: self.durable,
+                exclusive: self.exclusive,
+                auto_delete: self.auto_delete,
+                arguments: self.arguments,
+            },
+            output,
+        )
+    }
+
+    fn capture<'c, 'b>(
+        &self,
+        _: wire::Encoded<'_, Self::Schema>,
+        _: &Budget<'d>,
+        _: &mut topology::State<'_, 'c, 'b, 'd, ID>,
+    ) -> Result<work::Admit<'c, 'b, 'd, ID>, failure::Error> {
+        Ok(work::Admit::Direct(need::IdentityPlan::Fresh))
+    }
 }
 
 impl<'d> Source<'d> for queue::Purge<'_> {
-    type Policy<const ID: u8> = Plain;
+    type Policy<const ID: u8> = Tracked;
+}
+
+impl<'d, const ID: u8> Capture<'d, ID> for queue::Purge<'_> {
+    type Schema = schema::Empty;
+
+    fn reference(&self) -> Option<short::Name<'_>> {
+        Some(self.queue)
+    }
+
+    fn record<'a>(
+        &self,
+        output: wire::outputs::Fields<'a, Self::Schema>,
+        queue: short::Name<'_>,
+    ) -> wire::outputs::Fields<'a, Self::Schema> {
+        method::Record::record(&queue::Purge { queue }, output)
+    }
+
+    fn capture<'c, 'b>(
+        &self,
+        _: wire::Encoded<'_, Self::Schema>,
+        _: &Budget<'d>,
+        _: &mut topology::State<'_, 'c, 'b, 'd, ID>,
+    ) -> Result<work::Admit<'c, 'b, 'd, ID>, failure::Error> {
+        Ok(work::Admit::Direct(need::IdentityPlan::None))
+    }
 }
 
 impl<'d> Source<'d> for basic::Qos {
@@ -133,34 +199,62 @@ impl<'d, M: ack::Mode> Source<'d> for basic::Consume<'_, M> {
 impl<'d, M: ack::Mode, const ID: u8> Capture<'d, ID> for basic::Consume<'_, M> {
     type Schema = consume::Layout;
 
+    fn reference(&self) -> Option<short::Name<'_>> {
+        Some(self.queue)
+    }
+
+    fn record<'a>(
+        &self,
+        output: wire::outputs::Fields<'a, Self::Schema>,
+        queue: short::Name<'_>,
+    ) -> wire::outputs::Fields<'a, Self::Schema, [schema::Offset; 2]> {
+        method::Record::record(
+            &basic::Consume {
+                queue,
+                consumer_tag: self.consumer_tag,
+                no_local: self.no_local,
+                ack: self.ack,
+                exclusive: self.exclusive,
+                arguments: self.arguments,
+            },
+            output,
+        )
+    }
+
     fn capture<'c, 'b>(
+        &self,
         view: wire::Encoded<'_, Self::Schema>,
         budget: &Budget<'d>,
         topo: &mut topology::State<'_, 'c, 'b, 'd, ID>,
     ) -> Result<work::Admit<'c, 'b, 'd, ID>, failure::Error> {
-        let queue = view.field(consume::Layout::QUEUE);
-        let needs = need::Need::reference(queue);
+        let needs = need::Need::reference(self.queue.into());
         let found = topo.resolve(&needs).1;
         let queue = found.queue();
-        let spec = consumer::Record::capture(budget, queue, view)?;
+        let graph = topo.graph();
+        let name = found.name(self.queue, graph.current_state());
+        let spec = consumer::Record::capture(budget, queue, view, name)?;
         Ok(work::Admit::Consumer(spec))
     }
 }
 
 impl<'d> Source<'d> for queue::Declare<'_> {
-    type Policy<const ID: u8> = Declaration;
+    type Policy<const ID: u8> = Tracked;
 }
 
 impl<'d, const ID: u8> Capture<'d, ID> for queue::Declare<'_> {
     type Schema = queues::Declaration;
 
     fn capture<'c, 'b>(
+        &self,
         view: wire::Encoded<'_, Self::Schema>,
         budget: &Budget<'d>,
         topo: &mut topology::State<'_, 'c, 'b, 'd, ID>,
     ) -> Result<work::Admit<'c, 'b, 'd, ID>, failure::Error> {
         let name = view.field(queues::Declaration::QUEUE);
-        let needs = need::Need::queue(name);
+        if name.is_empty() && !self.exclusive {
+            return Err(failure::Error::ServerNamedQueueNotExclusive);
+        }
+        let needs = need::Need::queue(self.queue.into());
         let (id, plan) = topo.preflight(&needs)?;
         let work = match plan {
             store::Upsert::Existing(key) => topology::Work::QueueRedeclare {
@@ -168,9 +262,7 @@ impl<'d, const ID: u8> Capture<'d, ID> for queue::Declare<'_> {
                 update_current: true,
             },
             store::Upsert::Vacant(hold) => {
-                use crate::protocol::topology::records::queue;
-
-                let spec = queue::Declare::capture(budget, view)?;
+                let spec = wire::bytes::Bytes::capture(budget, view)?;
                 topology::Work::QueueDeclare(spec, hold)
             }
         };
@@ -185,23 +277,48 @@ impl<'d> Source<'d> for queue::Bind<'_> {
 impl<'d, const ID: u8> Capture<'d, ID> for queue::Bind<'_> {
     type Schema = queues::Binding;
 
+    fn reference(&self) -> Option<short::Name<'_>> {
+        Some(self.queue)
+    }
+
+    fn record<'a>(
+        &self,
+        output: wire::outputs::Fields<'a, Self::Schema>,
+        name: short::Name<'_>,
+    ) -> wire::outputs::Fields<'a, Self::Schema, <Self::Schema as schema::Layout>::Proof> {
+        method::Record::record(
+            &queue::Bind {
+                queue: name,
+                exchange: self.exchange,
+                routing_key: if self.queue.is_empty() && self.routing_key.is_empty() {
+                    name.into()
+                } else {
+                    self.routing_key
+                },
+                arguments: self.arguments,
+            },
+            output,
+        )
+    }
+
     fn capture<'c, 'b>(
+        &self,
         view: wire::Encoded<'_, Self::Schema>,
         budget: &Budget<'d>,
         topo: &mut topology::State<'_, 'c, 'b, 'd, ID>,
     ) -> Result<work::Admit<'c, 'b, 'd, ID>, failure::Error> {
-        let queue = view.field(queues::Binding::QUEUE);
-        let ex = view.field(queues::Binding::EXCHANGE);
-        let route = view.field(queues::Binding::ROUTING_KEY);
         let args = view.identity();
-        let needs = need::Need::binding(queue, ex, route, args);
+        let needs = need::Need::binding(self.queue, self.exchange.into(), self.routing_key, args);
         let (id, plan) = topo.preflight(&needs)?;
-        let queue = plan.resolution().queue();
-        let (spec, choice) = topo.bind(plan.into_change(), {
+        let found = plan.resolution();
+        let spec = {
             use crate::protocol::topology::records::queue;
 
-            queue::Bind::capture(budget, queue, view)
-        })?;
+            let graph = topo.graph();
+            let (name, route) = found.binding(self.queue, self.routing_key, graph.current_state());
+            queue::Bind::capture(budget, found.queue(), view, name, route)
+        };
+        let (spec, choice) = topo.bind(plan.into_change(), spec)?;
         Ok(work::Admit::Topology {
             identity: id,
             work: topology::Work::QueueBind(spec, choice),
@@ -216,19 +333,44 @@ impl<'d> Source<'d> for queue::Unbind<'_> {
 impl<'d, const ID: u8> Capture<'d, ID> for queue::Unbind<'_> {
     type Schema = queues::Binding;
 
+    fn reference(&self) -> Option<short::Name<'_>> {
+        Some(self.queue)
+    }
+
+    fn record<'a>(
+        &self,
+        output: wire::outputs::Fields<'a, Self::Schema>,
+        name: short::Name<'_>,
+    ) -> wire::outputs::Fields<'a, Self::Schema, <Self::Schema as schema::Layout>::Proof> {
+        method::Record::record(
+            &queue::Unbind {
+                queue: name,
+                exchange: self.exchange,
+                routing_key: if self.queue.is_empty() && self.routing_key.is_empty() {
+                    name.into()
+                } else {
+                    self.routing_key
+                },
+                arguments: self.arguments,
+            },
+            output,
+        )
+    }
+
     fn capture<'c, 'b>(
+        &self,
         view: wire::Encoded<'_, Self::Schema>,
         budget: &Budget<'d>,
         topo: &mut topology::State<'_, 'c, 'b, 'd, ID>,
     ) -> Result<work::Admit<'c, 'b, 'd, ID>, failure::Error> {
-        let queue = view.field(queues::Binding::QUEUE);
-        let needs = need::Need::reference(queue);
+        let needs = need::Need::reference(self.queue.into());
         let (id, found) = topo.resolve(&needs);
-        let queue = found.queue();
         let spec = {
             use crate::protocol::topology::records::queue;
 
-            queue::Unbind::capture(budget, queue, view)?
+            let graph = topo.graph();
+            let (name, route) = found.binding(self.queue, self.routing_key, graph.current_state());
+            queue::Bind::capture(budget, found.queue(), view, name, route)?
         };
         Ok(work::Admit::Topology {
             identity: id,
@@ -244,16 +386,37 @@ impl<'d> Source<'d> for queue::Delete<'_> {
 impl<'d, const ID: u8> Capture<'d, ID> for queue::Delete<'_> {
     type Schema = resource::Layout;
 
+    fn reference(&self) -> Option<short::Name<'_>> {
+        Some(self.queue)
+    }
+
+    fn record<'a>(
+        &self,
+        output: wire::outputs::Fields<'a, Self::Schema>,
+        queue: short::Name<'_>,
+    ) -> wire::outputs::Fields<'a, Self::Schema, [schema::Offset; 1]> {
+        method::Record::record(
+            &queue::Delete {
+                queue,
+                if_unused: self.if_unused,
+                if_empty: self.if_empty,
+            },
+            output,
+        )
+    }
+
     fn capture<'c, 'b>(
-        view: wire::Encoded<'_, Self::Schema>,
+        &self,
+        _: wire::Encoded<'_, Self::Schema>,
         budget: &Budget<'d>,
         topo: &mut topology::State<'_, 'c, 'b, 'd, ID>,
     ) -> Result<work::Admit<'c, 'b, 'd, ID>, failure::Error> {
-        let queue = view.field(resource::Layout::NAME);
-        let needs = need::Need::reference(queue);
+        let needs = need::Need::reference(self.queue.into());
         let (id, found) = topo.resolve(&needs);
         let key = found.queue();
-        let record = key.and_then(|key| topo.graph().queue_entry(Some(key), queue));
+        let graph = topo.graph();
+        let queue = found.name(self.queue, graph.current_state());
+        let record = key.and_then(|key| graph.queue_entry(Some(key), self.queue.into()));
         let name = record
             .as_ref()
             .map_or(queue, |record| record.value().server_name());

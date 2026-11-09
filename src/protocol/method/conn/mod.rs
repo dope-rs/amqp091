@@ -6,9 +6,8 @@ use o3::buffer::{self};
 use crate::failure;
 use crate::failure::wire::Fault;
 use crate::message::field;
-use crate::protocol::method::Spec as _;
 use crate::protocol::wire::text::{fields, long, resident, short};
-use crate::protocol::wire::{Write, frame, reader, schema};
+use crate::protocol::wire::{reader, schema};
 use crate::protocol::{class, method, wire};
 
 mod event;
@@ -269,10 +268,8 @@ impl method::Spec for CloseOk {
     const ID: method::Id = CLOSE_OK;
 }
 
-impl method::Encode for CloseOk {
-    fn write<S: Write + AsMut<[u8]> + ?Sized>(&self, out: &mut S, channel: u16) {
-        frame::Encoder::new(out).method(channel, Self::ID.bytes());
-    }
+impl method::Args for CloseOk {
+    fn write_args<S: wire::Put>(&self, _: &mut S) {}
 }
 
 pub struct Blocked<'d> {

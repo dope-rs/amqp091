@@ -31,7 +31,7 @@ pub(crate) struct Refresh<'c, 'b, 'd, const ID: u8> {
 
 pub(crate) struct Local<'d, const ID: u8> {
     pub(super) head: Head,
-    pub(super) current: Option<queue::Key<'d, ID>>,
+    pub(super) current: queue::Current<'d, ID>,
 }
 
 pub(crate) struct Table<'c, 'd, const ID: u8> {
@@ -50,7 +50,7 @@ impl<const ID: u8> Local<'_, ID> {
     pub(crate) const fn new() -> Self {
         Self {
             head: Head::new(),
-            current: None,
+            current: queue::Current::None,
         }
     }
 
@@ -60,7 +60,7 @@ impl<const ID: u8> Local<'_, ID> {
 
     pub(crate) fn clear(&mut self) {
         self.head.clear();
-        self.current = None;
+        self.current = queue::Current::None;
     }
 }
 
@@ -72,18 +72,12 @@ impl<'c, 'd, const ID: u8> Table<'c, 'd, ID> {
         let owner = store::Owner::new();
         Ok(Self {
             queues: store::QueueStore::try_new(plan.queue.index, owner, permits)?,
-            exchanges: Exchanges::try_new(
-                plan.exchange.slots,
-                plan.exchange.index,
-                owner,
-                permits,
-            )?,
+            exchanges: Exchanges::try_new(plan.exchange.slots, plan.exchange.index, permits)?,
             bindings: Bindings::try_new(
                 plan.queue_bind.slots,
                 plan.queue_bind.index,
                 plan.exchange_bind.slots,
                 plan.exchange_bind.index,
-                owner,
                 permits,
             )?,
         })
@@ -109,6 +103,27 @@ impl<'a, 'c, 'b, 'd, const ID: u8> State<'a, 'c, 'b, 'd, ID> {
 
     pub(crate) fn clear(&mut self) {
         self.local.clear();
+    }
+
+    pub(crate) fn disconnected(&mut self) {
+        if let queue::Current::Named { live, .. } = &mut self.local.current {
+            *live = false;
+        }
+    }
+
+    pub(crate) fn inspect(&mut self, name: short::Name<'_>, hash: u64) {
+        match self.topology.queues.key_at(self.values, name.into(), hash) {
+            Some(key) => self.local.current = queue::Current::Tracked(key),
+            None => self.local.current.set_name(name),
+        }
+    }
+
+    pub(crate) fn deleted(&mut self, deletion: &queue::Delete<'d, ID>) {
+        if let queue::Current::Tracked(key) = self.local.current
+            && Some(key) == deletion.queue_key()
+        {
+            self.local.current.set_name(deletion.name());
+        }
     }
 
     pub(crate) const fn graph(&self) -> graph::Graph<'_, 'c, 'b, 'd, ID> {
@@ -170,7 +185,7 @@ impl<'a, 'c, 'b, 'd, const ID: u8> State<'a, 'c, 'b, 'd, ID> {
                 queue.server_name = Some(id);
                 let writer = ids
                     .try_writer()
-                    .ok_or(failure::Error::Capacity(wire::Capacity::TopologyIdentity))?;
+                    .ok_or_else(|| failure::Error::Capacity(wire::Capacity::TopologyIdentity))?;
                 Ok(Refresh {
                     entry: Identity::Indexed { record, hash },
                     writer,
@@ -186,13 +201,10 @@ impl<'a, 'c, 'b, 'd, const ID: u8> State<'a, 'c, 'b, 'd, ID> {
         let key = spec.queue_key();
         if let Some(key) = key {
             let entry = self.values.entry(key.into_parts().0.parts())?;
-            let hash = Fingerprint::of(entry.value().server_name().value().as_bytes()).get();
+            let hash = entry.value().hash();
             self.topology.queues.detach(entry, hash).discard();
-            if self.local.current == Some(key) {
-                self.local.current = None;
-            }
         }
-        self.topology.bindings.forget_queue(key, spec.name());
+        self.topology.bindings.forget_queue(key, spec.name().into());
         Some(spec)
     }
 
@@ -201,7 +213,7 @@ impl<'a, 'c, 'b, 'd, const ID: u8> State<'a, 'c, 'b, 'd, ID> {
         self.topology.bindings.forget_route(name);
     }
 
-    pub(super) fn remove_queue(&mut self, spec: &queue::Unbind<'d, ID>) {
+    pub(super) fn remove_queue(&mut self, spec: &queue::Bind<'d, ID>) {
         let record = match spec.key() {
             Some(key) => {
                 let Some(record) = self.values.entry(key.into_parts().0.parts()) else {
@@ -241,15 +253,14 @@ impl<'a, 'c, 'b, 'd, const ID: u8> State<'a, 'c, 'b, 'd, ID> {
         &mut self,
         needs: &need::Need<'_, M>,
     ) -> (need::IdentityPlan, need::Resolution<'d, ID>) {
-        let found = match needs.target() {
-            need::Target::None => None,
-            need::Target::Reference(name) => self.graph().queue_key(name),
-            need::Target::Declare(name) => (!name.is_empty())
-                .then(|| self.graph().queue_key(name))
-                .flatten(),
+        let (identity, found) = match needs.target() {
+            need::Target::None => (need::IdentityPlan::None, None),
+            need::Target::Declare(name) if name.is_empty() => (need::IdentityPlan::Fresh, None),
+            need::Target::Reference(name) | need::Target::Declare(name) => {
+                (need::IdentityPlan::None, self.graph().queue_key(name))
+            }
         };
-        let found = need::Resolution::new(found);
-        (needs.identity(), found)
+        (identity, need::Resolution::new(found))
     }
 }
 
@@ -271,8 +282,8 @@ impl<'c, 'b, 'd, const ID: u8> Refresh<'c, 'b, 'd, ID> {
             Identity::Detached(entry) => entry,
         };
         let key = entry.key();
-        let (stored, name) = self.writer.commit_pair(value.into());
-        let hash = stored.hash();
+        let hash = Fingerprint::of(value.value().as_bytes()).get();
+        let (stored, name) = self.writer.commit_pair(value.into(), hash);
         entry.value_mut().server_name = Some(stored);
         drop(target.topology.queues.index(entry, hash));
         (key, name.into())

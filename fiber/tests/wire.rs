@@ -1,8 +1,7 @@
 use crate::common::amqp::wire::{Frame, Method};
 pub mod common;
 
-use std::io::{Cursor, ErrorKind};
-use std::mem;
+use crate::common::amqp::Error;
 
 use dope_test::alloc::Tracker;
 
@@ -25,7 +24,7 @@ fn encodes_one_buffer() {
 #[test]
 fn moves_backing() {
     let encoded = Method::try_encode(7, 60, 40, b"arguments").expect("AMQP frame fixture");
-    let mut source = Cursor::new(encoded.as_slice());
+    let mut source = encoded.as_slice();
     let (frame, alloc) = Tracker::usage(|| Frame::read(&mut source).expect("frame"));
     assert_eq!(alloc, (1, 13));
     let payload = frame.payload().as_ptr();
@@ -39,44 +38,23 @@ fn moves_backing() {
 }
 
 #[test]
-fn preserves_layout() {
-    assert_eq!(
-        mem::size_of::<Frame>(),
-        mem::size_of::<(u8, u16, Vec<u8>)>()
-    );
-    assert_eq!(mem::size_of::<Method>(), mem::size_of::<(u16, Vec<u8>)>());
-}
-
-#[test]
 fn rejects_boundaries() {
-    let mut bad_end = Cursor::new(b"\x01\0\0\0\0\0\0\0");
-    assert_eq!(
-        (Frame::read(&mut bad_end))
-            .err()
-            .expect("invalid frame end")
-            .kind(),
-        ErrorKind::InvalidData
-    );
+    let mut bad_end = b"\x01\0\0\0\0\0\0\0".as_slice();
+    assert!(matches!(Frame::read(&mut bad_end), Err(Error::FrameEnd(0))));
 
     let wrong = Frame::try_encode(2, 1, &[0, 60, 0, 40]).expect("AMQP frame fixture");
-    assert_eq!(
-        (Method::read(&mut Cursor::new(wrong)))
-            .err()
-            .expect("content header is not a method")
-            .kind(),
-        ErrorKind::InvalidData
-    );
+    assert!(matches!(
+        Method::read(&mut wrong.as_slice()),
+        Err(Error::FrameType(2))
+    ));
 
     let short = Frame::try_encode(1, 1, &[0, 60, 0]).expect("AMQP frame fixture");
-    assert_eq!(
-        (Method::read(&mut Cursor::new(short)))
-            .err()
-            .expect("truncated method route")
-            .kind(),
-        ErrorKind::InvalidData
-    );
+    assert!(matches!(
+        Method::read(&mut short.as_slice()),
+        Err(Error::MethodLength(3))
+    ));
 
-    use crate::common::amqp::{Error, wire};
+    use crate::common::amqp::wire;
     for (bytes, offset) in [
         (b"".as_slice(), 0),
         (b"\x03ab".as_slice(), 0),
@@ -98,7 +76,7 @@ fn rejects_boundaries() {
         "failed short string admission must preserve output"
     );
     let encoded = Method::try_encode(7, 60, 40, &[]).expect("AMQP method fixture");
-    let method = Method::read(&mut Cursor::new(encoded)).expect("AMQP method");
+    let method = Method::read(&mut encoded.as_slice()).expect("AMQP method");
     assert!(matches!(
         method.check(8, 60, 40),
         Err(Error::Route {

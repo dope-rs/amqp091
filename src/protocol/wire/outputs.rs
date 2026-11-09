@@ -82,8 +82,8 @@ impl<'a, const N: usize, L: schema::Layout<Proof = schema::Identity<N>>>
 {
     pub(crate) fn put_identity(self, value: &field::Table) -> Fields<'a, L, L::Proof> {
         let offset = self.offset();
-        let hash = Hashing::write(self.output, value);
-        let proof = schema::Identity::new(self.proof, offset, hash);
+        value.encode(&mut Plain::new(self.output));
+        let proof = schema::Identity::new(self.proof, offset);
         self.advance(proof)
     }
 }
@@ -156,41 +156,3 @@ impl<S: Write + ?Sized> Write for Plain<'_, S> {
 }
 
 impl<S: Write + ?Sized> wire::Put for Plain<'_, S> {}
-
-struct Hashing<'a> {
-    output: &'a mut Writer,
-    fingerprint: wire::Fingerprint,
-}
-
-impl<'a> Hashing<'a> {
-    fn write(output: &'a mut Writer, value: &field::Table) -> wire::Fingerprint {
-        let mut writer = Self {
-            output,
-            fingerprint: wire::Fingerprint::new(),
-        };
-        value.encode(&mut writer);
-        writer.fingerprint
-    }
-}
-
-impl Write for Hashing<'_> {
-    fn len(&self) -> usize {
-        self.output.len()
-    }
-
-    fn status(&self) -> Result<(), consume::Error> {
-        self.output.status()
-    }
-
-    fn push(&mut self, byte: u8) {
-        self.fingerprint.write(&[byte]);
-        self.output.push(byte);
-    }
-
-    fn extend(&mut self, bytes: &[u8]) {
-        self.fingerprint.write(bytes);
-        self.output.extend(bytes);
-    }
-}
-
-impl wire::Put for Hashing<'_> {}

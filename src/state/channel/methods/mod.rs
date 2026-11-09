@@ -25,7 +25,7 @@ pub(crate) mod send;
 mod slot;
 pub(crate) mod turn;
 mod vacant;
-pub(in crate::state::channel::methods) use slot::{Detached, Member, Removal, Slot};
+pub(in crate::state::channel::methods) use slot::{Member, Removal, Slot};
 
 enum Plane {}
 
@@ -122,26 +122,57 @@ impl<'c, 'b, 'd, const ID: u8> Methods<'c, 'b, 'd, ID> {
         }
     }
 
+    pub(crate) fn sent(&mut self) -> Option<(MethodKey, method::Kind)> {
+        let (cursor, ..) = Slot::front(self)?;
+        let key = cursor.key();
+        let state = cursor.release().pending();
+        state.sent.then_some((key, state.expect))
+    }
+
     pub(crate) fn is_quiescent(&self) -> bool {
         self.pending.len() == capacity::Count::EMPTY && self.flight.is_empty()
     }
 
-    fn vacant_at(&mut self, index: u32) -> Option<Vacant<'_, 'c, 'b, 'd>> {
-        if index < self.user_capacity.raw() || index >= self.storage_capacity.get() {
-            return None;
-        }
-        let entry = slab::Slots::new(&mut self.pending).vacant_at(index)?;
-        Some(Vacant::new(entry, &mut self.order))
+    pub(crate) fn replays(&self, key: consumer::Key) -> bool {
+        self.flight.replays(key)
     }
 
     pub(crate) fn vacant_user(&mut self, key: consumer::Key) -> Option<Vacant<'_, 'c, 'b, 'd>> {
-        let index = self.user_capacity.raw().checked_add(key.index())?;
-        self.vacant_at(index)
+        // Both callers retain a validated key from this channel's fixed consumer capacity.
+        // Limits admitted user + consumers + 1 before allocating these slots.
+        let index = self.user_capacity.raw() + key.index();
+        let entry = self.pending.vacant_at(index)?;
+        Some(Vacant::new(entry, &mut self.order))
+    }
+
+    pub(crate) fn retire(
+        &mut self,
+        key: consumer::Key,
+        closing: bool,
+        busy: bool,
+    ) -> Option<Option<send::Next>> {
+        if !closing {
+            let ready = self.order.is_empty() && !busy;
+            return Some(self.vacant_user(key)?.retire(key, ready));
+        }
+        // Wire-open Closing retains an unsent Close at the tail.
+        let Some(mut close) = keyed::Fifo::last(&mut *self) else {
+            unreachable!("close")
+        };
+        // SAFETY: append retains the old Close's initialized slot, membership,
+        // and index in this exact fixed slab and FIFO.
+        let _ = unsafe { close.as_mut() }
+            .into_inner()
+            .0
+            .vacant_user(key)?
+            .retire(key, false);
+        Slot::select(close).0.remove().push::<false>();
+        Some(if busy { None } else { self.next::<false>().1 })
     }
 
     pub(crate) fn vacant(&mut self) -> Option<Vacant<'_, 'c, 'b, 'd>> {
         let index = self.storage_capacity.get() - 1;
-        let entry = slab::Slots::new(&mut self.pending).vacant_at(index)?;
+        let entry = self.pending.vacant_at(index)?;
         Some(Vacant::new(entry, &mut self.order))
     }
 
@@ -151,9 +182,10 @@ impl<'c, 'b, 'd, const ID: u8> Methods<'c, 'b, 'd, ID> {
     ) -> Result<Permit<'_, 'c, 'b, 'd, ID>, failure::Error> {
         let front = Slot::first(self);
         let index = self.storage_capacity.get() - 1;
-        let entry = slab::Slots::new(&mut self.pending)
+        let entry = self
+            .pending
             .vacant_at(index)
-            .ok_or(failure::Error::Capacity(wire::Capacity::MethodReplay))?;
+            .ok_or_else(|| failure::Error::Capacity(wire::Capacity::MethodReplay))?;
         let staged = entry.stage_with(|key| Entry::new(key, entry::Pending::replay(expect)));
         let key = MethodKey::from_raw(staged.key());
         if let Some(actual) = front {
@@ -180,13 +212,13 @@ impl<'c, 'b, 'd, const ID: u8> Methods<'c, 'b, 'd, ID> {
     ) -> Result<R, failure::Error> {
         let next = match (*phase, expect) {
             (channel::Phase::Closed, method::Kind::Open) => Some(channel::Phase::Opening),
-            (channel::Phase::Open, method::Kind::CloseOk) => Some(channel::Phase::Closing),
             (channel::Phase::Open, _) => None,
             _ => return Err(failure::Error::Closed),
         };
-        let entry = slab::Slots::new(&mut self.pending)
+        let entry = self
+            .pending
             .vacant_in(0..self.user_capacity.raw())
-            .ok_or(failure::Error::Capacity(wire::Capacity::Method))?;
+            .ok_or_else(|| failure::Error::Capacity(wire::Capacity::Method))?;
         let staged = entry.stage_with(|key| Entry::new(key, entry::Pending::user(expect)));
         let admitted = admit(MethodKey::from_raw(staged.key()))?;
         Slot {
@@ -230,19 +262,24 @@ impl<'c, 'b, 'd, const ID: u8> Methods<'c, 'b, 'd, ID> {
         Ok(send::Pending::new(state))
     }
 
-    pub(crate) fn next(&mut self) -> Option<send::Next> {
-        let (cursor, _, wakes) = Slot::front(self)?;
+    pub(crate) fn next<const REPLAY: bool>(&mut self) -> (bool, Option<send::Next>) {
+        let Some((cursor, _, wakes)) = Slot::front(self) else {
+            return (false, None);
+        };
         let key = cursor.key();
         let state = cursor.release().pending();
         let ctrl = state.is_control();
+        if REPLAY && ctrl {
+            state.origin = entry::Origin::Replay;
+        }
         if state.sent {
-            return None;
+            return (true, None);
         }
         if !ctrl {
             wakes.wake_once(&state.waker);
-            return None;
+            return (true, None);
         }
-        Some(send::Next::new(key))
+        (true, Some(send::Next::new(key)))
     }
 
     pub(crate) fn reserve<Text>(
@@ -263,10 +300,12 @@ impl<'c, 'b, 'd, const ID: u8> Methods<'c, 'b, 'd, ID> {
                 actual,
             })
         })?;
-        let front = front.ok_or(failure::Error::Protocol(wire::Fault::MethodOrder {
-            expected: num::NonZero::from(key),
-            actual: None,
-        }))?;
+        let front = front.ok_or_else(|| {
+            failure::Error::Protocol(wire::Fault::MethodOrder {
+                expected: num::NonZero::from(key),
+                actual: None,
+            })
+        })?;
         if front != key || active {
             return Ok(None);
         }
@@ -314,7 +353,7 @@ impl<'c, 'b, 'd, const ID: u8> Methods<'c, 'b, 'd, ID> {
         active: bool,
         id: num::NonZero<u64>,
     ) -> Result<DetachResult, failure::Error> {
-        let parts = key::Parts::from_raw(id).ok_or(failure::Error::MethodIdentity(id))?;
+        let parts = key::Parts::from_raw(id).ok_or_else(|| failure::Error::MethodIdentity(id))?;
         let key = MethodKey::from_raw(key::Handle::from_parts(parts));
         let front = Slot::first(self) == Some(key);
         let slot = Slot::try_new(self, key).map_err(failure::Error::Method)?;
@@ -329,7 +368,11 @@ impl<'c, 'b, 'd, const ID: u8> Methods<'c, 'b, 'd, ID> {
             },
             Removal::Unlinked => DetachResult {
                 action: DetachAction::None,
-                control: if front && !active { self.next() } else { None },
+                control: if front && !active {
+                    self.next::<false>().1
+                } else {
+                    None
+                },
             },
         })
     }

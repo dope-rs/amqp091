@@ -1,14 +1,10 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
-
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::Method;
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
-use std::io::{self, Write as _};
 use std::time::Duration;
 
-use dope::core::platform::wake;
 use dope_amqp091::failure;
 use dope_test::fibers::Yield;
 use dope_test::harness::peer::AcceptScript;
@@ -23,8 +19,6 @@ const SOURCES: [&str; 2] = [
 
 #[test]
 fn isolates_partial_frame() {
-    let (opened, open) = wake::Ends::blocking().expect("first channel gate").split();
-
     AcceptScript::with(
         move |acceptor| {
             let mut first = acceptor.accept().expect("first connection");
@@ -46,9 +40,10 @@ fn isolates_partial_frame() {
                     &Method::try_encode(1, 20, 11, &[0, 0, 0, 0]).expect("AMQP frame fixture"),
                 )
                 .expect("first Channel.OpenOk");
-            opened
-                .wait_timeout(Duration::from_secs(10))
-                .expect("first channel observed");
+            Method::read(&mut first)
+                .expect("request on opened channel")
+                .check(1, 50, 30)
+                .expect("Queue.Purge");
             first
                 .write_all(&[1, 0, 1, 0])
                 .expect("partial generation-1 frame");
@@ -73,7 +68,7 @@ fn isolates_partial_frame() {
                     &Method::try_encode(1, 20, 11, &[0, 0, 0, 0]).expect("AMQP frame fixture"),
                 )
                 .expect("replayed Channel.OpenOk");
-            io::copy(&mut second, &mut io::sink()).expect("endpoint teardown");
+            while second.read(&mut [0; 256]).expect("endpoint teardown") != 0 {}
         },
         move |broker| {
             with(
@@ -83,12 +78,12 @@ fn isolates_partial_frame() {
                     assert!(
                 rt.block_on(dope_fiber::fiber!('_ => async move {
                     let target = conn.observe().ready().await.expect("first ready");
-                    conn
+                    let channel = conn
                         .channels()
                         .open_in(target, 1)
                         .await
                         .expect("first channel");
-                    open.notify().expect("first channel observed");
+                    assert!(channel.queue().purge("q").await.is_err());
 
                     while conn
                         .observe()
@@ -114,19 +109,10 @@ fn isolates_partial_frame() {
             );
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("scripted broker thread");
         },
     )
     .expect("scripted broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

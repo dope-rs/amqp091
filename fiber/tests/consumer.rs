@@ -1,13 +1,10 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
-
 use crate::common::amqp::app::{Endpoint, Policy};
 use crate::common::amqp::wire::{Method, put_short};
 use crate::common::amqp::{Peer, Tune};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
-use std::sync::mpsc;
 use std::time::Duration;
 
 use dope::core::io::Reclaimed;
@@ -26,7 +23,6 @@ const POLICY: Policy = Policy::new(1, 8, Duration::from_secs(10));
 
 #[test]
 fn retains_collision() {
-    let (done, wait) = mpsc::channel();
     TcpScript::with(
         move |stream| {
             Peer::new(stream)
@@ -42,8 +38,6 @@ fn retains_collision() {
                 .expect("connection close")
                 .check(0, 10, 50).expect("AMQP method route");
             Method::write(stream, 0, 10, 51, &[]).expect("close reply");
-            wait.recv_timeout(Duration::from_secs(10))
-                .expect("retained failure");
         },
         |broker| {
             let config = config::Config::new("guest", "guest").expect("config");
@@ -82,11 +76,8 @@ fn retains_collision() {
                         assert_eq!(tag.as_ref(), "shared");
                         drop(again);
                         assert!(matches!(error.error(), failure::Error::ConsumerCollision { tag, .. } if tag.as_ref() == "shared"));
-                        done.send(()).expect("checked cause");
                     })).expect("fiber");
-                }, |event| reports.push(event), recover, |result| {
-                result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
-            });
+                }, |event| reports.push(event), recover, complete);
     assert!(matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]), "unexpected reclaimed AMQP completion: {reports:?}");
     };
             broker.finish().expect("broker completion");
@@ -98,8 +89,6 @@ fn retains_collision() {
 fn retains_names() {
     let generated = "e".repeat(255);
     let expected = generated.as_str();
-    let (done, wait) = mpsc::channel();
-    let (ready, gate) = mpsc::channel();
     AcceptScript::with(
         move |acceptor| {
             for tag in [expected, "observed"] {
@@ -124,8 +113,8 @@ fn retains_names() {
                 put_short(&mut encoded, tag).expect("consumer tag");
                 Method::write(&mut stream, 1, 60, 21, &encoded).expect("consume reply");
                 if tag == expected {
-                    gate.recv_timeout(Duration::from_secs(10))
-                        .expect("stored broker identity");
+                    Method::read(&mut stream).expect("retained identity")
+                        .check(1, 50, 30).expect("replay trigger");
                 } else {
                     Method::read(&mut stream)
                         .expect("connection close")
@@ -133,8 +122,6 @@ fn retains_names() {
                     Method::write(&mut stream, 0, 10, 51, &[]).expect("close reply");
                 }
             }
-            wait.recv_timeout(Duration::from_secs(10))
-                .expect("retained names");
         },
         |broker| {
             let config = config::Config::new("guest", "guest").expect("config");
@@ -153,7 +140,8 @@ fn retains_names() {
                                 ack: ack::Auto, exclusive: false, arguments: &args,
                             }).await.expect("server-named consumer");
                             assert_eq!(consumer.tag(), expected);
-                            ready.send(()).expect("begin replay");
+                            channel.queue().purge("replay").await
+                                .expect_err("disconnect after retaining the broker identity");
                             consumer.recv().await.err().expect("mismatched replay tag")
                         };
                         let cause = match &error {
@@ -182,11 +170,8 @@ fn retains_names() {
                             drop(again);
                         });
                         assert_eq!(counts, [0; 4]);
-                        done.send(()).expect("checked names");
                     })).expect("fiber");
-                }, |event| reports.push(event), recover, |result| {
-                result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
-            });
+                }, |event| reports.push(event), recover, complete);
     assert!(matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]), "unexpected reclaimed AMQP completion: {reports:?}");
     };
             broker.finish().expect("broker completion");
@@ -270,9 +255,7 @@ fn close_wakes_consumer() {
                     })).expect("fiber");
                 },
                 recover,
-                |result| {
-                    result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker completion");
         },
@@ -281,9 +264,6 @@ fn close_wakes_consumer() {
 
 #[test]
 fn rejects_foreign_channel_key() {
-    use std::io::Write as _;
-
-    use dope::core::platform::wake;
     use dope_amqp091::adapter::{self, Poll as _};
     use dope_amqp091::protocol::method;
     use dope_amqp091::protocol::wire::text::short;
@@ -292,9 +272,8 @@ fn rejects_foreign_channel_key() {
     use o3::base::cell::local;
 
     use crate::common::basic::returned;
-    use crate::common::{cancel, fiber};
+    use crate::common::cancel;
 
-    let (cancelled, signal) = wake::Ends::blocking().expect("cancel pipe").split();
     TcpScript::with(
         move |stream| {
             Peer::new(stream).open(Tune::new(2, 4096, 0)).expect("handshake");
@@ -309,10 +288,18 @@ fn rejects_foreign_channel_key() {
             }
             stream.write_all(&cancel::delivery_frames_with_tag(2, "second", 7).expect("delivery"))
                 .expect("queued delivery");
-            cancel::check_on(&Method::read(stream).expect("rejected key cancellation"), 1, "first")
+            let first = Method::read(stream).expect("cancellation or barrier");
+            let second = Method::read(stream).expect("cancellation or barrier");
+            let (cancelled, barrier) = if first.channel() == 1 {
+                (first, second)
+            } else {
+                (second, first)
+            };
+            cancel::check_on(&cancelled, 1, "first")
                 .expect("original cancellation owner");
             Method::write(stream, 1, 60, 31, b"\x05first").expect("cancel reply");
-            signal.notify().expect("cancel observed");
+            barrier.check(2, 50, 30).expect("barrier route");
+            Method::write(stream, 2, 50, 31, &[0; 4]).expect("barrier reply");
             let ack = Method::read(stream).expect("untouched delivery acknowledgement");
             ack.check(2, 60, 80).expect("settlement channel");
             assert_eq!(ack.arguments(), &[0, 0, 0, 0, 0, 0, 0, 7, 0]);
@@ -363,7 +350,15 @@ fn rejects_foreign_channel_key() {
                         assert!(matches!(error, failure::Error::Protocol(failure::wire::Fault::ConsumerLease {
                             expected, actual,
                         }) if expected != actual));
-                        fiber::wait(&cancelled).await.expect("original key cancelled");
+                        let mut barrier = Once::new(|access| {
+                            amqp.methods().reserve(access, ready, leases[1], method::queue::Purge {
+                                queue: short::Name::EMPTY,
+                            })
+                        }).await.expect("cancellation barrier");
+                        poll_fn(|mut cx| {
+                            let wake = cx.as_ref().completion();
+                            barrier.poll(local::Access::new(cx.as_mut().region_token()), wake)
+                        }).await.expect("original key cancelled");
                         let mut consumer = amqp.consumers().try_bind(ready, leases[1], second)
                             .expect("matching channel key");
                         let delivery = {
@@ -384,15 +379,9 @@ fn rejects_foreign_channel_key() {
                     })).expect("fiber");
                 },
                 recover,
-                |result| {
-                    result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker completion");
         },
     ).expect("broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

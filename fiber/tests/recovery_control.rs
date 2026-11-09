@@ -1,14 +1,10 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
-
 use crate::common::amqp::wire::{Frame, Method};
 use crate::common::amqp::{Greeting, Peer};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
-use std::io::Write as _;
 use std::time::Duration;
 
-use dope::core::platform::wake;
 use dope_amqp091::failure;
 use dope_amqp091::message::ack;
 use dope_amqp091::message::field::Table;
@@ -21,9 +17,6 @@ use crate::common::recovery::client::with;
 
 #[test]
 fn answers_empty_challenge() {
-    let (done, complete) = wake::Ends::blocking()
-        .expect("challenge completion")
-        .split();
     AcceptScript::with(
         move |acceptor| {
             let mut stream = acceptor.accept().expect("connection");
@@ -53,8 +46,7 @@ fn answers_empty_challenge() {
                 .expect("Connection.Open")
                 .send()
                 .expect("Connection.OpenOk");
-            done.wait_timeout(Duration::from_secs(10))
-                .expect("challenge completion");
+            assert_eq!(stream.read(&mut [0]).expect("endpoint teardown"), 0);
         },
         |broker| {
             with(
@@ -64,15 +56,9 @@ fn answers_empty_challenge() {
                     rt.block_on(conn.observe().epoch())
                         .expect("challenge drive")
                         .expect("challenge");
-                    complete.notify().expect("challenge completion");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("scripted broker thread");
         },
@@ -82,8 +68,6 @@ fn answers_empty_challenge() {
 
 #[test]
 fn rejects_challenge() {
-    use std::io::Read as _;
-
     AcceptScript::with(
         move |acceptor| {
             let mut stream = acceptor.accept().expect("connection");
@@ -115,12 +99,7 @@ fn rejects_challenge() {
             ) if actual.get() == b"nonce".len()));
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             assert!(broker.finish().is_ok(), "scripted broker thread");
         },
@@ -130,8 +109,6 @@ fn rejects_challenge() {
 
 #[test]
 fn times_out_startup_before_ready() {
-    use std::io::Read as _;
-
     use dope::manifold::timing::Policy as _;
     use dope_amqp091::config;
     use dope_fiber::task::time::sleep::TimerExt as _;
@@ -192,12 +169,7 @@ fn times_out_startup_before_ready() {
                         .expect("startup timeout drive");
                     },
                     recover,
-                    |result| {
-                        result
-                            .as_ref()
-                            .map_err(|error| error.kind())
-                            .expect("endpoint completion");
-                    },
+                    complete,
                 );
                 broker.finish().expect("scripted broker thread");
             },
@@ -287,20 +259,11 @@ fn discards_during_close() {
                         }
                     },
                     recover,
-                    |result| {
-                        result
-                            .as_ref()
-                            .map_err(|error| error.kind())
-                            .expect("endpoint completion");
-                    },
+                    complete,
                 );
                 broker.finish().expect("scripted broker thread");
             },
         )
         .expect("scripted broker");
     }
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

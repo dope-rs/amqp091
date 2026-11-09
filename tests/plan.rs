@@ -1,4 +1,4 @@
-use std::{convert::Infallible, time};
+use std::time;
 
 use dope::core::driver::life::{creation::Attempt, recovery};
 use dope::core::driver::route::KeyTag;
@@ -9,6 +9,7 @@ use dope::runtime::executor::{Executor, session};
 use dope_amqp091::service::{Port, app::Plan};
 use dope_amqp091::{config, service};
 
+use crate::common::recover;
 pub mod common;
 use common::settings::{config, profile};
 
@@ -92,8 +93,4 @@ fn bounds_channel_stores() {
             "AMQP storage allocation with bounded channels"
         );
     });
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

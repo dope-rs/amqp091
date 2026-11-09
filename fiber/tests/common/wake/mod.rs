@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use dope::core::driver::life::recovery;
 use dope::core::driver::schedule::ready::wake::fanout::Registration;
-use dope::core::platform::wake;
 use dope::manifold::timing;
 use dope_amqp091::adapter::channel::Lease;
 use dope_amqp091::adapter::{Poll as _, conn, method};
@@ -12,7 +11,6 @@ use dope_amqp091::protocol::method::channel;
 use dope_amqp091::{adapter, config, failure};
 use dope_fiber::abi::Fiber;
 use dope_fiber::context;
-use dope_test::harness::support::gates::Barrier;
 use o3::base::cell::local;
 
 use crate::common::amqp::Tune;
@@ -23,7 +21,6 @@ pub const TUNE: Tune = Tune::new(16, 131_072, 0);
 #[derive(Debug)]
 pub enum Fault<E> {
     Runtime(E),
-    Notify(wake::NotifyError),
     Allocations { count: usize, bytes: usize },
 }
 
@@ -44,13 +41,12 @@ pub fn with_client(
     Endpoint::new(addr, cfg).try_check::<timing::Throughput, _>(policy, test, recover, finish)
 }
 
-pub struct Ready<'g, 'o, 'r, 'c, 'b, 'd> {
+pub struct Ready<'o, 'r, 'c, 'b, 'd> {
     pub(crate) state: conn::Observe<'o, 'r, 'c, 'b, 'd, 0>,
     pub(crate) wait: Registration<'o, 'd>,
-    pub(crate) gate: Option<&'g Barrier>,
 }
 
-impl<'o, 'r, 'c, 'b, 'd> Fiber<'d> for Ready<'_, 'o, 'r, 'c, 'b, 'd> {
+impl<'o, 'r, 'c, 'b, 'd> Fiber<'d> for Ready<'o, 'r, 'c, 'b, 'd> {
     type Output = Result<conn::Ready<'d, 0>, Fault<failure::Runtime<'c, 'b, 'd, 0>>>;
 
     fn poll(call: context::PollCall<'_, '_, 'd, Self>) -> task::Poll<Self::Output> {
@@ -58,13 +54,9 @@ impl<'o, 'r, 'c, 'b, 'd> Fiber<'d> for Ready<'_, 'o, 'r, 'c, 'b, 'd> {
         let this = this.get_mut();
         let wake = cx.as_ref().completion();
         let local = local::Access::new(cx.as_mut().region_token());
-        let poll = this.state.poll_ready(local, &mut this.wait, wake);
-        if poll.is_pending()
-            && let Some(gate) = this.gate.take()
-        {
-            gate.arrive().map_err(Fault::Notify)?;
-        }
-        poll.map_err(Fault::Runtime)
+        this.state
+            .poll_ready(local, &mut this.wait, wake)
+            .map_err(Fault::Runtime)
     }
 }
 

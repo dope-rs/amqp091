@@ -1,8 +1,3 @@
-use std::convert::Infallible;
-use std::io::Write as _;
-
-use dope::core::driver::life::recovery;
-use dope::core::platform::wake;
 use dope_amqp091::config;
 use dope_amqp091::message::ack;
 use dope_amqp091::message::field::Table;
@@ -10,17 +5,16 @@ use dope_amqp091_fiber::channel::basic;
 
 use crate::common::amqp::wire::Method;
 use crate::common::amqp::{Peer, Tune};
-use crate::common::fiber::wait;
 
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 use dope_test::harness::peer::TcpScript;
 
 use crate::common::cancel::*;
-use crate::common::client::check_no_frame;
 
 #[test]
 fn isolates_equal_keys() {
-    let (observed, notify) = wake::Ends::blocking().expect("broker observations").split();
     const LEFT: &str = "route-left";
     const RIGHT: &str = "route-right";
 
@@ -67,19 +61,21 @@ fn isolates_equal_keys() {
             stream
                 .write_all(&Method::try_encode(1, 60, 31, &left_ok).expect("AMQP frame fixture"))
                 .expect("left cancel-ok");
-            check_no_frame(
-                stream,
-                "right channel while only the equal local key on channel 1 is retiring",
-            )
-            .expect("AMQP fixture");
-            notify.notify().expect("isolated channel observation");
+            stream
+                .write_all(&delivery_frames(2, RIGHT).expect("AMQP fixture"))
+                .expect("right consumer survives left retirement");
 
             check_on(&Method::read(stream).expect("AMQP method"), 2, RIGHT)
                 .expect("AMQP cancel method");
             stream
                 .write_all(&Method::try_encode(2, 60, 31, &right_ok).expect("AMQP frame fixture"))
                 .expect("right cancel-ok");
-            notify.notify().expect("right cancel-ok written");
+            Method::write(stream, 0, 10, 50, &[0, 200, 0, 0, 0, 0, 0])
+                .expect("retirement after right cancel-ok");
+            Method::read(stream)
+                .expect("connection.close-ok")
+                .check(0, 10, 51)
+                .expect("both cancellations processed");
         },
         move |broker| {
             let chan = config::Channel::default()
@@ -103,7 +99,7 @@ fn isolates_equal_keys() {
                     let conn = rt.connection();
                     assert!(
                     rt.block_on(dope_fiber::fiber!('_ => async move {
-                        conn.observe().ready().await.expect("ready");
+                        let target = conn.observe().ready().await.expect("ready");
                         let left_channel = conn.channels().open(1).await.expect("left channel");
                         let right_channel = conn.channels().open(2).await.expect("right channel");
                         let args = Table::new();
@@ -119,7 +115,7 @@ fn isolates_equal_keys() {
                             })
                             .await
                             .expect("left consumer");
-                        let right = right_channel
+                        let mut right = right_channel
                             .basic()
                             .consume(basic::Consume {
                                 queue: "q",
@@ -133,28 +129,23 @@ fn isolates_equal_keys() {
                             .expect("right consumer");
 
                         drop(left);
-                        wait(&observed).await.expect("left route wait");
+                        let delivery = right.recv().await.expect("right consumer active")
+                            .expect("right delivery after left retirement");
+                        assert_eq!(delivery.consumer_tag(), RIGHT);
+                        assert!(delivery.body() == b"x"[..]);
+                        delivery.release();
                         drop(right);
-                        wait(&observed).await.expect("right cancel-ok written");
+                        conn.observe().retired(target.epoch()).await.expect("both cancellations retired");
                     }))
                     .is_ok(),
                     "AMQP fiber must complete"
                 );
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker completion");
         },
     )
     .expect("broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

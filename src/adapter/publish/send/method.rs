@@ -1,7 +1,5 @@
 use dope::core::driver::schedule::ready::wake;
-use dope::core::driver::schedule::ready::wake::queue;
 use o3::base::cell::{local, region};
-use o3::depot::queue::resident::fifo;
 
 use crate::adapter::channel::route;
 use crate::adapter::publish::request;
@@ -10,11 +8,11 @@ use crate::adapter::{core, step};
 use crate::failure;
 use crate::failure::wire::{Allocation, Fault, Resident};
 use crate::protocol::method::{self, basic};
-use crate::service::cancel::pending::reap;
+use crate::protocol::wire::text::resident;
+use crate::service;
 use crate::service::cancel::{self};
 use crate::state::channel::cancel::lanes;
 use crate::state::channel::facets;
-use crate::state::channel::publish::confirms;
 use crate::state::channels;
 
 pub(in crate::adapter::publish) struct Kind<const CONFIRM: bool>;
@@ -105,10 +103,6 @@ impl<'o, 'd: 'o, const ID: u8> Mode<'o, 'd, ID> for Kind<true> {
     }
 }
 
-enum Defer<'c> {
-    Wait(fifo::Index<'c>),
-}
-
 pub(super) struct Method<
     'exchange,
     'key,
@@ -123,7 +117,7 @@ pub(super) struct Method<
 > {
     route: route::Route<'o, 'r, 'c, 'b, 'd, ID, core::Publish>,
     input: request::Checked<'exchange, 'key, 'properties, 'body>,
-    credit: queue::Registration<'o, 'd, fifo::Scope<'c>>,
+    credit: step::Wait<'o, 'c, 'd>,
 }
 
 impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'exchange, 'key, 'properties, 'body, 'd: 'b, const ID: u8>
@@ -136,23 +130,69 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'exchange, 'key, 'properties, 'body, 'd: 'b, co
         Self {
             route,
             input,
-            credit: queue::Registration::new(),
+            credit: step::Wait::new(),
         }
+    }
+
+    pub(super) fn cancel(&mut self) {
+        self.credit.cancel(self.route.core().permits());
     }
 
     pub(super) fn poll<const CONFIRM: bool>(
         &mut self,
         mut access: local::Access<'_, region::Identity<'d>>,
         wake: wake::Waker<'d>,
-    ) -> step::Step<'c, 'b, 'd, stream::Started<'o, 'd, CONFIRM, ID>, ID>
+    ) -> step::Step<'c, 'b, 'd, Tickets<'o, 'd, <Kind<CONFIRM> as Mode<'o, 'd, ID>>::Ticket, ID>, ID>
     where
         Kind<CONFIRM>: Mode<'o, 'd, ID>,
     {
         let route = self.route;
         let core = route.core();
+        let check = |view: &route::View<'_, '_, '_, '_, 'r, 'c, 'b, 'd, ID>|
+         -> Result<(), failure::Error<resident::Short<'b, 'd>>> {
+            let blocked = view.connection.try_cause().map_err(|error| {
+                failure::Error::<resident::Short<'b, 'd>>::Resident {
+                    target: Allocation::Short,
+                    error: Resident::Retain(error),
+                }
+            })?;
+            if let Some(reason) = blocked {
+                return Err(failure::Error::ConnectionBlocked(reason.into()));
+            }
+            if view.channel.is_retiring() {
+                return Err(failure::Error::Closed);
+            }
+            Ok(())
+        };
+        if CONFIRM {
+            match route.with(access.reborrow(), |view| {
+                if view.connection.input.is_ready() {
+                    Ok(true)
+                } else {
+                    check(&view).map(|()| false)
+                }
+            }) {
+                service::EpochAccess::Live(Some(Ok(true))) => {}
+                service::EpochAccess::Live(Some(Ok(false))) => {
+                    return match self.credit.input(route, access, &wake) {
+                        Ok(()) => step::Step::Pending,
+                        Err(error) => step::Step::Error(error),
+                    };
+                }
+                service::EpochAccess::Live(Some(Err(error))) => {
+                    return step::Step::Error(failure::Runtime::Local(error));
+                }
+                service::EpochAccess::Terminal(cause) => {
+                    return step::Step::Error(cause.branded());
+                }
+                service::EpochAccess::Live(None) | service::EpochAccess::Unknown => {
+                    return step::Step::Error(failure::Runtime::from(failure::Error::Closed));
+                }
+            }
+        }
         let admit = route.try_frame(
             access.reborrow(),
-            |output| {
+            |output, _| {
                 method::Encode::write(
                     &basic::Publish {
                         exchange: self.input.exchange.into(),
@@ -165,35 +205,12 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'exchange, 'key, 'properties, 'body, 'd: 'b, co
                 );
             },
             |view, _, ()| {
-                let blocked =
-                    view.connection
-                        .try_cause()
-                        .map_err(|error| failure::Error::Resident {
-                            target: Allocation::Short,
-                            error: Resident::Retain(error),
-                        })?;
-                if let Some(reason) = blocked {
-                    return Err(core::Reject::Error(failure::Error::ConnectionBlocked(
-                        reason.into(),
-                    )));
-                }
-                if view.channel.is_retiring() {
-                    return Err(failure::Error::Closed.into());
-                }
+                check(&view).map_err(core::Reject::Error)?;
                 if CONFIRM {
-                    core.cancel().reap::<lanes::Confirm>(
+                    let _ = core.cancel().try_reap::<lanes::Confirm, _>(
                         view.index,
                         route.lease().raw(),
-                        |item| {
-                            if matches!(
-                                view.channel.confirm().reap(item.identity()),
-                                confirms::Reap::Removed
-                            ) {
-                                reap::Decision::Remove
-                            } else {
-                                reap::Decision::Keep
-                            }
-                        },
+                        |_, identity| view.channel.confirm().reap(identity),
                     )?;
                 }
                 let slot = lanes::Slot::<lanes::Publish>::ZERO;
@@ -202,41 +219,43 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'exchange, 'key, 'properties, 'body, 'd: 'b, co
                     return Err(failure::Error::ChannelFlowPaused.into());
                 }
                 if state.is_waiting() {
-                    return Err(core::Reject::Defer(Defer::Wait(view.index.lane())));
+                    return Err(core::Reject::Defer(view.index.lane()));
                 }
-                let Some((ticket, conf)) =
+                let Some(tickets) =
                     <Kind<CONFIRM> as Mode<'o, 'd, ID>>::begin(state, route, view.index, slot)?
                 else {
-                    return Err(core::Reject::Defer(Defer::Wait(view.index.lane())));
+                    return Err(core::Reject::Defer(view.index.lane()));
                 };
-                Ok(stream::Started::<CONFIRM, ID>::new(
-                    ticket,
-                    conf,
-                    self.input.max(),
-                ))
+                Ok(tickets)
             },
         );
         let admit = match admit {
             Ok(admit) => admit,
-            Err(Defer::Wait(index)) => {
-                return step::Step::channel(route, access, index, &mut self.credit, wake);
+            Err(index) => {
+                return match core
+                    .permits()
+                    .wait_channel(index, self.credit.credit(), &wake)
+                {
+                    Ok(()) => step::Step::Pending,
+                    Err(error) => step::Step::Error(failure::Runtime::from(error)),
+                };
             }
         };
-        step::Step::admit(route, access, admit, &mut self.credit, wake)
+        step::Step::admit(route, access, admit, self.credit.credit(), wake)
     }
 
     pub(super) fn next<const CONFIRM: bool>(
         self,
-        start: stream::Started<'o, 'd, CONFIRM, ID>,
+        tickets: Tickets<'o, 'd, <Kind<CONFIRM> as Mode<'o, 'd, ID>>::Ticket, ID>,
     ) -> header::Header<'properties, 'body, 'o, 'r, 'c, 'b, 'd, CONFIRM, ID>
     where
         Kind<CONFIRM>: Mode<'o, 'd, ID>,
     {
         header::Header::new(
-            stream::Stream::new(self.route, start),
+            stream::Stream::new(self.route, tickets, self.input.max()),
             self.input.properties,
             self.input.body,
-            self.credit,
+            self.credit.into_credit(),
         )
     }
 }
@@ -258,8 +277,8 @@ const _: () = {
                 'static,
                 0,
             >,
-        >() == 14 * mem::size_of::<usize>()
+        >() == 15 * mem::size_of::<usize>()
     );
 };
 
-type Tickets<'o, 'd, T, const ID: u8> = (cancel::Ticket<'o, 'd, lanes::Publish, ID>, T);
+pub(super) type Tickets<'o, 'd, T, const ID: u8> = (cancel::Ticket<'o, 'd, lanes::Publish, ID>, T);

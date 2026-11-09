@@ -1,16 +1,10 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
-
 use crate::common::amqp::Peer;
 use crate::common::amqp::app::Endpoint;
 use crate::common::amqp::wire::Method;
 use crate::common::cancel;
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
-
-use std::io::Write as _;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 use dope::core::io::Reclaimed;
 use dope::manifold::timing;
@@ -19,7 +13,6 @@ use dope_amqp091::message::ack;
 use dope_amqp091::message::ack::Disposition;
 use dope_amqp091::message::field::Table;
 use dope_amqp091_fiber::channel;
-use dope_fiber::task::time::sleep::TimerExt as _;
 use dope_test::harness::peer::TcpScript;
 
 use crate::common::basic;
@@ -27,12 +20,9 @@ use crate::common::basic::delivery;
 
 #[test]
 fn outlives_consumer() {
-    let done = AtomicBool::new(false);
     const QUEUE: &str = "official-q";
-    const TAG: &str = "official-consumer";
+    const TAG: &str = "한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한한";
 
-    let done = &done;
-    let signal = done;
     TcpScript::with(
         move |stream| {
             Peer::new(stream)
@@ -59,10 +49,9 @@ fn outlives_consumer() {
                 .write_all(&delivery::encode(TAG).expect("AMQP fixture"))
                 .expect("basic.deliver");
 
-            let mut cancel = false;
             let mut ack_seen = false;
-            while !cancel || !ack_seen {
-                let method = Method::read(stream).expect("basic.cancel or basic.ack");
+            loop {
+                let method = Method::read(stream).expect("consumer cleanup or connection close");
                 match method.method() {
                     30 => {
                         cancel::check(&method, TAG).expect("AMQP consumer method");
@@ -71,17 +60,21 @@ fn outlives_consumer() {
                                 &Method::try_encode(1, 60, 31, &ok).expect("AMQP frame fixture"),
                             )
                             .expect("basic.cancel-ok");
-                        cancel = true;
                     }
                     80 => {
                         method.check(1, 60, 80).expect("AMQP method route");
                         assert_eq!(method.arguments(), &[0, 0, 0, 0, 0, 0, 0, 1, 0]);
                         ack_seen = true;
                     }
-                    other => assert!(matches!(other, 30 | 31 | 80), "unexpected Basic method"),
+                    50 => {
+                        method.check(0, 10, 50).expect("connection.close");
+                        assert!(ack_seen, "retained delivery acknowledged before close");
+                        Method::write(stream, 0, 10, 51, &[]).expect("connection.close-ok");
+                        break;
+                    }
+                    _ => panic!("unexpected cleanup method"),
                 }
             }
-            signal.store(true, Ordering::Release);
         },
         |broker| {
             let channel = config::Channel::default()
@@ -104,9 +97,8 @@ fn outlives_consumer() {
                     basic::POLICY,
                     |runtime| {
                         let conn = runtime.connection();
-                        let timer = runtime.timer();
                         assert!(runtime.block_on(dope_fiber::fiber!('_ => async move {
-                    conn.observe().ready().await.expect("ready");
+                    let ready = conn.observe().ready().await.expect("ready");
                     let channel = conn.channels().open(1).await.expect("channel open");
                     let arguments = Table::new();
                     let mut consumer = channel
@@ -136,20 +128,13 @@ fn outlives_consumer() {
                     let settled = delivery.settle(Disposition::Ack).await;
                     assert!(settled.is_ok(), "basic.ack");
 
-                    while !done.load(Ordering::Acquire) {
-                        let sleep = (timer.sleep(Duration::from_millis(1))).expect("cancel wait");
-                        sleep.await;
-                    }
+                    conn.control().close(ready, 200, "retained delivery settled")
+                        .await.expect("connection close");
                 })).is_ok(), "AMQP fiber must complete");
                     },
                     |event| reports.push(event),
                     recover,
-                    |result| {
-                        result
-                            .as_ref()
-                            .map_err(|error| error.kind())
-                            .expect("endpoint completion");
-                    },
+                    complete,
                 );
                 assert!(
                     matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]),
@@ -164,12 +149,9 @@ fn outlives_consumer() {
 
 #[test]
 fn empty_ends_at_header() {
-    let done = AtomicBool::new(false);
     const QUEUE: &str = "official-empty-q";
     const TAG: &str = "official-empty-consumer";
 
-    let done = &done;
-    let signal = done;
     TcpScript::with(
         move |stream| {
             Peer::new(stream)
@@ -190,10 +172,7 @@ fn empty_ends_at_header() {
                 .write_all(&delivery::empty(TAG).expect("AMQP fixture"))
                 .expect("empty basic.deliver");
 
-            let cancel = Method::read(stream).expect("basic.cancel");
-            cancel::check(&cancel, TAG).expect("AMQP consumer method");
-            Method::write(stream, 1, 60, 31, &ok).expect("basic.cancel-ok");
-            signal.store(true, Ordering::Release);
+            basic::returned::close_connection(stream).expect("connection close");
         },
         |broker| {
             let channel = config::Channel::default()
@@ -216,9 +195,8 @@ fn empty_ends_at_header() {
                     basic::POLICY,
                     |runtime| {
                         let conn = runtime.connection();
-                        let timer = runtime.timer();
                         assert!(runtime.block_on(dope_fiber::fiber!('_ => async move {
-                    conn.observe().ready().await.expect("ready");
+                    let ready = conn.observe().ready().await.expect("ready");
                     let channel = conn.channels().open(1).await.expect("channel open");
                     let arguments = Table::new();
                     let mut consumer = channel
@@ -243,22 +221,13 @@ fn empty_ends_at_header() {
                     assert!(delivery.body().is_empty());
                     assert_eq!(delivery.body().as_slice(), Some(&[][..]));
                     delivery.release();
-                    drop(consumer);
-
-                    while !done.load(Ordering::Acquire) {
-                        let sleep = (timer.sleep(Duration::from_millis(1))).expect("cancel wait");
-                        sleep.await;
-                    }
+                    conn.control().close(ready, 200, "empty delivery released")
+                        .await.expect("connection close");
                 })).is_ok(), "AMQP fiber must complete");
                     },
                     |event| reports.push(event),
                     recover,
-                    |result| {
-                        result
-                            .as_ref()
-                            .map_err(|error| error.kind())
-                            .expect("endpoint completion");
-                    },
+                    complete,
                 );
                 assert!(
                     matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]),
@@ -269,8 +238,4 @@ fn empty_ends_at_header() {
         },
     )
     .expect("scripted AMQP broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

@@ -1,8 +1,5 @@
-use std::convert::Infallible;
-use std::io::Write as _;
 use std::time::Duration;
 
-use dope::core::driver::life::recovery;
 use dope_amqp091::config;
 use dope_amqp091::message::field::Table;
 use dope_amqp091_fiber::channel::basic;
@@ -10,9 +7,9 @@ use dope_amqp091_fiber::channel::basic;
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::{Method, put_short};
 
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
-
-use std::sync::mpsc;
 
 use dope_amqp091::failure;
 use dope_amqp091::message::ack;
@@ -30,7 +27,6 @@ fn assert_auto_consume(method: &Method) {
 
 #[test]
 fn replays_after_retry() {
-    let (step, steps) = mpsc::channel();
     AcceptScript::with(
         move |acceptor| {
             let mut first = acceptor.accept().expect("first connection");
@@ -59,7 +55,8 @@ fn replays_after_retry() {
             first
                 .write_all(&Method::try_encode(1, 60, 21, &ok).expect("AMQP frame fixture"))
                 .expect("first Basic.ConsumeOk");
-            steps.recv().expect("first consumer readiness");
+            Method::read(&mut first).expect("consumer readiness fence")
+                .check(1, 50, 30).expect("queue.purge");
             drop(first);
 
             let mut retry = acceptor.accept().expect("retry connection");
@@ -104,7 +101,9 @@ fn replays_after_retry() {
             third
                 .write_all(&Method::try_encode(1, 60, 21, &ok).expect("AMQP frame fixture"))
                 .expect("replayed Basic.ConsumeOk");
-            steps.recv().expect("third transport verification");
+            Method::read(&mut third).expect("connection close")
+                .check(0, 10, 50).expect("close after third transport verification");
+            Method::write(&mut third, 0, 10, 51, &[]).expect("connection.close-ok");
         },
         |broker| {
             with(
@@ -132,18 +131,18 @@ fn replays_after_retry() {
                                 })
                                 .await
                                 .expect("basic_consume");
-                            step.send(()).expect("publish first consumer readiness");
+                            chan.queue().purge("q").await.expect_err("disconnect after consumer readiness");
                             conn.observe()
                                 .retired(first.epoch())
                                 .await
                                 .expect("first transport retirement");
-                            conn.observe()
+                            let ready = conn.observe()
                                 .ready()
                                 .await
                                 .expect("third transport recovery");
                             let generation = conn.observe().read(|view| view.ready_cycle()).await;
                             assert_eq!(generation, Some(3));
-                            step.send(()).expect("publish third transport verification");
+                            conn.control().close(ready, 200, "done").await.expect("close");
                             drop(consumer);
                         }))
                         .is_ok(),
@@ -151,12 +150,7 @@ fn replays_after_retry() {
                     );
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker thread panicked");
         },
@@ -166,14 +160,14 @@ fn replays_after_retry() {
 
 #[test]
 fn rejects_stale_ready() {
-    let (ready, wait) = mpsc::channel();
     AcceptScript::with(
         move |acceptor| {
             let mut first = acceptor.accept().expect("first connection");
             Peer::new(&mut first)
                 .open(TUNE)
                 .expect("first AMQP handshake");
-            wait.recv().expect("first connection readiness");
+            Method::read(&mut first).expect("connection readiness fence")
+                .check(1, 20, 10).expect("channel.open");
             drop(first);
 
             let mut current = acceptor.accept().expect("recovered connection");
@@ -204,7 +198,7 @@ fn rejects_stale_ready() {
                     assert!(
                         rt.block_on(dope_fiber::fiber!('_ => async move {
                             let stale = conn.observe().ready().await.expect("first ready");
-                            ready.send(()).expect("publish first connection readiness");
+                            assert!(conn.channels().open_in(stale, 1).await.is_err());
                             conn
                                 .observe()
                                 .retired(stale.epoch())
@@ -228,19 +222,10 @@ fn rejects_stale_ready() {
                         "AMQP fiber must complete"
                     );
                 }, recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("stale-ready broker");
         },
     )
     .expect("bind stale-ready broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

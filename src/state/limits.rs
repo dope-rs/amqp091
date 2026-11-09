@@ -43,29 +43,14 @@ impl Limits {
             deliveries: delivery,
             returns,
         } = config.capacity.channel;
-        let methods = capacity::Count::try_from(methods).map_err(|error| wire::Config::Count {
-            target: wire::Limit::Method,
-            error,
-        })?;
-        let confirms =
-            capacity::Count::try_from(confirms).map_err(|error| wire::Config::Count {
-                target: wire::Limit::Confirm,
-                error,
-            })?;
-        let consumer =
-            capacity::Count::try_from(consumer).map_err(|error| wire::Config::Count {
-                target: wire::Limit::Consumer,
-                error,
-            })?;
-        let delivery =
-            capacity::Count::try_from(delivery).map_err(|error| wire::Config::Count {
-                target: wire::Limit::Delivery,
-                error,
-            })?;
-        let returns = capacity::Count::try_from(returns).map_err(|error| wire::Config::Count {
-            target: wire::Limit::Returned,
-            error,
-        })?;
+        let count = |value, target| {
+            capacity::Count::try_from(value).map_err(|error| wire::Config::Count { target, error })
+        };
+        let methods = count(methods, wire::Limit::Method)?;
+        let confirms = count(confirms, wire::Limit::Confirm)?;
+        let consumer = count(consumer, wire::Limit::Consumer)?;
+        let delivery = count(delivery, wire::Limit::Delivery)?;
+        let returns = count(returns, wire::Limit::Returned)?;
         let Some(total) = methods.get().checked_add(consumer.get()) else {
             return Err(wire::Config::Sum {
                 target: wire::Limit::MethodStore,

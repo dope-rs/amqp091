@@ -1,13 +1,9 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
-
 use crate::common::amqp::Peer;
 use crate::common::amqp::app::{Endpoint, plan};
 use crate::common::amqp::wire::{Frame, Method};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
-
-use std::io::Write as _;
 
 use dope::manifold::timing;
 use dope_amqp091::message::property::Properties;
@@ -77,12 +73,7 @@ fn incomplete_closes_505() {
                 })).is_ok(), "AMQP fiber must complete");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("scripted AMQP broker completion");
         },
@@ -146,12 +137,7 @@ fn wrong_class_closes_502() {
                 })).is_ok(), "AMQP fiber must complete");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("scripted AMQP broker completion");
         },
@@ -208,9 +194,7 @@ fn duplicate_before_retry() {
                     })).is_ok(), "AMQP fiber must complete");
                 },
                 recover,
-                |result| {
-                    result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("scripted AMQP broker completion");
         },
@@ -258,15 +242,9 @@ fn unbound_body_closes_502() {
                     })).is_ok(), "AMQP fiber must complete");
                 },
                 recover,
-                |result| {
-                    result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("scripted AMQP broker completion");
         },
     ).expect("scripted AMQP broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

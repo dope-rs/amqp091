@@ -1,11 +1,8 @@
 use std::pin::Pin;
 use std::task::Poll;
-use std::time::Duration;
 
-use dope::core::platform::wake;
 use dope_fiber::abi::{Fiber, PollFn, Task};
 use dope_fiber::context;
-use dope_test::fibers::Yield;
 
 pub struct Pinned<F>(Pin<Box<Task<F>>>);
 
@@ -43,14 +40,4 @@ where
     'd: 'a,
 {
     PollFn::admitted(move |admit| Poll::Ready(admit.poll(fiber.as_mut()).0))
-}
-
-#[dope_fiber::fiber_fn('d)]
-pub async fn wait<'d>(ready: &wake::Wait) -> Result<(), wake::WaitError> {
-    loop {
-        match ready.wait_timeout(Duration::ZERO) {
-            Err(wake::WaitError::Timeout { .. }) => Yield::new().await,
-            outcome => return outcome,
-        }
-    }
 }

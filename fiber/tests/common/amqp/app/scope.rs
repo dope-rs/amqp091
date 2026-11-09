@@ -1,5 +1,6 @@
+use std::convert::Infallible;
 use std::net::SocketAddr;
-use std::pin;
+use std::{pin, time};
 
 use dope::core::driver::route::KeyTag;
 use dope::core::driver::schedule::clock::timer;
@@ -12,14 +13,13 @@ use dope::manifold::service::{bindings, sync};
 use dope::manifold::timing;
 use dope::net::tcp::Tcp;
 use dope::net::wire::Identity;
-use dope::runtime::executor::{drive, session};
+use dope::runtime::executor::{self, drive, session};
 use dope_amqp091::service::{Logic, Port};
 use dope_amqp091_fiber::conn::Connection;
-use dope_fiber::BlockOn as _;
-use dope_fiber::abi::Fiber;
-use dope_test::fibers;
+use dope_fiber::abi::{self, Fiber};
+use dope_fiber::task::done;
 
-type App<'app, 'life, 'q, 'h, 'p, 'o, 'r, 'c, 'b, 'd, const ID: u8, P> = session::App<
+type App<'app, 'life, 'q, 'h, 'p, 'o, 'r, 'c, 'b, 'd, const ID: u8, P, Q> = session::App<
     'app,
     'life,
     'd,
@@ -47,6 +47,7 @@ type App<'app, 'life, 'q, 'h, 'p, 'o, 'r, 'c, 'b, 'd, const ID: u8, P> = session
             1,
         >,
     >,
+    Q,
 >;
 
 /// One installed AMQP application whose handles cannot outlive its driver domain.
@@ -63,12 +64,13 @@ pub struct Scope<
     'd: 'life + 'p + 'b,
     const ID: u8,
     P,
+    Q = (),
 > where
     P: settings::Profile + timing::Policy,
 {
-    app: App<'app, 'life, 'q, 'h, 'p, 'o, 'r, 'c, 'b, 'd, ID, P>,
+    app: App<'app, 'life, 'q, 'h, 'p, 'o, 'r, 'c, 'b, 'd, ID, P, Q>,
     port: &'o Port<'r, 'c, 'b, 'd, ID>,
-    fibers: fibers::Harness,
+    deadline: time::Duration,
 }
 
 impl<
@@ -84,16 +86,22 @@ impl<
     'd: 'life + 'p + 'b,
     const ID: u8,
     P,
-> Scope<'app, 'life, 'q, 'h, 'p, 'o, 'r, 'c, 'b, 'd, ID, P>
+    Q,
+> Scope<'app, 'life, 'q, 'h, 'p, 'o, 'r, 'c, 'b, 'd, ID, P, Q>
 where
     P: settings::Profile + timing::Policy,
+    Q: executor::Startup,
 {
     pub(super) const fn new(
-        app: App<'app, 'life, 'q, 'h, 'p, 'o, 'r, 'c, 'b, 'd, ID, P>,
+        app: App<'app, 'life, 'q, 'h, 'p, 'o, 'r, 'c, 'b, 'd, ID, P, Q>,
         port: &'o Port<'r, 'c, 'b, 'd, ID>,
-        fibers: fibers::Harness,
+        deadline: time::Duration,
     ) -> Self {
-        Self { app, port, fibers }
+        Self {
+            app,
+            port,
+            deadline,
+        }
     }
 
     pub fn connection(
@@ -130,17 +138,27 @@ where
         self.port.timer()
     }
 
-    pub fn block_on<F>(&mut self, fiber: F) -> Result<F::Output, fibers::Run>
+    pub fn block_on<F>(&mut self, fiber: F) -> Result<F::Output, drive::Error>
     where
         F: Fiber<'d>,
     {
-        self.fibers.try_run(&mut self.app, fiber)
+        self.app.drive_for(self.deadline, done::Once::new(fiber))
     }
 
-    pub fn drive<F>(&mut self, fiber: F) -> Result<F::Output, drive::Error>
+    pub fn until_shutdown<F>(&mut self, fiber: F) -> Result<Option<F::Output>, drive::Error>
     where
         F: Fiber<'d>,
     {
-        self.app.block_on(fiber)
+        let mut output = None;
+        let target = &mut output;
+        let result = self.block_on(dope_fiber::fiber!('d => async move {
+            *target = Some(fiber.await);
+            abi::Pending::<Infallible>::new().await
+        }));
+        match result {
+            Err(drive::Error::Shutdown) => Ok(output),
+            Err(error) => Err(error),
+            Ok(never) => match never {},
+        }
     }
 }

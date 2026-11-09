@@ -3,9 +3,10 @@ use std::ops;
 use dope::core::driver;
 use o3::depot::arena::slab;
 
-use crate::failure::{self, wire};
+use crate::failure::{self, terminal, wire};
 use crate::protocol::topology::records::queue;
 use crate::protocol::topology::{self};
+use crate::state::channel::change;
 use crate::state::channel::methods::send;
 use crate::state::{channel, channels};
 
@@ -23,13 +24,6 @@ pub(crate) struct View<'a, 's, 'v, 'r, 'c, 'b, 'd, const ID: u8> {
     pub(crate) index: channels::Index<'c, ID>,
     pub(crate) channel: &'a mut channel::Session<'r, 'c, 'b, 'd, ID>,
     pub(crate) topology: &'s mut topology::State<'v, 'c, 'b, 'd, ID>,
-}
-
-/// Exclusive route proof for an encoded control frame.
-#[must_use = "the prepared route must be committed with its frame"]
-pub(crate) struct Prepared<'a, 'b, 'd, const ID: u8> {
-    send: send::Prepared<'a, 'b, 'd>,
-    local: &'a mut topology::Local<'d, ID>,
 }
 
 impl<'r, 'c, 'b, 'd, const ID: u8> Routes<'r, 'c, 'b, 'd, ID> {
@@ -58,6 +52,10 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Routes<'r, 'c, 'b, 'd, ID> {
         self.channels.lease(id)
     }
 
+    pub(crate) fn generation(&self) -> Option<channels::Generation> {
+        self.channels.generation()
+    }
+
     pub(crate) fn next_tracked(
         &self,
         after: Option<channels::Index<'c, ID>>,
@@ -71,6 +69,10 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Routes<'r, 'c, 'b, 'd, ID> {
 }
 
 impl<'r, 'c, 'b, 'd, const ID: u8> Edit<'_, 'r, 'c, 'b, 'd, ID> {
+    pub(crate) fn generation(&self) -> Option<channels::Generation> {
+        self.inner.generation()
+    }
+
     pub(crate) fn with_id<R>(
         &mut self,
         id: u16,
@@ -116,22 +118,29 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Edit<'_, 'r, 'c, 'b, 'd, ID> {
         Ok(f(channel, &mut topology))
     }
 
-    pub(crate) fn try_prepare(
+    pub(crate) fn try_commit(
         &mut self,
         lease: channels::Lease<'d, ID>,
         next: send::Next,
-    ) -> Result<Prepared<'_, 'b, 'd, ID>, failure::Error> {
+        stores: channel::Stores<'r, 'c, 'b, 'd>,
+    ) -> Result<(), failure::Error> {
         let channel = lease.id();
         let (session, local) = self
             .inner
             .channels
             .try_get_mut(lease)
             .map_err(failure::Error::Protocol)?;
-        let send = session
+        let effect = session
             .method_state()
-            .try_prepare(channel, next)
-            .map_err(failure::Error::Protocol)?;
-        Ok(Prepared { send, local })
+            .methods
+            .claim(channel, &next)
+            .map_err(failure::Error::Protocol)?
+            .commit();
+        if matches!(effect, send::Effect::Closing) {
+            local.clear();
+            session.close_sent(stores);
+        }
+        Ok(())
     }
 
     pub(crate) fn for_each(
@@ -146,13 +155,26 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Edit<'_, 'r, 'c, 'b, 'd, ID> {
             .visit(&mut self.inner.topology, self.values, f);
     }
 
+    pub(crate) fn transport_ended(
+        &mut self,
+        cause: &terminal::Lease<'c, 'b, 'd>,
+        stores: channel::Stores<'r, 'c, 'b, 'd>,
+    ) -> channel::Freed {
+        let mut freed = channel::Freed::Available;
+        self.for_each(|chan, topo| {
+            topo.disconnected();
+            freed = freed.merge(chan.change(topo, stores, change::Event::TransportEnded { cause }));
+        });
+        freed
+    }
+
     pub(crate) fn next<R>(
         &mut self,
         max: u16,
         init: impl FnOnce(channels::Index<'c, ID>, channels::Lease<'d, ID>) -> Result<R, failure::Error>,
     ) -> Result<R, failure::Error> {
         let upper = if max == 0 { u16::MAX } else { max };
-        self.inner.channels.acquire_next(upper, init)
+        self.inner.channels.acquire::<R, false>(upper, init)
     }
 
     pub(crate) fn abandon(
@@ -198,17 +220,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Edit<'_, 'r, 'c, 'b, 'd, ID> {
                 max,
             }));
         }
-        self.inner.channels.acquire(id, init)
-    }
-}
-
-impl<const ID: u8> Prepared<'_, '_, '_, ID> {
-    pub(crate) fn commit(self) -> send::Effect {
-        let effect = self.send.commit();
-        if matches!(&effect, send::Effect::Closing) {
-            self.local.clear();
-        }
-        effect
+        self.inner.channels.acquire::<R, true>(id, init)
     }
 }
 
@@ -219,10 +231,6 @@ const _: () = assert!(
             &mut channel::Session<'_, '_, '_, '_, 0>,
             &mut topology::State<'_, '_, '_, '_, 0>,
         )>()
-);
-const _: () = assert!(
-    std::mem::size_of::<Prepared<'_, '_, '_, 0>>()
-        == std::mem::size_of::<(&mut (), &mut (), &mut ())>()
 );
 const _: () = assert!(
     std::mem::align_of::<View<'_, '_, '_, '_, '_, '_, '_, 0>>()

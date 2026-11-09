@@ -1,22 +1,17 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
-
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::Method;
 use crate::common::recovery::broker::tagged;
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
-use std::io::{Read as _, Write as _};
 use std::time::Duration;
 
-use dope::core::platform::wake;
 use dope_amqp091::config;
 use dope_amqp091::message::ack;
 use dope_amqp091::message::ack::Disposition;
 use dope_amqp091::message::field::Table;
 use dope_amqp091_fiber::channel::{basic, queue};
-use dope_test::fibers::Yield;
 use dope_test::harness::peer::{AcceptScript, Stream};
 
 use crate::common::recovery::TUNE;
@@ -37,11 +32,86 @@ fn assert_close_retired(mut stream: &Stream<'_>) {
 }
 
 #[test]
+fn replays_consumer_without_tracked_queue() {
+    AcceptScript::with(
+        |broker| {
+            for recovered in [false, true] {
+                let mut stream = broker.accept().expect("connection");
+                stream
+                    .read_wait(Some(Duration::from_secs(10)))
+                    .expect("read timeout");
+                Peer::new(&mut stream).open(TUNE).expect("handshake");
+                common::basic::returned::open_channel(&mut stream).expect("channel");
+                common::cancel::check_client_consume(
+                    &Method::read(&mut stream).expect("consume"),
+                    "tag",
+                )
+                .expect("consumer tag");
+                let tag = common::cancel::consume_ok_arguments("tag").expect("tag");
+                Method::write(&mut stream, 1, 60, 21, &tag).expect("consume-ok");
+                if recovered {
+                    stream
+                        .write_all(&tagged(1, &[]).expect("delivery"))
+                        .expect("delivery");
+                    Method::read(&mut stream)
+                        .expect("ack")
+                        .check(1, 60, 80)
+                        .expect("ack route");
+                    common::basic::returned::close_connection(&mut stream).expect("close");
+                } else {
+                    Method::read(&mut stream)
+                        .expect("purge")
+                        .check(1, 50, 30)
+                        .expect("purge route");
+                    stream
+                        .write_all(
+                            &channel_close(1, 404, "queue disappeared", 50, 30)
+                                .expect("channel close"),
+                        )
+                        .expect("channel close");
+                    assert_close_retired(&stream);
+                }
+            }
+        },
+        |broker| {
+            with(
+                broker.addr(),
+                |rt| {
+                    let conn = rt.connection();
+                    rt.block_on(dope_fiber::fiber!('_ => async move {
+                        let target = conn.observe().ready().await.expect("ready");
+                        let channel = conn.channels().open_in(target, 1).await.expect("channel");
+                        let arguments = Table::new();
+                        let mut consumer = channel.basic().consume(basic::Consume {
+                            queue: "q", consumer_tag: "tag", no_local: false,
+                            ack: ack::Manual, exclusive: false, arguments: &arguments,
+                        }).await.expect("consumer");
+                        let error = channel.queue().purge("q").await.expect_err("remote close");
+                        assert_eq!(error.error().server_code(), Some(404));
+                        conn.observe().retired(target.epoch()).await.expect("retired");
+                        let ready = conn.observe().ready().await.expect("recovered");
+                        consumer.recv().await.expect("receive").expect("delivery")
+                            .settle(Disposition::Ack).await.expect("ack");
+                        conn.control().close(ready, 200, "done").await.expect("close");
+                    }))
+                    .expect("fiber");
+                },
+                recover,
+                |result| {
+                    result
+                        .as_ref()
+                        .map_err(|error| error.kind())
+                        .expect("endpoint");
+                },
+            );
+            broker.finish().expect("broker");
+        },
+    )
+    .expect("broker scope");
+}
+
+#[test]
 fn replays_consumer() {
-    let (wait, ready) = wake::Ends::blocking().expect("consumer readiness").split();
-    let (ack_rx, acked) = wake::Ends::blocking()
-        .expect("acknowledgement observation")
-        .split();
     AcceptScript::with(
         move |acceptor| {
             let mut first = acceptor.accept().expect("first connection");
@@ -54,9 +124,11 @@ fn replays_consumer() {
             Peer::new(&mut first)
                 .open(TUNE)
                 .expect("AMQP broker handshake");
-            open_named(&mut first, 1, "q", "tag").expect("AMQP fixture");
-            wait.wait_timeout(Duration::from_secs(10))
-                .expect("initial consumer readiness");
+            open_named(&first, 1, "q", "tag").expect("AMQP fixture");
+            Method::read(&mut first)
+                .expect("initial consumer readiness")
+                .check(1, 50, 30)
+                .expect("queue.purge");
 
             first
                 .write_all(
@@ -75,7 +147,7 @@ fn replays_consumer() {
             Peer::new(&mut second)
                 .open(TUNE)
                 .expect("AMQP broker handshake");
-            open_named(&mut second, 1, "q", "tag").expect("AMQP fixture");
+            open_named(&second, 1, "q", "tag").expect("AMQP fixture");
             second
                 .write_all(&tagged(1, &[]).expect("AMQP delivery"))
                 .expect("recovered delivery");
@@ -83,7 +155,11 @@ fn replays_consumer() {
                 .expect("Basic.Ack")
                 .check(1, 60, 80)
                 .expect("AMQP method route");
-            acked.notify().expect("publish recovered delivery ACK");
+            Method::read(&mut second)
+                .expect("close after recovered ACK")
+                .check(0, 10, 50)
+                .expect("connection.close");
+            Method::write(&mut second, 0, 10, 51, &[]).expect("connection.close-ok");
         },
         |broker| {
             with(
@@ -122,16 +198,9 @@ fn replays_consumer() {
                         })
                         .await
                         .expect("consumer");
-                    ready.notify().expect("publish initial consumer readiness");
-
-                    while conn
-                        .observe()
-                        .read(|view| view.ready_cycle())
-                        .await
-                        != Some(2)
-                    {
-                        Yield::new().await;
-                    }
+                    channel.queue().purge("q").await.expect_err("channel closed");
+                    conn.observe().retired(target.epoch()).await.expect("first retirement");
+                    let ready = conn.observe().ready().await.expect("recovered ready");
                     conn.observe().read(|view| {
                         let cause = (view.last_exit()).expect("retained Channel.Close cause");
                         assert_eq!(cause.generation(), 1);
@@ -147,16 +216,11 @@ fn replays_consumer() {
                         .settle(Disposition::Ack)
                         .await
                         .expect("generation-2 ACK");
-                    common::fiber::wait(&ack_rx).await.expect("recovered delivery ACK");
+                    conn.control().close(ready, 200, "done").await.expect("close after recovered ACK");
                 })).is_ok(), "AMQP fiber must complete");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("scripted broker thread");
         },
@@ -166,7 +230,6 @@ fn replays_consumer() {
 
 #[test]
 fn replays_pending_queue() {
-    let (wait, ready) = wake::Ends::blocking().expect("queue commit gate").split();
     AcceptScript::with(
         move |acceptor| {
             for epoch in 1..=3 {
@@ -204,8 +267,10 @@ fn replays_pending_queue() {
                     .write_all(&queue_declare_ok(1, name, 0, 0).expect("queue reply"))
                     .expect("queue declare-ok");
                 if epoch == 1 {
-                    wait.wait_timeout(Duration::from_secs(10))
-                        .expect("initial queue committed");
+                    Method::read(&mut stream)
+                        .expect("initial queue committed")
+                        .check(1, 50, 30)
+                        .expect("queue.purge");
                 } else {
                     Method::read(&mut stream)
                         .expect("connection close")
@@ -237,7 +302,7 @@ fn replays_pending_queue() {
                             auto_delete: false,
                             arguments: &args,
                         }).await.expect("anonymous queue");
-                        ready.notify().expect("initial queue committed");
+                        channel.queue().purge("old").await.expect_err("first transport closes");
                         conn.observe().retired(target.epoch()).await.expect("first retirement");
                         let target = conn.observe().ready().await.expect("recovered ready");
                         conn.observe().read(|view| {
@@ -250,12 +315,7 @@ fn replays_pending_queue() {
                     })).is_ok(), "AMQP fiber must complete");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("queue recovery broker");
         },
@@ -264,9 +324,6 @@ fn replays_pending_queue() {
 }
 
 fn assert_terminal_close(code: u16, text: &str) {
-    let (wait, ready) = wake::Ends::blocking()
-        .expect("terminal channel gate")
-        .split();
     AcceptScript::with(
         move |acceptor| {
             let mut stream = acceptor.accept().expect("connection");
@@ -288,8 +345,10 @@ fn assert_terminal_close(code: u16, text: &str) {
                     &Method::try_encode(1, 20, 11, &[0, 0, 0, 0]).expect("AMQP frame fixture"),
                 )
                 .expect("Channel.OpenOk");
-            wait.wait_timeout(Duration::from_secs(10))
-                .expect("terminal channel readiness");
+            Method::read(&mut stream)
+                .expect("terminal channel readiness")
+                .check(1, 50, 30)
+                .expect("queue.purge");
             stream
                 .write_all(&channel_close(1, code, text, 50, 10).expect("AMQP fixture"))
                 .expect("terminal Channel.Close");
@@ -304,12 +363,12 @@ fn assert_terminal_close(code: u16, text: &str) {
                     assert!(
                         rt.block_on(dope_fiber::fiber!('_ => async move {
                             let target = conn.observe().ready().await.expect("ready");
-                            conn
+                            let channel = conn
                                 .channels()
                                 .open_in(target, 1)
                                 .await
                                 .expect("channel");
-                            ready.notify().expect("publish terminal channel readiness");
+                            channel.queue().purge("").await.expect_err("terminal channel close");
                             conn
                                 .observe()
                                 .retired(target.epoch())
@@ -324,12 +383,7 @@ fn assert_terminal_close(code: u16, text: &str) {
                     );
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("scripted broker thread");
         },
@@ -347,8 +401,4 @@ fn preserves_fatal_close() {
     ] {
         assert_terminal_close(code, text);
     }
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

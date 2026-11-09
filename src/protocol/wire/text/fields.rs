@@ -1,4 +1,4 @@
-use std::{marker, str};
+use std::{marker, mem, str};
 
 use o3::buffer;
 use o3::buffer::hold::scope;
@@ -29,11 +29,6 @@ pub(crate) enum Decode {
     Trailing {
         offset: usize,
         remaining: usize,
-    },
-    Span {
-        start: usize,
-        end: usize,
-        max: usize,
     },
 }
 
@@ -76,9 +71,6 @@ impl Decode {
                 offset,
                 remaining: left,
             }),
-            Self::Span { start, end, max } => {
-                failure::Error::Field(field::Fault::Range { start, end, max })
-            }
         }
     }
 
@@ -207,7 +199,7 @@ pub(crate) struct View<'a, Schema, const N: usize> {
 
 #[derive(Clone, Copy)]
 pub(crate) struct Packed<Schema> {
-    fields: [Span; 3],
+    pub(super) ends: [u16; 3],
     schema: marker::PhantomData<fn(Schema) -> Schema>,
 }
 
@@ -286,30 +278,21 @@ impl<'input, Schema, const N: usize> View<'input, Schema, N> {
 impl<Schema> Packed<Schema> {
     pub(crate) fn copy_from(
         source: &View<'_, Schema, 3>,
-        target: &mut [u8; PACKED_CAPACITY],
+        target: &mut [mem::MaybeUninit<u8>; PACKED_CAPACITY],
     ) -> Self {
-        let mut fields = [Span::EMPTY; 3];
+        let mut ends = [0; 3];
         let mut start = 0usize;
-        for (from, to) in source.fields.iter().zip(&mut fields) {
+        for (from, to) in source.fields.iter().zip(&mut ends) {
             let value = from.view(source.bytes).as_bytes();
             let end = start + usize::from(from.len());
-            target[start..end].copy_from_slice(value);
-            *to = Span::new(start as u32, from.len());
+            target[start..end].write_copy_of_slice(value);
+            *to = end as u16;
             start = end;
         }
         Self {
-            fields,
+            ends,
             schema: marker::PhantomData,
         }
-    }
-
-    pub(crate) fn get<'a, const INDEX: usize>(
-        &self,
-        bytes: &'a [u8],
-        field: schema::Field<Schema, INDEX>,
-    ) -> &'a str {
-        const { assert!(INDEX < 3) };
-        self.fields[field.index()].view(bytes)
     }
 }
 
@@ -320,17 +303,15 @@ pub(crate) struct Span {
 }
 
 impl Span {
-    const EMPTY: Self = Self { start: 0, len: 0 };
-
     const fn new(start: u32, len: u8) -> Self {
         Self { start, len }
     }
 
-    const fn start(self) -> usize {
+    pub(super) const fn start(self) -> usize {
         self.start as usize
     }
 
-    const fn end(self) -> usize {
+    pub(super) const fn end(self) -> usize {
         self.start as usize + self.len as usize
     }
 
@@ -356,30 +337,15 @@ impl Span {
                 error,
             })
         })?;
-        let end = len - reader.len();
-        if end > u32::MAX as usize {
-            return Err(Decode::Span {
-                start,
-                end,
-                max: u32::MAX as usize,
-            });
-        }
         let text = str::from_utf8(bytes).map_err(|error| Decode::Utf8 {
             offset: start,
             error,
         })?;
-        if let Some(offset) = bytes.iter().position(|byte| *byte == 0) {
+        if let Some(offset) = text.find('\0') {
             return Err(Decode::Nul {
                 offset: start + offset,
             });
         }
         Ok((reader, Self::new(start as u32, count), short::Short(text)))
-    }
-
-    fn view(self, backing: &[u8]) -> &str {
-        // SAFETY: every span is validated against the immutable backing before publication.
-        let bytes = unsafe { backing.get_unchecked(self.start()..self.end()) };
-        // SAFETY: the same validation proves the selected bytes are UTF-8.
-        unsafe { str::from_utf8_unchecked(bytes) }
     }
 }

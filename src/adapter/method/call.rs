@@ -61,8 +61,8 @@ where
                         self.stage = Stage::Send { route, send };
                         return task::Poll::Pending;
                     }
-                    send::Poll::Error(error, send) => {
-                        send.ticket.cancel();
+                    send::Poll::Error(error, mut send) => {
+                        send.cancel(route.core().permits());
                         return task::Poll::Ready(Err(error));
                     }
                     send::Poll::Ready(wait, next) => {
@@ -87,8 +87,8 @@ where
 
 impl<const ID: u8, M> Drop for Call<'_, '_, '_, '_, '_, ID, M> {
     fn drop(&mut self) {
-        match &self.stage {
-            Stage::Send { send, .. } => send.ticket.cancel(),
+        match &mut self.stage {
+            Stage::Send { route, send } => send.cancel(route.core().permits()),
             Stage::Wait(wait) => wait.ticket.cancel(),
             Stage::Done => {}
         }

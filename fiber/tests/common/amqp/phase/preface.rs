@@ -1,4 +1,4 @@
-use std::io::Write;
+use crate::common::amqp::io::Write;
 
 use crate::common::amqp::phase::Start;
 use crate::common::amqp::wire::Method;
@@ -26,8 +26,7 @@ impl<'a, IO: Write> Preface<'a, IO> {
             10,
             10,
             &[&prefix, &auth_len, auth, &lang_len, langs],
-        )
-        .map_err(Error::Io)?;
+        )?;
         Ok(Start { io: self.io })
     }
 
@@ -39,7 +38,7 @@ impl<'a, IO: Write> Preface<'a, IO> {
         method: u16,
         args: &[u8],
     ) -> Result<(), Error> {
-        Method::write(self.io, channel, class, method, args).map_err(Error::Io)?;
+        Method::write(self.io, channel, class, method, args)?;
         Ok(())
     }
 }

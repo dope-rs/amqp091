@@ -69,7 +69,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8, K: core::Capability>
                 None => ops::ControlFlow::Break(Deferred::Closed),
             },
         );
-        match admit {
+        let result = match admit {
             Err(Deferred::Blocked(index)) => {
                 match self.core.permits().wait_channel(index, credit, &wake) {
                     Ok(()) => task::Poll::Pending,
@@ -85,41 +85,47 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8, K: core::Capability>
                 task::Poll::Ready(Ok(()))
             }
             Ok(state @ (service::Admit::Unavailable | service::Admit::Inactive)) => {
-                if matches!(state, service::Admit::Unavailable) {
+                let live = if matches!(state, service::Admit::Unavailable) {
                     let active = self.core.is_active(target);
-                    let live = self.core.shared().write(cx.reborrow(), |state| {
+                    self.core.shared().write(cx.reborrow(), |state| {
                         active
                             && state.connection.lifecycle.status().epoch() == Some(target)
                             && state
                                 .routes
                                 .project(lease.raw(), |route| !route.channel.is_retiring())
                                 == Some(true)
-                    });
-                    if live {
-                        return match self.core.permits().wait_credit(credit, &wake) {
-                            Ok(()) => task::Poll::Pending,
-                            Err(error) => task::Poll::Ready(Err(failure::Runtime::from(error))),
-                        };
+                    })
+                } else {
+                    false
+                };
+                if live {
+                    match self.core.permits().wait_credit(credit, &wake) {
+                        Ok(()) => task::Poll::Pending,
+                        Err(error) => task::Poll::Ready(Err(failure::Runtime::from(error))),
                     }
-                    credit.clear();
+                } else {
+                    task::Poll::Ready(Err(self.core.shared().read(cx.read(), |state| {
+                        state
+                            .connection
+                            .lifecycle
+                            .status()
+                            .terminal(target)
+                            .map(terminal::Outcome::retain)
+                            .map_or(
+                                failure::Runtime::from(failure::Error::Closed),
+                                terminal::Outcome::branded,
+                            )
+                    })))
                 }
-                task::Poll::Ready(Err(self.core.shared().read(cx.read(), |state| {
-                    state
-                        .connection
-                        .lifecycle
-                        .status()
-                        .terminal(target)
-                        .map(terminal::Outcome::retain)
-                        .map_or(
-                            failure::Runtime::from(failure::Error::Closed),
-                            terminal::Outcome::branded,
-                        )
-                })))
             }
             Ok(service::Admit::Error(error)) => {
                 task::Poll::Ready(Err(failure::Runtime::from(error)))
             }
+        };
+        if matches!(&result, task::Poll::Ready(Err(_))) {
+            self.core.permits().cancel(credit);
         }
+        result
     }
 }
 

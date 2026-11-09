@@ -15,9 +15,8 @@ pub(crate) struct Plan {
 
 impl Plan {
     pub(crate) fn try_new(channels: u32, limits: limits::Limits) -> Result<Self, failure::Error> {
-        let channels = num::NonZero::<u32>::new(channels).ok_or(failure::Error::InvalidConfig(
-            wire::Config::CancellationChannelZero,
-        ))?;
+        let channels = num::NonZero::<u32>::new(channels)
+            .ok_or_else(|| failure::Error::InvalidConfig(wire::Config::CancellationChannelZero))?;
         let layout = Layout::try_new(limits)?;
         let slots = layout.slots();
         if channels.get() > u32::MAX / slots {

@@ -55,7 +55,6 @@ pub(crate) struct Content<'a, 'r, 'c, 'b, 'd, const ID: u8> {
 
 pub(crate) struct Protocol {
     pub(crate) phase: channel::Phase,
-    pub(crate) expected: Option<method::Kind>,
     pub(crate) inbound_idle: bool,
 }
 
@@ -64,15 +63,16 @@ impl<'c, 'b, 'd, const ID: u8> Method<'_, 'c, 'b, 'd, ID> {
         &mut self,
         key: consumer::Key,
         stores: channel::Stores<'r, 'c, 'b, 'd>,
-    ) -> consumer::Retire {
-        self.consumers.retire(key, stores.deliveries)
+    ) -> Option<channel::Freed> {
+        self.consumers
+            .retire(key, stores.deliveries, || self.methods.replays(key))
     }
 
     pub(crate) fn detach<'r>(
         &mut self,
         key: consumer::Key,
         stores: channel::Stores<'r, 'c, 'b, 'd>,
-    ) -> consumer::Removal {
+    ) -> channel::Freed {
         self.consumers.detach(key, stores.deliveries)
     }
 }
@@ -148,7 +148,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Content<'_, 'r, 'c, 'b, 'd, ID> {
     fn route(&mut self, done: Option<pending::Complete<'r, 'c, 'b, 'd>>) {
         match done {
             Some(pending::Complete::Delivery(Some(claim))) => {
-                self.consumers.route(claim, self.stores.deliveries);
+                self.consumers.route(claim);
             }
             Some(pending::Complete::Delivery(None)) | None => {}
             Some(pending::Complete::Returned(claim)) => {
@@ -170,32 +170,20 @@ impl<'c, 'b, 'a, 'd, const ID: u8> Method<'a, 'c, 'b, 'd, ID> {
         }))
     }
 
-    pub(crate) fn preview<R>(
+    pub(crate) fn preview(
         &mut self,
         channel: u16,
         next: &send::Next,
-        encode: impl FnOnce(send::Command<'_>) -> R,
-    ) -> Result<Option<R>, wire::Fault> {
+    ) -> Result<Option<send::Command<'_>>, wire::Fault> {
         let pending = self.methods.claim(channel, next)?;
-        Ok(pending.preview(|item| match item {
-            send::Dispatch::Consumer(key) => {
-                let tag = self.consumers.read().tag(key)?;
-                Some(encode(send::Command::Cancel(tag)))
+        Ok(match pending.outbound() {
+            send::Outbound::Consumer(key) => {
+                self.consumers.read().tag(*key).map(send::Command::Cancel)
             }
-            send::Dispatch::Orphan(tag) => {
-                Some(encode(send::Command::Cancel(short::Short::from(tag))))
-            }
-            send::Dispatch::Close => Some(encode(send::Command::Close)),
-        }))
-    }
-
-    pub(crate) fn try_prepare(
-        self,
-        channel: u16,
-        next: send::Next,
-    ) -> Result<send::Prepared<'a, 'b, 'd>, wire::Fault> {
-        let pending = self.methods.claim(channel, &next)?;
-        Ok(send::Prepared::new(self.phase, pending))
+            send::Outbound::Orphan(tag) => Some(send::Command::Cancel(short::Short::from(tag))),
+            send::Outbound::Close => Some(send::Command::Close),
+            send::Outbound::None => None,
+        })
     }
 
     pub(crate) fn replay(
@@ -211,6 +199,7 @@ impl<'c, 'b, 'a, 'd, const ID: u8> Method<'a, 'c, 'b, 'd, ID> {
         };
         let next = match (*self.phase, expect) {
             (channel::Phase::Closed, method::Kind::Open) => Some(channel::Phase::Opening),
+            (channel::Phase::Open, method::Kind::CloseOk) => Some(channel::Phase::Closing),
             (channel::Phase::Open, _) => None,
             (phase, _) => {
                 let phase = match phase {
@@ -270,10 +259,9 @@ impl<'c, 'b, 'd, const ID: u8> Permit<'_, 'c, 'b, 'd, ID> {
         match admit {
             work::Admit::Consumer(spec) => {
                 let identity = if spec.tag().is_empty() {
-                    Some(
-                        ids.try_writer()
-                            .ok_or(failure::Error::Capacity(wire::Capacity::TopologyIdentity))?,
-                    )
+                    Some(ids.try_writer().ok_or_else(|| {
+                        failure::Error::Capacity(wire::Capacity::TopologyIdentity)
+                    })?)
                 } else {
                     None
                 };
@@ -303,7 +291,7 @@ impl<'c, 'b, 'd, const ID: u8> Permit<'_, 'c, 'b, 'd, ID> {
             need::IdentityPlan::Fresh => ids
                 .try_writer()
                 .map(Some)
-                .ok_or(failure::Error::Capacity(wire::Capacity::TopologyIdentity)),
+                .ok_or_else(|| failure::Error::Capacity(wire::Capacity::TopologyIdentity)),
         };
         let writer = match writer {
             Ok(writer) => writer,
@@ -327,6 +315,12 @@ impl<'c, 'b, 'd, const ID: u8> Permit<'_, 'c, 'b, 'd, ID> {
 }
 
 impl<'c, 'b, 'a, 'd, const ID: u8> Publish<'a, 'c, 'b, 'd, ID> {
+    pub(crate) fn published(&self) -> u64 {
+        // The active confirmed stream has reserved a tag but not its final frame.
+        self.confirm.published()
+            - u64::from(self.control.has_confirms() && self.publishing.is_active())
+    }
+
     pub(crate) fn is_waiting(&self) -> bool {
         matches!(
             self.methods.head(),
@@ -371,14 +365,12 @@ impl<'c, 'b, 'a, 'd> Confirm<'a, 'c, 'b, 'd> {
         key: confirms::Key<'d>,
         wake: wake::Waker<'d>,
     ) -> Option<Result<Option<protocol::Confirmation>, terminal::Outcome<'c, 'b, 'd>>> {
-        if !self.control.has_confirms() {
-            return None;
-        }
         self.confirm.poll(key, wake)
     }
 
     pub(crate) fn complete(
         &mut self,
+        published: u64,
         tag: u64,
         many: bool,
         result: protocol::Confirmation,
@@ -389,13 +381,10 @@ impl<'c, 'b, 'a, 'd> Confirm<'a, 'c, 'b, 'd> {
                 multiple: many,
             }));
         }
-        self.confirm.complete(tag, many, result)
+        self.confirm.complete(published, tag, many, result)
     }
 
-    pub(crate) fn reap(&mut self, id: num::NonZero<u64>) -> confirms::Reap {
-        if !self.control.has_confirms() {
-            return confirms::Reap::Missing;
-        }
+    pub(crate) fn reap(&mut self, id: num::NonZero<u64>) -> Option<()> {
         self.confirm.reap(id)
     }
 }

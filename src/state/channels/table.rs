@@ -2,7 +2,10 @@ use std::{marker, num};
 
 use dope::core::driver;
 use o3::alloc;
+use o3::base::marker::ThreadBound;
+use o3::depot;
 use o3::depot::arena::slab;
+use o3::depot::index::bitmap::{self, entry};
 use o3::depot::queue::resident;
 
 use crate::failure::{self, wire};
@@ -11,7 +14,7 @@ use crate::protocol::topology::records::queue;
 use crate::protocol::topology::{self};
 use crate::state::channel::{self, change, consumer};
 use crate::state::channels::Index;
-use crate::state::channels::map::{Generation, Map};
+use crate::state::channels::store::Store;
 use crate::state::limits;
 
 #[derive(Clone, Copy)]
@@ -85,44 +88,151 @@ pub(super) struct Slot<'r, 'c, 'b, 'd, const ID: u8> {
     pub(super) local: topology::Local<'d, ID>,
 }
 
+#[derive(Clone, Copy)]
 #[repr(transparent)]
+pub(crate) struct Generation(num::NonZero<u64>);
+
+#[repr(C)]
 pub(crate) struct Table<'r, 'c, 'b, 'd, const ID: u8> {
-    table: Map<'r, 'c, 'b, 'd, ID>,
+    store: Store<'r, 'c, 'b, 'd, ID>,
+    generation: Option<Generation>,
+    free: Option<Index<'c, ID>>,
+    thread: ThreadBound,
+}
+
+#[must_use = "an occupied channel must be retained or vacated"]
+struct Occupied<'a, 'r, 'c, 'b, 'd, const ID: u8> {
+    row: entry::Row<&'a mut Table<'r, 'c, 'b, 'd, ID>>,
+    index: Index<'c, ID>,
+}
+
+impl Generation {
+    const FIRST: Self = Self(num::NonZero::<u64>::MIN.saturating_add(u16::MAX as u64));
+
+    fn after(current: Option<Self>) -> Result<Self, failure::Error> {
+        let Some(current) = current else {
+            return Ok(Self::FIRST);
+        };
+        let next = current
+            .0
+            .checked_add(Self::FIRST.0.get())
+            .ok_or_else(|| failure::Error::Capacity(wire::Capacity::ChannelGeneration))?;
+        Ok(Self(next))
+    }
+
+    fn pack(self, id: u16) -> num::NonZero<u64> {
+        self.0 | u64::from(id)
+    }
+
+    pub(crate) fn admits<const ID: u8>(self, lease: Lease<'_, ID>) -> bool {
+        num::NonZero::from(lease).get() & !u64::from(u16::MAX) <= self.0.get()
+    }
 }
 
 impl<'r, 'c, 'b, 'd, const ID: u8> Table<'r, 'c, 'b, 'd, ID> {
+    fn try_index_mut(
+        &mut self,
+        key: Lease<'d, ID>,
+    ) -> Result<(Index<'c, ID>, &mut Slot<'r, 'c, 'b, 'd, ID>), wire::Fault> {
+        let id = usize::from(key.id());
+        let failure = |actual: Option<Lease<'d, ID>>| wire::Fault::ControlRoute {
+            channel: key.id(),
+            expected: num::NonZero::from(key),
+            actual: actual.map(num::NonZero::from),
+        };
+        if id >= self.store.shape.bits() {
+            return Err(failure(None));
+        }
+        let index = unsafe { *self.store.memory.map().add(id) }.ok_or_else(|| failure(None))?;
+        let entry = unsafe { self.store.memory.entry_mut(index) };
+        let actual = entry.key;
+        if actual != Some(key) {
+            return Err(failure(actual));
+        }
+        Ok((index, &mut entry.value))
+    }
+
     pub(crate) fn try_new(
         plan: Plan,
         driver: driver::Reference<'d>,
         permits: &permits::Registry<'c, 'd>,
     ) -> Result<Self, Error> {
+        let store = Store::try_new(plan, driver, permits)?;
+        let free = store.last();
         Ok(Self {
-            table: Map::try_new(plan, driver, permits)?,
+            store,
+            generation: None,
+            free,
+            thread: ThreadBound::NEW,
         })
     }
 
-    pub(crate) fn acquire<R>(
+    pub(crate) fn acquire<R, const EXACT: bool>(
         &mut self,
-        id: u16,
+        bound: u16,
         init: impl FnOnce(Index<'c, ID>, Lease<'d, ID>) -> Result<R, failure::Error>,
     ) -> Result<R, failure::Error> {
-        self.table.acquire(id, init)
-    }
-
-    pub(crate) fn acquire_next<R>(
-        &mut self,
-        upper: u16,
-        init: impl FnOnce(Index<'c, ID>, Lease<'d, ID>) -> Result<R, failure::Error>,
-    ) -> Result<R, failure::Error> {
-        self.table.acquire_min(upper, init)
+        let capacity = if EXACT {
+            self.store.slots()
+        } else {
+            self.store.capacity(bound)
+        };
+        let vacancy = if EXACT {
+            self.store.vacant(bound)?
+        } else {
+            let Some(vacancy) = self.store.first_vacant() else {
+                return Err(failure::Error::ChannelCapacity { capacity });
+            };
+            if vacancy.id() > bound {
+                return Err(failure::Error::ChannelCapacity { capacity });
+            }
+            vacancy
+        };
+        let next = Generation::after(self.generation)?;
+        let index = self
+            .free
+            .ok_or_else(|| failure::Error::ChannelCapacity { capacity })?;
+        let key = Lease::mint(vacancy.id(), next);
+        let (free, result) = vacancy.occupy(index, key, || init(index, key))?;
+        self.free = free;
+        self.generation = Some(next);
+        Ok(result)
     }
 
     pub(crate) fn lease(&self, id: u16) -> Option<Lease<'d, ID>> {
-        self.table.key_at(id)
+        self.store.key_at(id)
+    }
+
+    pub(crate) fn generation(&self) -> Option<Generation> {
+        self.generation
+    }
+
+    fn occupied(&mut self, key: Lease<'d, ID>) -> Option<Occupied<'_, 'r, 'c, 'b, 'd, ID>> {
+        let row = entry::Row::try_new(self, usize::from(key.id())).ok()?;
+        let memory = &row.source().store.memory;
+        let index = (unsafe { *memory.map().add(row.index()) })?;
+        if unsafe { memory.entry(index).key } != Some(key) {
+            return None;
+        }
+        Some(Occupied { row, index })
+    }
+
+    fn next_slot(
+        &self,
+        after: Option<Index<'c, ID>>,
+    ) -> Option<(Index<'c, ID>, Lease<'d, ID>, &Slot<'r, 'c, 'b, 'd, ID>)> {
+        let upper = self.store.last()?;
+        let mut index = upper.after(after)?;
+        loop {
+            if let Some((key, value)) = self.store.occupied(index) {
+                return Some((index, key, value));
+            }
+            index = upper.after(Some(index))?;
+        }
     }
 
     pub(crate) fn collect(&mut self, lease: Lease<'d, ID>) {
-        let Some(mut entry) = self.table.occupied(lease) else {
+        let Some(mut entry) = self.occupied(lease) else {
             return;
         };
         let slot = entry.get_mut();
@@ -141,7 +251,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Table<'r, 'c, 'b, 'd, ID> {
         lease: Lease<'d, ID>,
         stores: channel::Stores<'r, 'c, 'b, 'd>,
     ) -> channel::Freed {
-        let Some(mut entry) = self.table.occupied(lease) else {
+        let Some(mut entry) = self.occupied(lease) else {
             return channel::Freed::Available;
         };
         let slot = entry.get_mut();
@@ -183,7 +293,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Table<'r, 'c, 'b, 'd, ID> {
         select: impl Fn(&Slot<'r, 'c, 'b, 'd, ID>) -> bool,
     ) -> Option<(Index<'c, ID>, Lease<'d, ID>)> {
         loop {
-            let (index, lease, slot) = self.table.next(after)?;
+            let (index, lease, slot) = self.next_slot(after)?;
             if select(slot) {
                 return Some((index, lease));
             }
@@ -203,7 +313,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Table<'r, 'c, 'b, 'd, ID> {
         ),
         wire::Fault,
     > {
-        let (_, slot) = self.table.try_index_mut(lease)?;
+        let (_, slot) = self.try_index_mut(lease)?;
         Ok((&mut slot.channel, &mut slot.local))
     }
 
@@ -218,7 +328,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Table<'r, 'c, 'b, 'd, ID> {
             &'s mut topology::State<'v, 'c, 'b, 'd, ID>,
         ) -> R,
     ) -> Option<R> {
-        let (index, slot) = self.table.try_index_mut(lease).ok()?;
+        let (index, slot) = self.try_index_mut(lease).ok()?;
         let mut state = topology::State::new(&mut slot.local, graph, values);
         Some(f(index, &mut slot.channel, &mut state))
     }
@@ -232,10 +342,17 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Table<'r, 'c, 'b, 'd, ID> {
             &'s mut topology::State<'v, 'c, 'b, 'd, ID>,
         ),
     ) {
-        self.table.visit(|slot| {
-            let mut state = topology::State::new(&mut slot.local, graph, values);
-            f(&mut slot.channel, &mut state);
-        });
+        let Some(upper) = self.store.last() else {
+            return;
+        };
+        let mut index = upper.after(None);
+        while let Some(current) = index {
+            if let Some((_, slot)) = self.store.occupied_mut(current) {
+                let mut state = topology::State::new(&mut slot.local, graph, values);
+                f(&mut slot.channel, &mut state);
+            }
+            index = upper.after(Some(current));
+        }
     }
 }
 
@@ -245,7 +362,6 @@ const _: () = {
     assert!(mem::size_of::<Lease<'_, 0>>() == mem::size_of::<u64>());
     assert!(mem::size_of::<Option<Lease<'_, 0>>>() == mem::size_of::<u64>());
     assert!(mem::size_of::<Table<'_, '_, '_, '_, 0>>() == 6 * mem::size_of::<usize>());
-    assert!(mem::size_of::<Table<'_, '_, '_, '_, 0>>() == mem::size_of::<Map<'_, '_, '_, '_, 0>>());
 };
 
 impl<const ID: u8> From<Lease<'_, ID>> for num::NonZero<u64> {
@@ -253,3 +369,43 @@ impl<const ID: u8> From<Lease<'_, ID>> for num::NonZero<u64> {
         value.packed
     }
 }
+
+impl<'r, 'c, 'b, 'd, const ID: u8> Occupied<'_, 'r, 'c, 'b, 'd, ID> {
+    fn get_mut(&mut self) -> &mut Slot<'r, 'c, 'b, 'd, ID> {
+        // SAFETY: the slot value cannot change the retained table's bitmap storage or domain.
+        unsafe { self.row.source_mut() }.store.value_mut(self.index)
+    }
+
+    fn vacate(mut self) {
+        let id = self.row.index();
+        // SAFETY: this exclusive entry changes only its own mapping and free-list membership.
+        let table = unsafe { self.row.source_mut() };
+        unsafe {
+            table.store.memory.map_mut().add(id).write(None);
+            let entry = table.store.memory.entry_mut(self.index);
+            entry.key = None;
+            entry.next = table.free;
+        }
+        table.free = Some(self.index);
+        self.row.update::<true>(());
+    }
+}
+
+// SAFETY: Table retains and exclusively owns the same Store and its immutable bitmap domain.
+unsafe impl<const ID: u8> depot::raw::Words for Table<'_, '_, '_, '_, ID> {
+    type Plane = ();
+    type Size = u32;
+
+    fn shape(&self) -> bitmap::Shape {
+        self.store.shape()
+    }
+
+    fn words(&self, (): ()) -> &[bitmap::Word] {
+        self.store.words(())
+    }
+}
+
+const _: () = assert!(
+    std::mem::size_of::<Occupied<'static, 'static, 'static, 'static, 'static, 0>>()
+        == 3 * std::mem::size_of::<usize>()
+);

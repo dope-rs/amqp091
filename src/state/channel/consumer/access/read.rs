@@ -23,17 +23,11 @@ impl<'b, 'a, 'd, const ID: u8> Read<'a, 'b, 'd, ID> {
     }
 
     pub(crate) fn has_replay(&self) -> bool {
-        (0..self.registry.slots.capacity()).any(|index| {
-            self.registry
-                .slots
-                .key_value_at(index)
-                .is_some_and(|entry| {
-                    let slot = entry.1;
-                    matches!(
-                        slot.status,
-                        Status::Active | Status::Recovering | Status::Replaying
-                    )
-                })
+        self.registry.slots.values().any(|slot| {
+            matches!(
+                slot.status,
+                Status::Active | Status::Recovering | Status::Replaying
+            )
         })
     }
 
@@ -79,7 +73,7 @@ impl<'b, 'a, 'd, const ID: u8> Read<'a, 'b, 'd, ID> {
         };
         if slot.status != Status::Retiring {
             return Err(failure::Error::Protocol(wire::Fault::ConsumerPhase {
-                consumer: num::NonZero::from(key).get(),
+                consumer: num::NonZero::from(key),
                 expected: turn::Consumer::Retiring,
                 actual: slot.status.phase(),
             }));

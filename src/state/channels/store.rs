@@ -2,14 +2,17 @@ use std::alloc::Layout;
 use std::{marker, mem, num, ptr, slice};
 
 use bitmap::Access as _;
+use dope::core::driver;
 use o3::depot::index::bitmap::{self, Fill, entry};
 use o3::{alloc, depot};
 
 use crate::failure::{self, wire};
 use crate::permits;
+use crate::protocol::topology;
+use crate::state::channel;
 use crate::state::channels::layout::{self, Entry};
 use crate::state::channels::table::Slot;
-use crate::state::channels::{Error, Index, Lease};
+use crate::state::channels::{Error, Index, Lease, Plan};
 
 #[repr(C)]
 pub(super) struct Store<'r, 'c, 'b, 'd, const ID: u8> {
@@ -40,13 +43,42 @@ struct Init<'r, 'c, 'b, 'd, const ID: u8> {
 
 impl<'r, 'c, 'b, 'd, const ID: u8> Store<'r, 'c, 'b, 'd, ID> {
     pub(super) fn try_new(
-        layout: layout::Layout,
+        plan: Plan,
+        driver: driver::Reference<'d>,
         permits: &permits::Registry<'c, 'd>,
-        mut make: impl FnMut(Index<'c, ID>) -> Result<Slot<'r, 'c, 'b, 'd, ID>, alloc::Error>,
     ) -> Result<Self, Error> {
+        let layout = layout::Layout::new::<ID>(plan.id_capacity, plan.slot_capacity)
+            .map_err(|error| Error::Allocation(error.into()))?;
         let mut init = Init::new(layout)?;
         while init.len() < layout.physical {
-            init.push(permits, &mut make)?;
+            let position = init.initialized.map_or(num::NonZero::<u16>::MIN, |index| {
+                index.position().saturating_add(1)
+            });
+            let index = Index::try_new(
+                permits
+                    .try_index(usize::from(position.get()))
+                    .map_err(Error::Lane)?,
+            )
+            .map_err(Error::Index)?;
+            let value = Slot {
+                channel: channel::Session::try_new(
+                    index.position(),
+                    plan.limits,
+                    plan.consumers,
+                    driver,
+                )?,
+                local: topology::Local::new(),
+            };
+            unsafe {
+                init.entries()
+                    .add(usize::from(index.offset()))
+                    .write(Entry {
+                        key: None,
+                        next: init.initialized,
+                        value,
+                    });
+            }
+            init.initialized = Some(index);
         }
         let mut store = init.finish();
         if let Some(zero) = store.first(()) {
@@ -140,7 +172,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Vacancy<'_, 'r, 'c, 'b, 'd, ID> {
         let mut removed = self.entry.remove();
         let id = removed.index();
         // SAFETY: only the matching map and physical entry change; the bitmap owner stays fixed.
-        let store = unsafe { depot::raw::Rows::source_mut(&mut removed) };
+        let store = unsafe { removed.source_mut() };
         unsafe {
             store.memory.map_mut().add(id).write(Some(index));
             let entry = store.memory.entry_mut(index);
@@ -230,34 +262,6 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Init<'r, 'c, 'b, 'd, ID> {
         Ok(init)
     }
 
-    fn push(
-        &mut self,
-        permits: &permits::Registry<'c, 'd>,
-        make: &mut impl FnMut(Index<'c, ID>) -> Result<Slot<'r, 'c, 'b, 'd, ID>, alloc::Error>,
-    ) -> Result<(), Error> {
-        let position = self.initialized.map_or(num::NonZero::<u16>::MIN, |index| {
-            index.position().saturating_add(1)
-        });
-        let index = Index::try_new(
-            permits
-                .try_index(usize::from(position.get()))
-                .map_err(Error::Lane)?,
-        )
-        .map_err(Error::Index)?;
-        let value = make(index)?;
-        unsafe {
-            self.entries()
-                .add(usize::from(index.offset()))
-                .write(Entry {
-                    key: None,
-                    next: self.initialized,
-                    value,
-                });
-        }
-        self.initialized = Some(index);
-        Ok(())
-    }
-
     fn len(&self) -> u16 {
         self.initialized.map_or(0, |index| index.position().get())
     }
@@ -299,29 +303,14 @@ unsafe impl<const ID: u8> depot::raw::Words for Store<'_, '_, '_, '_, ID> {
     }
 
     fn words(&self, (): ()) -> &[bitmap::Word] {
-        if self.shape.bits() == 0 {
-            return &[];
-        }
         let bytes = self.shape.bits() * mem::size_of::<Option<Index<'_, ID>>>();
         let align = mem::align_of::<bitmap::Word>();
         let offset = (bytes + align - 1) & !(align - 1);
+        // SAFETY: the admitted layout aligns this initialized plane, including its empty case.
         unsafe {
             slice::from_raw_parts(
                 self.memory.pointer.as_ptr().add(offset).cast(),
                 self.shape.words(),
-            )
-        }
-    }
-    fn row(entry: entry::Row<&Self>, (): ()) -> &[bitmap::Word] {
-        let store = *entry.source();
-        let bytes = store.shape.bits() * mem::size_of::<Option<Index<'_, ID>>>();
-        let align = mem::align_of::<bitmap::Word>();
-        let offset = (bytes + align - 1) & !(align - 1);
-        // SAFETY: this retained row proves the exact source allocation is nonempty.
-        unsafe {
-            slice::from_raw_parts(
-                store.memory.pointer.as_ptr().add(offset).cast(),
-                store.shape.words(),
             )
         }
     }

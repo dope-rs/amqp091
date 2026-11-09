@@ -18,17 +18,21 @@ mod text;
 use text::Key;
 pub use text::Text;
 
-pub(super) const CONTENT_TYPE: usize = 0;
-pub(super) const CONTENT_ENCODING: usize = 1;
-pub(super) const CORRELATION_ID: usize = 2;
-pub(super) const REPLY_TO: usize = 3;
-pub(super) const EXPIRATION: usize = 4;
-pub(super) const ID: usize = 5;
-pub(super) const KIND: usize = 6;
-pub(super) const USER_ID: usize = 7;
-pub(super) const APP_ID: usize = 8;
-pub(super) const RESERVED: usize = 9;
-pub(super) const TEXT_FIELDS: usize = 10;
+#[derive(Clone, Copy)]
+pub(super) enum Field {
+    ContentType,
+    ContentEncoding,
+    CorrelationId,
+    ReplyTo,
+    Expiration,
+    Id,
+    Kind,
+    UserId,
+    AppId,
+    Reserved,
+}
+
+pub(super) const TEXT_FIELDS: usize = Field::Reserved as usize + 1;
 
 pub struct Properties<S = storage::Shared, H = field::Table> {
     pub(super) text: Text<S>,
@@ -108,17 +112,8 @@ impl<'a> Fields<'a> {
 
     fn try_short(&mut self) -> Result<(Key, &'a str), failure::Error> {
         let offset = self.offset();
-        let value = self
-            .reader
-            .short()
-            .map_err(|error| failure::Error::Field(Fault::Read(reader::Fault { offset, error })))?;
+        let value = field::try_short(&mut self.reader, offset)?;
         let start = offset + mem::size_of::<u8>();
-        if let Some(at) = value.bytes().position(|byte| byte == 0) {
-            return Err(failure::Error::Protocol(wire::Fault::TextNul {
-                kind: wire::Encoding::Short,
-                offset: start + at,
-            }));
-        }
         let key = Key::try_new(start).map_err(failure::Error::Field)?;
         Ok((key, value))
     }
@@ -247,10 +242,10 @@ impl Properties {
         };
         let mut input = Fields::new(reader::Reader::new(decoded.text.bytes.as_ref()));
         if flags & Self::FLAG_CONTENT_TYPE != 0 {
-            decoded.text.keys[CONTENT_TYPE] = input.try_short()?.0;
+            decoded.text.keys[Field::ContentType as usize] = input.try_short()?.0;
         }
         if flags & Self::FLAG_CONTENT_ENCODING != 0 {
-            decoded.text.keys[CONTENT_ENCODING] = input.try_short()?.0;
+            decoded.text.keys[Field::ContentEncoding as usize] = input.try_short()?.0;
         }
         if flags & Self::FLAG_HEADERS != 0 {
             decoded.headers = Some(input.try_table()?);
@@ -262,28 +257,28 @@ impl Properties {
             decoded.priority = Some(try_priority(u8::from_be_bytes(input.try_read()?))?);
         }
         if flags & Self::FLAG_CORRELATION_ID != 0 {
-            decoded.text.keys[CORRELATION_ID] = input.try_short()?.0;
+            decoded.text.keys[Field::CorrelationId as usize] = input.try_short()?.0;
         }
         if flags & Self::FLAG_REPLY_TO != 0 {
-            decoded.text.keys[REPLY_TO] = input.try_short()?.0;
+            decoded.text.keys[Field::ReplyTo as usize] = input.try_short()?.0;
         }
         if flags & Self::FLAG_EXPIRATION != 0 {
-            decoded.text.keys[EXPIRATION] = input.try_short()?.0;
+            decoded.text.keys[Field::Expiration as usize] = input.try_short()?.0;
         }
         if flags & Self::FLAG_MESSAGE_ID != 0 {
-            decoded.text.keys[ID] = input.try_short()?.0;
+            decoded.text.keys[Field::Id as usize] = input.try_short()?.0;
         }
         if flags & Self::FLAG_TIMESTAMP != 0 {
             decoded.timestamp = Some(u64::from_be_bytes(input.try_read()?));
         }
         if flags & Self::FLAG_TYPE != 0 {
-            decoded.text.keys[KIND] = input.try_short()?.0;
+            decoded.text.keys[Field::Kind as usize] = input.try_short()?.0;
         }
         if flags & Self::FLAG_USER_ID != 0 {
-            decoded.text.keys[USER_ID] = input.try_short()?.0;
+            decoded.text.keys[Field::UserId as usize] = input.try_short()?.0;
         }
         if flags & Self::FLAG_APP_ID != 0 {
-            decoded.text.keys[APP_ID] = input.try_short()?.0;
+            decoded.text.keys[Field::AppId as usize] = input.try_short()?.0;
         }
         if flags & Self::FLAG_RESERVED != 0 {
             let (key, value) = input.try_short()?;
@@ -294,36 +289,20 @@ impl Properties {
                     },
                 )));
             }
-            decoded.text.keys[RESERVED] = key;
+            decoded.text.keys[Field::Reserved as usize] = key;
         }
         input.finish()?;
         Ok(decoded)
     }
 }
 
-pub(crate) struct Encoder<'a>(&'a Properties);
-
-impl<'a> Encoder<'a> {
-    pub(crate) const fn new(props: &'a Properties) -> Self {
-        Self(props)
-    }
-}
-
-impl ops::Deref for Encoder<'_> {
-    type Target = Properties;
-
-    fn deref(&self) -> &Self::Target {
-        self.0
-    }
-}
-
-impl Encoder<'_> {
+impl Properties {
     fn flags(&self) -> u16 {
         let mut f = 0u16;
-        if self.text.keys[CONTENT_TYPE].is_some() {
+        if self.text.keys[Field::ContentType as usize].is_some() {
             f |= Properties::FLAG_CONTENT_TYPE;
         }
-        if self.text.keys[CONTENT_ENCODING].is_some() {
+        if self.text.keys[Field::ContentEncoding as usize].is_some() {
             f |= Properties::FLAG_CONTENT_ENCODING;
         }
         if self.headers.is_some() {
@@ -335,43 +314,41 @@ impl Encoder<'_> {
         if self.priority.is_some() {
             f |= Properties::FLAG_PRIORITY;
         }
-        if self.text.keys[CORRELATION_ID].is_some() {
+        if self.text.keys[Field::CorrelationId as usize].is_some() {
             f |= Properties::FLAG_CORRELATION_ID;
         }
-        if self.text.keys[REPLY_TO].is_some() {
+        if self.text.keys[Field::ReplyTo as usize].is_some() {
             f |= Properties::FLAG_REPLY_TO;
         }
-        if self.text.keys[EXPIRATION].is_some() {
+        if self.text.keys[Field::Expiration as usize].is_some() {
             f |= Properties::FLAG_EXPIRATION;
         }
-        if self.text.keys[ID].is_some() {
+        if self.text.keys[Field::Id as usize].is_some() {
             f |= Properties::FLAG_MESSAGE_ID;
         }
         if self.timestamp.is_some() {
             f |= Properties::FLAG_TIMESTAMP;
         }
-        if self.text.keys[KIND].is_some() {
+        if self.text.keys[Field::Kind as usize].is_some() {
             f |= Properties::FLAG_TYPE;
         }
-        if self.text.keys[USER_ID].is_some() {
+        if self.text.keys[Field::UserId as usize].is_some() {
             f |= Properties::FLAG_USER_ID;
         }
-        if self.text.keys[APP_ID].is_some() {
+        if self.text.keys[Field::AppId as usize].is_some() {
             f |= Properties::FLAG_APP_ID;
         }
-        if self.text.keys[RESERVED].is_some() {
+        if self.text.keys[Field::Reserved as usize].is_some() {
             f |= Properties::FLAG_RESERVED;
         }
         f
     }
 
     pub(crate) fn encoded_len(&self) -> u64 {
-        let text = (0..TEXT_FIELDS)
-            .filter_map(|field| raw::text(&self.text, field))
-            .map(|value| 1 + value.len() as u64)
-            .sum::<u64>();
+        let text = self.text.bytes.len() as u64;
         let headers = self
-            .headers()
+            .headers
+            .as_ref()
             .map_or(0, |table| 4 + u64::from(table.encoded_len()));
         let octets = u64::from(self.delivery_mode.is_some()) + u64::from(self.priority.is_some());
         2 + 2 + 8 + 2 + text + headers + octets + u64::from(self.timestamp.is_some()) * 8
@@ -384,9 +361,9 @@ impl Encoder<'_> {
         out.put_u16(0);
         out.put_u64(size);
         out.put_u16(self.flags());
-        self.text.encode(CONTENT_TYPE, out);
-        self.text.encode(CONTENT_ENCODING, out);
-        if let Some(t) = self.headers() {
+        self.text.encode(Field::ContentType, out);
+        self.text.encode(Field::ContentEncoding, out);
+        if let Some(t) = self.headers.as_ref() {
             t.encode(out);
         }
         if let Some(v) = self.delivery_mode {
@@ -395,16 +372,16 @@ impl Encoder<'_> {
         if let Some(v) = self.priority {
             out.put_u8(v);
         }
-        self.text.encode(CORRELATION_ID, out);
-        self.text.encode(REPLY_TO, out);
-        self.text.encode(EXPIRATION, out);
-        self.text.encode(ID, out);
+        self.text.encode(Field::CorrelationId, out);
+        self.text.encode(Field::ReplyTo, out);
+        self.text.encode(Field::Expiration, out);
+        self.text.encode(Field::Id, out);
         if let Some(v) = self.timestamp {
             out.put_u64(v);
         }
-        self.text.encode(KIND, out);
-        self.text.encode(USER_ID, out);
-        self.text.encode(APP_ID, out);
-        self.text.encode(RESERVED, out);
+        self.text.encode(Field::Kind, out);
+        self.text.encode(Field::UserId, out);
+        self.text.encode(Field::AppId, out);
+        self.text.encode(Field::Reserved, out);
     }
 }

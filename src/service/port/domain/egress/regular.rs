@@ -22,6 +22,10 @@ impl Regular {
         Some(Frame::new(Writer::new(buffer)))
     }
 
+    pub(in crate::service::port::domain) fn is_available(&self) -> bool {
+        self.pool.available() != 0
+    }
+
     pub(in crate::service::port::domain) fn released(&self) -> ops::Range<usize> {
         let free = self.pool.available();
         self.free.replace(free)..free

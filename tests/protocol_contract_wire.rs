@@ -1,7 +1,9 @@
 use dope_amqp091::protocol::wire::{Write as _, Writer};
 pub mod common;
-use common::{Sink, input};
-use dope::manifold::client::session::codec::{Parse, Stateless as _};
+use common::Sink;
+use dope::manifold::client::session::codec::{
+    self, Codec as _, Input, Parse, Stateless as _, staging::Policy as _,
+};
 use dope_amqp091::message::field;
 use dope_amqp091::protocol::method::{Encode as _, basic, conn};
 use dope_amqp091::protocol::wire::frame::{Codec, Fault, Inbound, Violation};
@@ -95,6 +97,8 @@ fn rejects_bad_envelopes() {
             .try_budget(0, token.proof())
             .expect("empty resident domain");
         let codec = Codec::new(4096);
+        let plan = <Codec as codec::Codec>::Staging::plan(codec.staging()).expect("codec staging");
+        let limit = <Codec as codec::Codec>::Staging::limit(plan);
         for (bytes, expected, count) in [
             (
                 b"\x08\0\x01\0\0\0\0\xce".as_slice(),
@@ -130,25 +134,23 @@ fn rejects_bad_envelopes() {
             ),
         ] {
             let source = Shared::try_copy(bytes).expect("envelope fixture storage");
-            input(&codec, &source, &budget, |input| {
+            Input::with(&source, &budget, limit, |input| {
                 assert!(matches!(
                     codec.parse(input),
                     Ok(Parse::Item { head: Inbound::Fault(actual), consumed })
                         if actual == expected && consumed.count().get() as usize == count
                 ));
-            })
-            .expect("codec staging");
+            });
         }
         let heartbeat =
             Shared::try_copy(b"\x08\0\0\0\0\0\0\xce").expect("envelope fixture storage");
-        input(&codec, &heartbeat, &budget, |input| {
+        Input::with(&heartbeat, &budget, limit, |input| {
             assert!(matches!(
                 codec.parse(input),
                 Ok(Parse::Item { head: Inbound::Heartbeat, consumed })
                     if consumed.count().get() == 8
             ));
-        })
-        .expect("codec staging");
+        });
         assert_eq!(budget.resident(), 0);
     });
 }

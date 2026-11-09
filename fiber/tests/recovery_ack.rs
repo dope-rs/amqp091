@@ -1,66 +1,39 @@
-use std::convert::Infallible;
-use std::io::{Read as _, Write as _};
-
-use dope::core::driver::life::recovery;
-
 use crate::common::amqp::wire::Method;
 use crate::common::recovery::broker::{ack_tag, open_tagged, tagged};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
-use std::io::ErrorKind;
 use std::task::Poll;
-use std::time::Duration;
 
-use dope::core::platform::wake;
 use dope_amqp091::adapter::consumer;
 use dope_amqp091::config;
 use dope_amqp091::message::ack;
 use dope_amqp091::message::ack::Disposition;
 use dope_amqp091::message::field::Table;
 use dope_amqp091_fiber::channel::{basic, queue};
-use dope_fiber::task::time::sleep::TimerExt as _;
 use dope_test::harness::peer::AcceptScript;
 
-use crate::common::fiber::{Pinned, poll_once, wait};
+use crate::common::fiber::{Pinned, poll_once};
 use crate::common::recovery::client::{with, with_config};
 
 #[test]
 fn rejects_stale_epoch() {
-    let (released, release) = wake::Ends::blocking().expect("client release").split();
-    let (observed, observe) = wake::Ends::blocking().expect("broker observation").split();
     AcceptScript::with(
         move |broker| {
             let mut first = broker.accept().expect("first connection");
             open_tagged(&first).expect("AMQP broker");
             first.write_all(&tagged(1, &[]).expect("AMQP delivery")).expect("first delivery");
-            released
-                .wait_timeout(Duration::from_secs(10))
-                .expect("first delivery observed");
+            Method::read(&mut first).expect("first delivery observed")
+                .check(1, 50, 30).expect("queue.purge");
             drop(first);
 
             let mut second = broker.accept().expect("second connection");
             open_tagged(&second).expect("AMQP broker");
             second.write_all(&tagged(1, &[]).expect("AMQP delivery")).expect("second delivery");
 
-            released
-                .wait_timeout(Duration::from_secs(10))
-                .expect("stale settlement rejected");
-            second
-                .read_wait(Some(Duration::from_millis(250)))
-                .expect("set stale-settlement read deadline");
-            let mut byte = [0_u8; 1];
-            let read = second.read(&mut byte);
-            assert!(
-                matches!(
-                    read,
-                    Err(ref error)
-                        if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)
-                ),
-                "generation 2 must remain open without receiving a generation 1 delivery tag: {read:?}"
-            );
-            second
-                .read_wait(Some(Duration::from_secs(5)))
-                .expect("restore broker read deadline");
-            observe.notify().expect("stale settlement absent");
+            Method::read(&mut second).expect("stale settlement fence")
+                .check(1, 50, 30).expect("stale ACK must not precede queue.purge");
+            Method::write(&mut second, 1, 50, 31, &[0; 4]).expect("queue.purge-ok");
 
             let ack = Method::read(&mut second).expect("Basic.Ack");
             ack.check(1, 60, 80).expect("AMQP method route");
@@ -77,14 +50,15 @@ fn rejects_stale_epoch() {
             reject.check(1, 60, 90).expect("AMQP method route");
             assert_eq!(ack_tag(&reject).expect("acknowledgement tag"), 3);
             assert_eq!(reject.1[12], 1, "REJECT must preserve requeue");
-            observe.notify().expect("REJECT observation");
+            Method::read(&mut second).expect("close after settlements")
+                .check(0, 10, 50).expect("connection.close");
+            Method::write(&mut second, 0, 10, 51, &[]).expect("connection.close-ok");
         },
         move |broker| {
             with(
                 broker.addr(),
                 move |runtime| {
                     let conn = runtime.connection();
-                    let timer = runtime.timer();
                     assert!(runtime.block_on(dope_fiber::fiber!('_ => async move {
                     let target = conn
                         .observe()
@@ -126,16 +100,10 @@ fn rejects_stale_epoch() {
                         .expect("consumer active")
                         .expect("first delivery");
                     let stale_epoch = stale.epoch();
-                    release.notify().expect("first delivery observed");
-
-                    while conn
-                        .observe()
-                        .read(|view| view.ready_cycle())
-                        .await
-                        != Some(2)
-                    {
-                        timer.sleep(Duration::from_millis(1)).expect("recovery wait").await;
-                    }
+                    channel.queue().purge("q").await.expect_err("first transport closes");
+                    conn.observe().retired(target.epoch()).await.expect("first retirement");
+                    let ready = conn.observe().ready().await.expect("recovered ready");
+                    let channel = channel.into_auto();
                     let current = consumer
                         .recv()
                         .await
@@ -144,8 +112,7 @@ fn rejects_stale_epoch() {
                     assert!(current.epoch() != stale_epoch);
                     let error = stale.settle(Disposition::Ack).await.expect_err("stale target was rebound");
                     std::assert_matches!(error, consumer::Error::SourceUnavailable(_));
-                    release.notify().expect("stale settlement rejected");
-                    wait(&observed).await.expect("stale settlement absent");
+                    channel.in_ready(ready).queue().purge("q").await.expect("stale settlement fence");
                     current
                         .settle(Disposition::Ack)
                         .await
@@ -168,15 +135,10 @@ fn rejects_stale_epoch() {
                         .settle(Disposition::Reject { requeue: true })
                         .await
                         .expect("reject settlement");
-                    wait(&observed).await.expect("REJECT observation");
+                    conn.control().close(ready, 200, "done").await.expect("close after settlements");
                 })).is_ok(), "AMQP fiber must complete");
                 }, recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("scripted broker thread");
         },
@@ -290,12 +252,7 @@ fn waits_for_egress_credit() {
                 );
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("scripted broker thread");
         },
@@ -305,7 +262,6 @@ fn waits_for_egress_credit() {
 
 #[test]
 fn releases_body_first() {
-    let (released, release) = wake::Ends::blocking().expect("body release").split();
     AcceptScript::with(
         move |broker| {
             let mut stream = broker.accept().expect("connection");
@@ -313,9 +269,6 @@ fn releases_body_first() {
             stream
                 .write_all(&tagged(1, b"a").expect("AMQP delivery"))
                 .expect("first delivery");
-            released
-                .wait_timeout(Duration::from_secs(10))
-                .expect("first body released");
             stream
                 .write_all(&tagged(2, b"b").expect("AMQP delivery"))
                 .expect("second delivery");
@@ -378,7 +331,6 @@ fn releases_body_first() {
                                     .expect("first delivery");
                                 assert!(first.body() == b"a"[..]);
                                 let first = first.settle(Disposition::Ack);
-                                release.notify().expect("first body released");
 
                                 let second = consumer
                                     .recv()
@@ -402,19 +354,10 @@ fn releases_body_first() {
                     );
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("scripted broker thread");
         },
     )
     .expect("scripted broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

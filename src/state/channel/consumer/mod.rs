@@ -10,7 +10,7 @@ mod storage;
 pub(crate) use key::Key;
 pub(crate) use plan::Plan;
 pub(crate) use rollback::Rollback;
-pub(crate) use set::{Removal, Retire, Set};
+pub(crate) use set::Set;
 
 pub(crate) enum Cancel<'b, 'd> {
     Tracked(Key),

@@ -1,14 +1,13 @@
 use std::num;
 
-use dope::core::driver::schedule::ready::wake::store;
+use dope::core::driver::schedule::ready::wake::{self, store};
 use o3::alloc;
 use o3::depot::arena::hash::runtime::{self, entry};
 
+use crate::failure::wire;
 use crate::failure::wire::turn;
-use crate::failure::{self, wire};
 use crate::protocol::wire::Fingerprint;
-use crate::protocol::wire::text::short;
-use crate::state::channel::consumer::delivery::{Access, Store};
+use crate::state::channel::consumer::delivery::{Claim, Next, Route, Store};
 use crate::state::channel::consumer::storage::slot::Slot;
 use crate::state::channel::consumer::storage::status::Status;
 use crate::state::channel::{self, consumer};
@@ -27,12 +26,83 @@ impl<'b, 'd, const ID: u8> Registry<'b, 'd, ID> {
         })
     }
 
-    pub(in crate::state::channel::consumer) fn deliveries<'r, 'c>(
+    pub(in crate::state::channel::consumer) fn clear<'c>(
+        &mut self,
+        values: &Store<'c, 'b, 'd>,
+    ) -> channel::Freed {
+        let mut freed = channel::Freed::Available;
+        for index in 0..self.slots.capacity() {
+            if let Some(mut entry) = self.slots.entry_at(index) {
+                freed = freed.merge(values.drain(&mut entry.get_mut().queue));
+            }
+        }
+        freed
+    }
+
+    pub(in crate::state::channel::consumer) fn next<'c>(
+        &mut self,
+        values: &Store<'c, 'b, 'd>,
+        wakes: store::Store<'d>,
+        key: consumer::Key,
+        wake: wake::Waker<'d>,
+    ) -> Next<'c, 'b, 'd> {
+        let Some(entry) = self.slots.entry(key.raw()) else {
+            return Next::Closed;
+        };
+        let slot = entry.into_mut();
+        match slot.status {
+            Status::Active | Status::Untracked => {
+                let (delivery, freed) = values.pop(&mut slot.queue);
+                if let Some(delivery) = delivery {
+                    return Next::Delivery { delivery, freed };
+                }
+                wakes.set(&slot.waker, wake);
+                Next::Pending
+            }
+            Status::Recovering | Status::Pending | Status::Replaying => Next::Unavailable,
+            Status::Canceled | Status::Retiring => Next::Closed,
+        }
+    }
+
+    pub(in crate::state::channel::consumer) fn reserve<'r, 'c>(
         &mut self,
         values: &'r Store<'c, 'b, 'd>,
+        tag: &str,
+    ) -> Option<Route<'r, 'c, 'b, 'd>> {
+        let Some(entry) = self
+            .slots
+            .find(Fingerprint::of(tag.as_bytes()).get(), |slot| {
+                slot.tag().value() == tag
+            })
+        else {
+            return Some(Route::Discard);
+        };
+        if !matches!(entry.get().status, Status::Active | Status::Untracked) {
+            return Some(Route::Discard);
+        }
+        values.vacant().map(Route::Queue)
+    }
+
+    pub(in crate::state::channel::consumer) fn route<'r, 'c>(
+        &mut self,
+        claim: Claim<'r, 'c, 'b, 'd>,
         wakes: store::Store<'d>,
-    ) -> Access<'_, 'r, 'c, 'b, 'd, ID> {
-        Access::new(&mut self.slots, values, wakes)
+    ) {
+        let tag = claim.value().consumer_tag();
+        let Some(entry) = self
+            .slots
+            .find(Fingerprint::of(tag.as_bytes()).get(), |slot| {
+                slot.tag().value() == tag
+            })
+        else {
+            return;
+        };
+        if !matches!(entry.get().status, Status::Active | Status::Untracked) {
+            return;
+        }
+        let slot = entry.into_mut();
+        claim.push(&mut slot.queue);
+        wakes.wake_once(&slot.waker);
     }
 
     pub(in crate::state::channel::consumer) fn key(&self, tag: &str) -> Option<consumer::Key> {
@@ -65,25 +135,6 @@ impl<'b, 'd, const ID: u8> Registry<'b, 'd, ID> {
         }
     }
 
-    pub(in crate::state::channel::consumer) fn check(
-        &self,
-        tag: short::Short<'_>,
-    ) -> Result<(), failure::Error> {
-        if !tag.is_empty()
-            && let Some(actual) = self.key(tag.value())
-        {
-            return Err(failure::Error::Protocol(wire::Fault::ConsumerKey {
-                expected: None,
-                actual: Some(num::NonZero::from(actual)),
-                step: turn::Step::Pending,
-            }));
-        }
-        if self.slots.is_full() {
-            return Err(failure::Error::Capacity(wire::Capacity::Consumer));
-        }
-        Ok(())
-    }
-
     pub(in crate::state::channel::consumer) fn remove<'r, 'c>(
         &mut self,
         key: consumer::Key,
@@ -98,17 +149,28 @@ impl<'b, 'd, const ID: u8> Registry<'b, 'd, ID> {
         &mut self,
         key: consumer::Key,
         store: &'r Store<'c, 'b, 'd>,
+        replay: impl FnOnce() -> bool,
     ) -> Option<(&mut Slot<'b, 'd, ID>, channel::Freed)> {
-        let entry = self.slots.indexed(key.raw())?;
-        if !matches!(
-            entry.get().status,
-            Status::Active | Status::Untracked | Status::Replaying
-        ) {
-            return None;
-        }
-        let slot = entry.unindex().into_mut();
+        let (slot, freed) = match self.slots.entry(key.raw())? {
+            entry::Entry::Indexed(entry) => {
+                if !matches!(
+                    entry.get().status,
+                    Status::Active | Status::Untracked | Status::Replaying
+                ) {
+                    return None;
+                }
+                let slot = entry.unindex().into_mut();
+                let freed = store.drain(&mut slot.queue);
+                (slot, freed)
+            }
+            entry::Entry::Staged(entry) => {
+                if entry.get().status != Status::Canceled || !replay() {
+                    return None;
+                }
+                (entry.into_mut(), channel::Freed::Available)
+            }
+        };
         slot.status = Status::Retiring;
-        let freed = store.drain(&mut slot.queue);
         Some((slot, freed))
     }
 

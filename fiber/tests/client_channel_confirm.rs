@@ -1,7 +1,3 @@
-use std::convert::Infallible;
-use std::io::Write as _;
-
-use dope::core::driver::life::recovery;
 use dope_amqp091::message::property::Properties;
 use dope_amqp091::{config, protocol};
 use dope_test::alloc;
@@ -11,6 +7,8 @@ use crate::common::amqp::Peer;
 use crate::common::amqp::app::plan;
 use crate::common::amqp::wire::{Frame, Method};
 use crate::common::fiber::{Pinned, poll_once};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use dope_amqp091::failure;
@@ -107,9 +105,7 @@ fn closes_pending_confirms() {
                         conn.control().close(ready, 200, "done").await.expect("connection close");
                     })).is_ok(), "AMQP fiber must complete");
                 }, recover,
-                |result| {
-                    result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("channel-close confirm broker");
         },
@@ -228,12 +224,7 @@ fn preserves_tag_sequence() {
                         "AMQP fiber must complete"
                     );
                     }, recover,
-                    |result| {
-                        result
-                            .as_ref()
-                            .map_err(|error| error.kind())
-                            .expect("endpoint completion");
-                    },
+                    complete,
                 );
                 broker.finish().expect("confirm sequence broker");
             },
@@ -384,12 +375,7 @@ fn reclaims_bulk_capacity() {
                         "AMQP fiber must complete"
                     );
                 }, recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("zero-tag bulk confirm broker");
         },
@@ -399,7 +385,3 @@ fn reclaims_bulk_capacity() {
 
 #[global_allocator]
 static ALLOCATOR: alloc::Tracker = Tracker::new();
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
-}

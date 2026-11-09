@@ -4,9 +4,9 @@ use o3::alloc;
 use o3::depot::queue::round::{self, values};
 
 use crate::service::cancel::layout::Layout;
-use crate::service::cancel::pending::{Pending, reap};
 use crate::service::cancel::{Lane, Plan, Signal};
 use crate::state::channel::cancel::lanes;
+use crate::state::channel::methods;
 use crate::state::channels;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -16,26 +16,30 @@ pub(super) struct Active<'d, const ID: u8> {
 }
 
 pub(crate) struct Registry<'d, const ID: u8> {
-    entries: values::Values<Active<'d, ID>, 5>,
+    entries: values::Values<Active<'d, ID>, { lanes::Kind::COUNT }>,
     layout: Layout,
     cursor: cell::Cell<lanes::Kind>,
 }
 
-struct Front<'a, 'd, const ID: u8> {
-    inner: values::Snapshot<'a, Active<'d, ID>, 5, round::Front>,
+pub(crate) struct Retry<'a, 'd, const ID: u8> {
+    inner: values::Snapshot<'a, Active<'d, ID>, { lanes::Kind::COUNT }, round::Turn>,
     active: Active<'d, ID>,
+}
+
+impl<'d, const ID: u8> Retry<'_, 'd, ID> {
+    pub(crate) fn lease(&self) -> channels::Lease<'d, ID> {
+        self.active.lease
+    }
+
+    pub(crate) fn complete(self) {
+        let active = self.active;
+        let _ = self.inner.pop_if(|current| current == active);
+    }
 }
 
 impl<'d, const ID: u8> Active<'d, ID> {
     pub(super) fn lease(&self) -> channels::Lease<'d, ID> {
         self.lease
-    }
-}
-
-impl<const ID: u8> Front<'_, '_, ID> {
-    fn pop(self) {
-        let active = self.active;
-        let _ = self.inner.pop_if(|current| current == active);
     }
 }
 
@@ -55,7 +59,10 @@ impl<'d, const ID: u8> Registry<'d, ID> {
         slot: lanes::Slot<L>,
         lease: channels::Lease<'d, ID>,
         id: L::Identity,
-    ) -> Result<values::Snapshot<'a, Active<'d, ID>, 5, round::Place>, round::Bounds> {
+    ) -> Result<
+        values::Snapshot<'a, Active<'d, ID>, { lanes::Kind::COUNT }, round::Place>,
+        round::Bounds,
+    > {
         let node = u32::from(ch.offset()) * self.layout.slots()
             + self.layout.offset(L::KIND, slot.raw())?;
         let slot = self.entries.try_slot(node as usize)?;
@@ -68,31 +75,52 @@ impl<'d, const ID: u8> Registry<'d, ID> {
         Ok(place)
     }
 
-    fn front<L: Lane<'d, ID>>(
-        &self,
-        ch: channels::Index<'_, ID>,
-    ) -> Result<Option<Front<'_, 'd, ID>>, round::Bounds> {
-        let queue = self.lane(u32::from(ch.offset()), L::KIND);
-        let Some((inner, active)) = self.entries.try_lane(queue as usize)?.front() else {
-            return Ok(None);
-        };
-        Ok(Some(Front { inner, active }))
-    }
-
     pub(crate) fn has_pending(&self) -> bool {
-        self.entries.has_pending()
+        self.entries.group::<0>().active().is_some()
+            || self.entries.group::<1>().active().is_some()
+            || self.entries.group::<2>().active().is_some()
+            || self.entries.group::<3>().active().is_some()
+            || self.entries.group::<4>().active().is_some()
     }
 
-    pub(crate) fn pop(&self) -> Option<Signal<'d, ID>> {
+    pub(crate) fn has_control(&self) -> bool {
+        self.control().is_some()
+    }
+
+    fn control(&self) -> Option<Retry<'_, 'd, ID>> {
+        let (inner, active) = self.entries.group::<5>().active()?;
+        Some(Retry { inner, active })
+    }
+
+    pub(crate) fn retry(
+        &self,
+        index: channels::Index<'_, ID>,
+        lease: channels::Lease<'d, ID>,
+        method: methods::MethodKey,
+    ) -> Result<(), round::Bounds> {
+        let entry = self.activate(index, lanes::Slot::<lanes::Control>::ZERO, lease, method)?;
+        let _ = entry.set(|_| Some(()));
+        Ok(())
+    }
+
+    pub(crate) fn pop(&self, control: bool) -> Option<Signal<'_, 'd, ID>> {
         let mut kind = self.cursor.get();
         let mut left = lanes::Kind::COUNT;
         while left != 0 {
+            if kind == lanes::Kind::Control
+                && control
+                && let Some(retry) = self.control()
+            {
+                self.cursor.set(Self::advance(kind));
+                return Some(Signal::Control(retry));
+            }
             let next = match kind {
                 lanes::Kind::Reservation => self.entries.group::<0>().next(),
                 lanes::Kind::Method => self.entries.group::<1>().next(),
                 lanes::Kind::Consumer => self.entries.group::<2>().next(),
                 lanes::Kind::Confirm => self.entries.group::<3>().next(),
                 lanes::Kind::Publish => self.entries.group::<4>().next(),
+                lanes::Kind::Control => None,
             };
             let Some(active) = next else {
                 kind = Self::advance(kind);
@@ -100,7 +128,7 @@ impl<'d, const ID: u8> Registry<'d, ID> {
                 continue;
             };
             self.cursor.set(Self::advance(kind));
-            return Some(Signal {
+            return Some(Signal::Cancel {
                 lease: active.lease,
                 kind,
                 identity: active.identity,
@@ -109,27 +137,11 @@ impl<'d, const ID: u8> Registry<'d, ID> {
         None
     }
 
-    pub(crate) fn reap_any<L: Lane<'d, ID>>(
-        &self,
-        reap: impl FnOnce(Pending<'d, L, ID>) -> reap::Decision,
-    ) {
-        let head = match L::KIND {
-            lanes::Kind::Reservation => self.entries.group::<0>().active(),
-            lanes::Kind::Method => self.entries.group::<1>().active(),
-            lanes::Kind::Consumer => self.entries.group::<2>().active(),
-            lanes::Kind::Confirm => self.entries.group::<3>().active(),
-            lanes::Kind::Publish => self.entries.group::<4>().active(),
-        };
-        let Some((turn, active)) = head else {
+    pub(crate) fn reap_any(&self, reap: impl FnOnce(channels::Lease<'d, ID>)) {
+        let Some((turn, active)) = self.entries.group::<0>().active() else {
             return;
         };
-        let Active {
-            lease,
-            identity: id,
-        } = active;
-        if matches!(reap(Pending::new(lease, id)), reap::Decision::Keep) {
-            return;
-        }
+        reap(active.lease);
         let _ = turn.pop_if(|current| current == active);
     }
 
@@ -137,43 +149,24 @@ impl<'d, const ID: u8> Registry<'d, ID> {
         &self,
         ch: channels::Index<'_, ID>,
         lease: channels::Lease<'d, ID>,
-        reap: impl FnOnce(Pending<'d, L, ID>) -> Option<R>,
+        reap: impl FnOnce(channels::Lease<'d, ID>, num::NonZero<u64>) -> Option<R>,
     ) -> Result<Option<R>, round::Bounds> {
-        let Some(front) = self.front::<L>(ch)? else {
+        let queue = self.lane(u32::from(ch.offset()), L::KIND);
+        let Some((front, active)) = self.entries.try_lane(queue as usize)?.front() else {
             return Ok(None);
         };
         let Active {
             lease: held,
             identity: id,
-        } = front.active;
+        } = active;
         if lease != held {
             return Ok(None);
         }
-        let Some(result) = reap(Pending::new(held, id)) else {
+        let Some(result) = reap(held, id) else {
             return Ok(None);
         };
-        front.pop();
+        let _ = front.pop_if(|current| current == active);
         Ok(Some(result))
-    }
-
-    pub(crate) fn reap<L: Lane<'d, ID>>(
-        &self,
-        ch: channels::Index<'_, ID>,
-        lease: channels::Lease<'d, ID>,
-        reap: impl FnOnce(Pending<'d, L, ID>) -> reap::Decision,
-    ) -> Result<(), round::Bounds> {
-        let Some(front) = self.front::<L>(ch)? else {
-            return Ok(());
-        };
-        let Active {
-            lease: held,
-            identity: id,
-        } = front.active;
-        if lease != held || matches!(reap(Pending::new(held, id)), reap::Decision::Keep) {
-            return Ok(());
-        }
-        front.pop();
-        Ok(())
     }
 
     const fn lane(&self, ch: u32, kind: lanes::Kind) -> u32 {
@@ -186,7 +179,8 @@ impl<'d, const ID: u8> Registry<'d, ID> {
             lanes::Kind::Method => lanes::Kind::Consumer,
             lanes::Kind::Consumer => lanes::Kind::Confirm,
             lanes::Kind::Confirm => lanes::Kind::Publish,
-            lanes::Kind::Publish => lanes::Kind::Reservation,
+            lanes::Kind::Publish => lanes::Kind::Control,
+            lanes::Kind::Control => lanes::Kind::Reservation,
         }
     }
 }

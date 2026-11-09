@@ -1,7 +1,7 @@
 use o3::buffer::resident::Budget;
 
 use crate::failure;
-use crate::protocol::topology::records::queue::Key;
+use crate::protocol::topology::records::queue::{self, Key};
 use crate::protocol::wire::schema::queues;
 use crate::protocol::wire::text::short;
 use crate::protocol::wire::{self, bytes};
@@ -16,8 +16,20 @@ impl<'d, const ID: u8> Bind<'d, ID> {
         budget: &Budget<'d>,
         queue: Option<Key<'d, ID>>,
         encoded: wire::Encoded<'_, queues::Binding>,
+        name: short::Name<'_>,
+        route: short::Short<'_>,
     ) -> Result<Self, failure::Error> {
-        let record = bytes::Bytes::capture(budget, encoded)?;
+        let record = if name.is_empty() == encoded.field(queues::Binding::QUEUE).is_empty() {
+            bytes::Bytes::capture(budget, encoded)?
+        } else {
+            bytes::Bytes::<queues::Binding>::capture_with(
+                budget,
+                encoded,
+                bytes::Patch::default()
+                    .with(queues::Binding::QUEUE, name.into())
+                    .with(queues::Binding::ROUTING_KEY, route),
+            )?
+        };
         Ok(Self { record, queue })
     }
 
@@ -34,7 +46,7 @@ impl<'d, const ID: u8> Bind<'d, ID> {
         queue: Option<Key<'d, ID>>,
         name: short::Short<'_>,
         source: short::Short<'_>,
-        route: short::Short<'_>,
+        route: Option<short::Short<'_>>,
         args: &[u8],
     ) -> bool {
         let target = match (self.queue, queue) {
@@ -52,8 +64,8 @@ impl<'d, const ID: u8> Bind<'d, ID> {
         self.record.field(queues::Binding::EXCHANGE)
     }
 
-    pub(crate) fn routing_key(&self) -> short::Short<'_> {
-        self.record.field(queues::Binding::ROUTING_KEY)
+    pub(crate) fn routing_key(&self) -> Option<short::Short<'_>> {
+        queue::routing_key(self.name(), self.record.field(queues::Binding::ROUTING_KEY))
     }
 
     pub(in crate::protocol::topology) fn arguments(&self) -> &[u8] {

@@ -20,8 +20,7 @@ pub(crate) trait Start<
     const ID: u8,
 >
 {
-    type Output;
-    type Run: adapter::Poll<'c, 'b, 'd, ID, Output = Self::Output>;
+    type Run: adapter::Poll<'c, 'b, 'd, ID>;
 
     fn start(
         self,
@@ -84,7 +83,8 @@ where
     S: Source<'app, 'o, 'r, 'c, 'b, 'd, B, ID>,
     K: Start<'app, 'o, 'r, 'c, 'b, 'd, B, ID>,
 {
-    type Output = Result<K::Output, failure::Runtime<'c, 'b, 'd, ID>>;
+    type Output =
+        Result<<K::Run as adapter::Poll<'c, 'b, 'd, ID>>::Output, failure::Runtime<'c, 'b, 'd, ID>>;
 
     fn poll(call: context::PollCall<'_, '_, 'd, Self>) -> task::Poll<Self::Output> {
         let (fiber, mut context) = call.into_parts();

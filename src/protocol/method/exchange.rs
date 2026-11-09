@@ -302,13 +302,9 @@ impl method::Unit for UnbindOk {
     const KIND: method::Kind = method::Kind::ExchangeUnbind;
 }
 
-impl requests::Seal for Inspect<'_> {}
-
 impl<'d> requests::Source<'d> for Inspect<'_> {
     type Policy<const ID: u8> = requests::Plain;
 }
-
-impl requests::Seal for Declare<'_> {}
 
 impl<'d> requests::Source<'d> for Declare<'_> {
     type Policy<const ID: u8> = requests::Tracked;
@@ -318,6 +314,7 @@ impl<'d, const ID: u8> requests::Capture<'d, ID> for Declare<'_> {
     type Schema = exchange::Declare;
 
     fn capture<'c, 'b>(
+        &self,
         view: wire::Encoded<'_, Self::Schema>,
         budget: &resident::Budget<'d>,
         topo: &mut topology::State<'_, 'c, 'b, 'd, ID>,
@@ -337,8 +334,6 @@ impl<'d, const ID: u8> requests::Capture<'d, ID> for Declare<'_> {
     }
 }
 
-impl requests::Seal for Delete<'_> {}
-
 impl<'d> requests::Source<'d> for Delete<'_> {
     type Policy<const ID: u8> = requests::Tracked;
 }
@@ -347,11 +342,12 @@ impl<'d, const ID: u8> requests::Capture<'d, ID> for Delete<'_> {
     type Schema = resource::Layout;
 
     fn capture<'c, 'b>(
+        &self,
         view: wire::Encoded<'_, Self::Schema>,
         budget: &resident::Budget<'d>,
         topo: &mut topology::State<'_, 'c, 'b, 'd, ID>,
     ) -> Result<work::Admit<'c, 'b, 'd, ID>, failure::Error> {
-        let name = view.field(resource::Layout::NAME);
+        let name = view.name();
         let needs = need::Need::none();
         let id = topo.resolve(&needs).0;
         let spec = {
@@ -366,8 +362,6 @@ impl<'d, const ID: u8> requests::Capture<'d, ID> for Delete<'_> {
     }
 }
 
-impl requests::Seal for Bind<'_> {}
-
 impl<'d> requests::Source<'d> for Bind<'_> {
     type Policy<const ID: u8> = requests::Tracked;
 }
@@ -376,6 +370,7 @@ impl<'d, const ID: u8> requests::Capture<'d, ID> for Bind<'_> {
     type Schema = exchange::Bind;
 
     fn capture<'c, 'b>(
+        &self,
         view: wire::Encoded<'_, Self::Schema>,
         budget: &resident::Budget<'d>,
         topo: &mut topology::State<'_, 'c, 'b, 'd, ID>,
@@ -398,8 +393,6 @@ impl<'d, const ID: u8> requests::Capture<'d, ID> for Bind<'_> {
     }
 }
 
-impl requests::Seal for Unbind<'_> {}
-
 impl<'d> requests::Source<'d> for Unbind<'_> {
     type Policy<const ID: u8> = requests::Tracked;
 }
@@ -408,6 +401,7 @@ impl<'d, const ID: u8> requests::Capture<'d, ID> for Unbind<'_> {
     type Schema = exchange::Bind;
 
     fn capture<'c, 'b>(
+        &self,
         view: wire::Encoded<'_, Self::Schema>,
         budget: &resident::Budget<'d>,
         topo: &mut topology::State<'_, 'c, 'b, 'd, ID>,

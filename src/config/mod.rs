@@ -1,3 +1,5 @@
+use std::num;
+
 use o3::alloc::BoxSliceExt as _;
 use o3::buffer::hold;
 
@@ -5,6 +7,7 @@ use crate::failure::{self, wire};
 use crate::message::field;
 use crate::protocol::wire::text::{long, short};
 
+mod raw;
 mod tune;
 
 pub use tune::Tune;
@@ -33,7 +36,7 @@ impl Auth {
 
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Frame(u32);
+pub struct Frame(num::NonZero<u32>);
 
 #[derive(Clone, Copy)]
 pub struct Capacity {
@@ -87,7 +90,7 @@ pub struct Topology {
 
 impl Default for Frame {
     fn default() -> Self {
-        Self(131_072)
+        Self(num::NonZero::<u32>::MIN.saturating_add(131_072 - 1))
     }
 }
 
@@ -119,18 +122,17 @@ impl Frame {
     pub const MIN: u32 = 4096;
 
     pub const fn new(value: u32) -> Result<Self, failure::Error> {
-        if value < Self::MIN {
-            Err(failure::Error::InvalidConfig(wire::Config::FrameMinimum {
+        match num::NonZero::new(value) {
+            Some(value) if value.get() >= Self::MIN => Ok(Self(value)),
+            _ => Err(failure::Error::InvalidConfig(wire::Config::FrameMinimum {
                 actual: value,
                 minimum: Self::MIN,
-            }))
-        } else {
-            Ok(Self(value))
+            })),
         }
     }
 
     pub const fn get(self) -> u32 {
-        self.0
+        self.0.get()
     }
 }
 
@@ -369,16 +371,9 @@ impl Config {
         Ok(Self {
             auth: Auth {
                 virtual_host: short::Buf::new("/")?,
-                response: long::Buf::try_concat(
-                    &[
-                        b"\0",
-                        user.as_ref().as_bytes(),
-                        b"\0",
-                        password.as_ref().as_bytes(),
-                    ],
-                    wire::Allocation::Authentication,
-                )?,
                 locale: short::Buf::new("en_US")?,
+                // Build the secret last so allocation failure cannot bypass Auth's drop.
+                response: long::Buf::try_plain(user.as_ref(), password.as_ref())?,
             },
             tune: Tune::default(),
             capacity: Capacity::default(),

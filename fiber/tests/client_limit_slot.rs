@@ -1,16 +1,15 @@
-use std::convert::Infallible;
-use std::io::Write as _;
-use std::sync::mpsc;
-use std::time::Duration;
+use std::task::Poll;
 
-use dope::core::driver::life::recovery;
 use dope_amqp091::config;
 use dope_amqp091::message::field::Table;
 use dope_amqp091_fiber::channel::{exchange, queue};
+use dope_fiber::{abi::poll_fn, context};
 
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::Method;
-use crate::common::fiber::{Pinned, poll_once};
+use crate::common::fiber::Pinned;
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
 use dope_amqp091::failure;
@@ -57,7 +56,7 @@ fn reserves_inflight_slot() {
                 |rt| {
                     let conn = rt.connection();
                     assert!(rt.block_on(dope_fiber::fiber!('_ => async move {
-                        wait_ready(conn).await.expect("ready");
+                        conn.observe().ready().await.expect("ready");
                         let first = conn.channels().open(1).await.expect("first channel");
                         let second = conn.channels().open(2).await.expect("second channel");
                         let args = Table::new();
@@ -69,31 +68,33 @@ fn reserves_inflight_slot() {
                             internal: false,
                             arguments: &args,
                         }));
-                        assert!(poll_once(retained.as_pin()).await.is_pending());
-
-                        let result = second.exchange().declare(exchange::Declare {
+                        let mut overflow = Pinned::new(second.exchange().declare(exchange::Declare {
                                 exchange: "overflow",
                                 kind: "direct",
                                 durable: false,
                                 auto_delete: false,
                                 internal: false,
                                 arguments: &args,
-                            }).await;
-                        assert!(matches!(result,
-                            Err(error) if matches!((error).error(), failure::Error::Capacity(
-                                failure::wire::Capacity::TopologyMetadata
-                            ))
-                        ));
+                            }));
+                        poll_fn(|mut context| {
+                            assert!(matches!(
+                                context.as_mut().try_poll(retained.as_pin()),
+                                context::PollResult::Polled(Poll::Pending)
+                            ));
+                            assert!(matches!(
+                                context.as_mut().try_poll(overflow.as_pin()),
+                                context::PollResult::Polled(Poll::Ready(Err(error)))
+                                    if matches!(error.error(), failure::Error::Capacity(
+                                        failure::wire::Capacity::TopologyMetadata
+                                    ))
+                            ));
+                            Poll::Ready(())
+                        }).await;
                         retained.await.expect("retained exchange");
                     })).is_ok(), "AMQP fiber must complete");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
@@ -103,7 +104,6 @@ fn reserves_inflight_slot() {
 
 #[test]
 fn retains_queue_slot() {
-    let (checked, checks) = mpsc::sync_channel(1);
     TcpScript::with(
         move |stream| {
             assert!(
@@ -125,10 +125,6 @@ fn retains_queue_slot() {
             let method = (Method::read(stream)).expect("reserved queue");
             method.check(1, 50, 10).expect("AMQP method route");
             assert_eq!(queue_name(&method).expect("queue name"), "retained");
-            assert!(
-                checks.recv_timeout(Duration::from_secs(3)).is_ok(),
-                "capacity result"
-            );
             assert!(
                 stream
                     .write_all(&queue_declare_ok_frame(1, b"retained").expect("AMQP fixture"))
@@ -159,7 +155,7 @@ fn retains_queue_slot() {
                 |rt| {
                     let conn = rt.connection();
                     assert!(rt.block_on(dope_fiber::fiber!('_ => async move {
-                        wait_ready(conn).await.expect("ready");
+                        conn.observe().ready().await.expect("ready");
                         let first = (conn.channels().open(1).await).expect("first channel");
                         let second = (conn.channels().open(2).await).expect("second channel");
                         let args = Table::new();
@@ -176,14 +172,21 @@ fn retains_queue_slot() {
                             }))
                         ));
                         let mut retained = Pinned::new(first.queue().declare(declare("retained")));
-                        assert!(poll_once(retained.as_pin()).await.is_pending());
-                        let result = second.queue().declare(declare("overflow")).await;
-                        assert!(matches!(result,
-                            Err(error) if matches!((error).error(), failure::Error::Capacity(
-                                failure::wire::Capacity::TopologyMetadata
-                            ))
-                        ));
-                        assert!(checked.send(()).is_ok(), "publish capacity result");
+                        let mut overflow = Pinned::new(second.queue().declare(declare("overflow")));
+                        poll_fn(|mut context| {
+                            assert!(matches!(
+                                context.as_mut().try_poll(retained.as_pin()),
+                                context::PollResult::Polled(Poll::Pending)
+                            ));
+                            assert!(matches!(
+                                context.as_mut().try_poll(overflow.as_pin()),
+                                context::PollResult::Polled(Poll::Ready(Err(error)))
+                                    if matches!(error.error(), failure::Error::Capacity(
+                                        failure::wire::Capacity::TopologyMetadata
+                                    ))
+                            ));
+                            Poll::Ready(())
+                        }).await;
                         let result = retained.await;
                         assert!(result.is_ok(), "reserved queue succeeds");
                         let result = first.queue().delete("retained", false, false).await;
@@ -193,19 +196,10 @@ fn retains_queue_slot() {
                     })).is_ok(), "AMQP fiber must complete");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             assert!(broker.finish().is_ok(), "queue reservation broker");
         },
     )
     .expect("queue reservation broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

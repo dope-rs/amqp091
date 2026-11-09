@@ -48,8 +48,8 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
     ) {
         let stores = self.domain.content.stores();
         let chan = lease.id();
-        let target = self.domain.session.write(access.reborrow(), |state| {
-            state.connection.lifecycle.status().ready()
+        let target = self.domain.session.read(access.read(), |state| {
+            state.connection.lifecycle.status().epoch()
         });
         let Some(target) = target else {
             let _ = self.detach(access.reborrow(), lease.raw(), key, stores);
@@ -62,23 +62,23 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
             .write(target, lease.raw())
             .admit(access.reborrow(), |state, egress| {
                 match state.routes.project(lease.raw(), |view| {
-                    if view.channel.is_retiring() {
+                    if view.channel.protocol().phase != Phase::Open {
                         return Plan::Missing(Freed::Available);
                     }
                     let mut method = view.channel.method_state();
                     let busy = method.publishing.is_active();
-                    let ready = matches!(method.methods.head(), methods::Head::Empty) && !busy;
-                    let freed = match method.retire(key, stores) {
-                        consumer::Retire::Started(freed) => freed,
-                        consumer::Retire::Missing => {
-                            return Plan::Missing(Freed::Available);
-                        }
+                    let Some(freed) = method.retire(key, stores) else {
+                        return Plan::Missing(Freed::Available);
                     };
-                    let Some(vacant) = method.methods.vacant_user(key) else {
+                    let Some(next) =
+                        method
+                            .methods
+                            .retire(key, *method.phase == Phase::Closing, busy)
+                    else {
                         return Plan::Missing(freed);
                     };
-                    let Some(next) = vacant.retire(key, ready) else {
-                        return Plan::Pending(freed);
+                    let Some(next) = next else {
+                        return Plan::Pending(None, freed);
                     };
                     Plan::encode(&mut method, egress, chan, next, freed)
                 }) {
@@ -90,7 +90,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
             Admission::Missing(freed) => {
                 freed.merge(self.detach(access.reborrow(), lease.raw(), key, stores))
             }
-            Admission::Continue(freed) => freed,
+            Admission::Continue(freed) | Admission::Pending(freed) => freed,
             Admission::Failed(cause) => {
                 self.domain.session.write(access.reborrow(), |state| {
                     state.routes.collect(lease.raw());
@@ -137,7 +137,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
             consumer::Cancel::Tracked(key) => Some(*key),
             consumer::Cancel::Orphan(_) => None,
         };
-        let Some((target, lease)) = self.domain.session.write(access.reborrow(), |state| {
+        let Some((target, lease)) = self.domain.session.read(access.read(), |state| {
             let target = match scope {
                 Scope::Ready => state.connection.lifecycle.status().ready(),
                 Scope::Replay => state.recovery.target(),
@@ -146,13 +146,9 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
         }) else {
             if let Some(key) = key {
                 let _ = self.domain.session.write(access, |state| {
-                    match state
+                    state
                         .routes
                         .with_id(chan, |view| view.channel.method_state().detach(key, stores))
-                    {
-                        Some(consumer::Removal::Removed(freed)) => freed,
-                        Some(consumer::Removal::Missing) | None => Freed::Available,
-                    }
                 });
             }
             return;
@@ -161,13 +157,10 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
             .write(target, lease)
             .admit(access.reborrow(), |state, egress| {
                 match state.routes.project(lease, |view| {
-                    if view.channel.is_retiring() {
+                    if view.channel.protocol().phase != Phase::Open {
                         return Plan::Missing(Freed::Available);
                     }
                     let mut method = view.channel.method_state();
-                    if *method.phase != Phase::Open {
-                        return Plan::Missing(Freed::Available);
-                    }
                     let busy = method.publishing.is_active();
                     let next = match cancel {
                         consumer::Cancel::Tracked(key) => {
@@ -187,7 +180,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
                         }
                     };
                     let Some(next) = next else {
-                        return Plan::Pending(Freed::Available);
+                        return Plan::Pending(None, Freed::Available);
                     };
                     Plan::encode(&mut method, egress, chan, next, Freed::Available)
                 }) {
@@ -200,7 +193,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
                 Some(key) => freed.merge(self.detach(access.reborrow(), lease, key, stores)),
                 None => freed,
             },
-            Admission::Continue(freed) => freed,
+            Admission::Continue(freed) | Admission::Pending(freed) => freed,
             Admission::Failed(cause) => {
                 self.domain.fail(access, target, cause);
                 return;
@@ -219,12 +212,12 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
         stores: Stores<'r, 'c, 'b, 'd>,
     ) -> Freed {
         self.domain.session.write(access, |state| {
-            match state.routes.project(lease, |view| {
-                view.channel.method_state().detach(key, stores)
-            }) {
-                Some(consumer::Removal::Removed(freed)) => freed,
-                Some(consumer::Removal::Missing) | None => Freed::Available,
-            }
+            state
+                .routes
+                .project(lease, |view| {
+                    view.channel.method_state().detach(key, stores)
+                })
+                .unwrap_or(Freed::Available)
         })
     }
 
@@ -235,7 +228,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
     ) {
         let stores = self.domain.content.stores();
         let chan = lease.id();
-        let target = self.domain.session.write(access.reborrow(), |state| {
+        let target = self.domain.session.read(access.read(), |state| {
             state.connection.lifecycle.status().ready()
         });
         let Some(target) = target else {
@@ -259,7 +252,13 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
                         return Plan::Missing(Freed::Available);
                     };
                     let next = vacant.close();
-                    Plan::encode(&mut method, egress, chan, next, Freed::Available)
+                    let plan = if method.publishing.is_active() {
+                        Plan::Pending(None, Freed::Available)
+                    } else {
+                        Plan::encode(&mut method, egress, chan, next, Freed::Available)
+                    };
+                    view.channel.begin_close(self.domain.coordination.waiters());
+                    plan
                 }) {
                     Some(plan) => plan,
                     None => Plan::Missing(Freed::Available),
@@ -271,7 +270,7 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
                     state.routes.abandon(lease.raw(), stores)
                 }))
             }
-            Admission::Continue(freed) => freed,
+            Admission::Continue(freed) | Admission::Pending(freed) => freed,
             Admission::Failed(cause) => {
                 self.domain.fail(access, target, cause);
                 return;
@@ -283,9 +282,6 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
     }
 
     fn wake(self, target: epoch::Id<'d, ID>, freed: Freed) -> Result<(), failure::Error> {
-        match freed {
-            Freed::Available => Ok(()),
-            Freed::Route => self.domain.content.wake_route(target.token()),
-        }
+        self.domain.content.wake_route(target, freed)
     }
 }

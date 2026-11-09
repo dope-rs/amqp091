@@ -1,12 +1,10 @@
-use std::convert::Infallible;
-
-use dope::core::driver::life::recovery;
-
 use crate::common::amqp::Peer;
 use crate::common::amqp::wire::{Frame, Method};
+use crate::common::recovery::client::complete;
+use crate::common::recovery::recover;
 pub mod common;
 
-use std::io::{ErrorKind, Read as _, Write as _};
+use dope_test::harness::peer;
 use std::time::Duration;
 
 use dope_amqp091::message::ack;
@@ -19,12 +17,11 @@ use crate::common::recovery::client::with;
 
 #[test]
 fn rejects_partial_body_credit_cycle() {
-    use crate::common::recovery::{broker::open_named, client::with_config};
+    use crate::common::amqp::app::Endpoint;
+    use crate::common::recovery::{broker::open_named, client::POLICY};
+    use dope::manifold::timing;
     use dope_amqp091::{config, failure};
 
-    let (ready, send) = dope::core::platform::wake::Ends::blocking()
-        .expect("consumer readiness")
-        .split();
     TcpScript::with(
         move |stream| {
             stream.read_wait(Some(Duration::from_secs(5))).expect("read timeout");
@@ -33,7 +30,8 @@ fn rejects_partial_body_credit_cycle() {
             for channel in 1..=2 {
                 open_named(stream, channel, "q", "tag").expect("consumer");
             }
-            ready.wait_timeout(Duration::from_secs(10)).expect("consumers ready");
+            Method::read(stream).expect("consumers ready")
+                .check(2, 50, 30).expect("queue.purge");
             let mut frames = Vec::new();
             for (channel, size) in [(1, 3), (2, 4)] {
                 frames.extend_from_slice(&common::basic::delivery::method(channel, "tag", 1).expect("delivery"));
@@ -44,15 +42,15 @@ fn rejects_partial_body_credit_cycle() {
             stream.write_all(&frames).expect("interleaved content");
             let read = stream.read(&mut [0]);
             assert!(matches!(read, Ok(0)) || matches!(read,
-                Err(ref error) if matches!(error.kind(), ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted)
+                Err(ref error) if matches!(error, peer::Error::Syscall(error) if error.is_reset() || error.is_aborted())
             ), "unreleasable body credit must retire the transport: {read:?}");
         },
         |broker| {
             let config = config::Config::new("guest", "guest").expect("config")
                 .capacity(config::Capacity::default().body(config::Body::default().buffer(6)));
-            with_config(broker.addr(), config, |rt| {
+            Endpoint::new(broker.addr(), config).shutdown(broker.completion()).try_check::<timing::Throughput, _>(POLICY, |rt| {
                 let conn = rt.connection();
-                rt.block_on(dope_fiber::fiber!('_ => async move {
+                rt.until_shutdown(dope_fiber::fiber!('_ => async move {
                     let ready = conn.observe().ready().await.expect("ready");
                     let args = Table::new();
                     let mut consumers = Vec::with_capacity(2);
@@ -64,8 +62,10 @@ fn rejects_partial_body_credit_cycle() {
                         consumers.push(channel.basic().consume(basic::Consume {
                             queue: "q", consumer_tag: "tag", no_local: false, ack: ack::Manual, exclusive: false, arguments: &args,
                         }).await.expect("consumer"));
+                        if id == 2 {
+                            channel.queue().purge("q").await.expect_err("partial-body credit retires transport");
+                        }
                     }
-                    send.notify().expect("consumers ready");
                     let Err(error) = consumers[1].recv().await else {
                         panic!("partial bodies cannot free each other's credit");
                     };
@@ -74,10 +74,8 @@ fn rejects_partial_body_credit_cycle() {
                     };
                     let (need, spare) = credit.into_parts();
                     assert_eq!((need.get(), spare), (4, 3));
-                })).expect("body credit failure completes");
-            }, recover, |result| {
-                result.as_ref().map_err(|error| error.kind()).expect("endpoint completion");
-            });
+                })).expect("peer shutdown").expect("body credit failure completes");
+            }, recover, complete);
             broker.finish().expect("scripted broker");
         },
     ).expect("body credit peer");
@@ -85,9 +83,6 @@ fn rejects_partial_body_credit_cycle() {
 
 #[test]
 fn rejects_early_method() {
-    let (finish, closed) = dope::core::platform::wake::Ends::blocking()
-        .expect("content violation observation")
-        .split();
     TcpScript::with(
         move |stream| {
             stream
@@ -106,6 +101,10 @@ fn rejects_early_method() {
                     &Method::try_encode(1, 20, 11, &[0, 0, 0, 0]).expect("AMQP frame fixture"),
                 )
                 .expect("Channel.OpenOk");
+            Method::read(stream)
+                .expect("channel ready")
+                .check(1, 50, 30)
+                .expect("queue.purge");
 
             let mut deliver = vec![3, b't', b'a', b'g'];
             deliver.extend_from_slice(&1_u64.to_be_bytes());
@@ -138,7 +137,6 @@ fn rejects_early_method() {
             stream
                 .write_all(&Method::try_encode(0, 10, 51, &[]).expect("AMQP frame fixture"))
                 .expect("Connection.CloseOk");
-            closed.notify().expect("publish content violation close");
         },
         |broker| {
             with(
@@ -147,21 +145,17 @@ fn rejects_early_method() {
                     let conn = rt.connection();
                     assert!(
                         rt.block_on(dope_fiber::fiber!('_ => async move {
-                            conn.observe().ready().await.expect("ready");
-                            conn.channels().open(1).await.expect("channel");
-                            common::fiber::wait(&finish).await.expect("content violation close");
+                            let ready = conn.observe().ready().await.expect("ready");
+                            let channel = conn.channels().open(1).await.expect("channel");
+                            channel.queue().purge("").await.expect_err("content violation");
+                            conn.observe().retired(ready.epoch()).await.expect("content violation retirement");
                         }))
                         .is_ok(),
                         "AMQP fiber must complete"
                     );
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("scripted broker thread");
         },
@@ -289,19 +283,10 @@ fn accepts_empty_fragment() {
                     );
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint completion");
-                },
+                complete,
             );
             broker.finish().expect("scripted broker thread");
         },
     )
     .expect("scripted broker");
-}
-
-fn recover(failure: recovery::Recovery<'_, '_>) -> Infallible {
-    panic!("native recovery: {:?}", failure.cause());
 }

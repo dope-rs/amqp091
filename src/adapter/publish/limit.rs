@@ -16,7 +16,10 @@ impl Limit {
         route: route::Route<'o, 'r, 'c, 'b, 'd, ID, core::Publish>,
         access: local::Read<'_, region::Identity<'d>>,
     ) -> Result<Self, failure::Runtime<'c, 'b, 'd, ID>> {
-        let tune = match route.read(access, |state| state.connection.negotiated()) {
+        let tune = match route
+            .gate
+            .read(access, |state| state.connection.negotiated())
+        {
             service::EpochAccess::Live(tune) => tune,
             service::EpochAccess::Terminal(cause) => {
                 return Err(cause.branded());
@@ -26,11 +29,7 @@ impl Limit {
             }
         };
         let buffer = route.core().config().capacity.egress.buffer;
-        let protocol = if tune.frame_max == 0 {
-            buffer
-        } else {
-            tune.frame_max as usize
-        };
+        let protocol = tune.frame_max as usize;
         let body = protocol
             .min(buffer)
             .checked_sub(frame::OVERHEAD)

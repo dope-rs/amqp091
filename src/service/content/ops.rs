@@ -12,32 +12,31 @@ use o3::buffer::{hold, pool};
 use crate::failure::recovery;
 use crate::failure::wire::Fault;
 use crate::protocol::method::conn::{Open, Start, StartOk, Tune, TuneOk};
+use crate::protocol::wire;
 use crate::protocol::wire::frame;
-use crate::protocol::{method, wire};
 use crate::service::content::wait::{Attempt, Blocked};
 use crate::service::content::{payload, pending};
 use crate::service::logic::session::SessionOps as _;
-use crate::service::method::commit;
 use crate::state::channel::{Freed, Phase, consumer, methods};
 use crate::state::conn::{self, phase, status};
 use crate::state::{channels, epoch, shared};
-use crate::{failure, protocol, service};
+use crate::{config, failure, protocol, service};
 
 pub(crate) enum Input<'d, const ID: u8> {
     Committed,
     Blocked(Blocked<'d, ID>),
 }
 
+#[must_use = "terminal reply commit must govern exact transport retirement"]
 pub(in crate::service) enum FailureOwner<'d, const ID: u8> {
     Immediate(epoch::Id<'d, ID>),
-    Reply(commit::Commit<'d, ID>),
+    Reply(epoch::Id<'d, ID>),
 }
 
 impl<'d, const ID: u8> FailureOwner<'d, ID> {
     const fn epoch(&self) -> epoch::Id<'d, ID> {
         match self {
-            Self::Immediate(epoch) => *epoch,
-            Self::Reply(reply) => reply.epoch(),
+            Self::Immediate(epoch) | Self::Reply(epoch) => *epoch,
         }
     }
 
@@ -60,16 +59,13 @@ pub(crate) trait Ops<'o, 'r, 'c, 'b, 'd, const ID: u8> {
         region: &mut region::Token<region::Identity<'d>>,
     ) -> Result<(), failure::Error>;
 
-    fn complete<C: method::Complete<'b, 'd, consumer::Key>>(
+    fn complete(
         &mut self,
         lease: channels::Lease<'d, ID>,
-        done: C,
+        done: impl FnOnce() -> protocol::Response<'b, 'd, consumer::Key>,
         epoch: epoch::Id<'d, ID>,
         region: &mut region::Token<region::Identity<'d>>,
-    ) -> Result<(), failure::Error>
-    where
-        protocol::Response<'b, 'd, consumer::Key>:
-            From<<C::Reply as method::Reply>::Value<'b, 'd, consumer::Key>>;
+    ) -> Result<(), failure::Error>;
 
     fn start(
         &mut self,
@@ -114,48 +110,40 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
     for State<'o, 'd, service::Port<'r, 'c, 'b, 'd, ID>, service::Logic<'o, 'd, ID>, KeyTag<ID>, 1>
 {
     fn wake_route(&self, epoch: epoch::Id<'d, ID>, freed: Freed) -> Result<(), failure::Error> {
-        match freed {
-            Freed::Available => Ok(()),
-            Freed::Route => self.port().content.wake_route(epoch.token()),
-        }
+        self.port().content.wake_route(epoch, freed)
     }
 
-    fn complete<C: method::Complete<'b, 'd, consumer::Key>>(
+    fn complete(
         &mut self,
         lease: channels::Lease<'d, ID>,
-        done: C,
+        done: impl FnOnce() -> protocol::Response<'b, 'd, consumer::Key>,
         epoch: epoch::Id<'d, ID>,
         region: &mut region::Token<region::Identity<'d>>,
-    ) -> Result<(), failure::Error>
-    where
-        protocol::Response<'b, 'd, consumer::Key>:
-            From<<C::Reply as method::Reply>::Value<'b, 'd, consumer::Key>>,
-    {
-        let done: <C::Reply as method::Reply>::Value<'b, 'd, consumer::Key> = done.into();
-        let response = protocol::Response::from(done);
+    ) -> Result<(), failure::Error> {
         let stores = self.port().content.stores();
         let done = self.with_shared(region, |shared| {
             shared.routes.project(lease, |view| {
                 (
                     view.index.lane(),
-                    view.channel.method_turn(stores).complete(
-                        view.topology,
-                        <C::Reply as method::Reply>::KIND,
-                        response,
-                    ),
+                    view.channel
+                        .method_turn(stores)
+                        .complete(view.topology, done()),
                 )
             })
         });
-        let (index, done) = done.ok_or(failure::Error::Protocol(Fault::ChannelUnknown {
-            channel: lease.id(),
-        }))?;
+        let (index, done) = done.ok_or_else(|| {
+            failure::Error::Protocol(Fault::ChannelUnknown {
+                channel: lease.id(),
+            })
+        })?;
         let (done, deletion) = done?;
         if let Some(deletion) = deletion {
             self.with_shared(region, |shared| {
-                shared.routes.for_each(|channel, _| {
+                shared.routes.for_each(|channel, topology| {
+                    topology.deleted(&deletion);
                     channel
                         .consumers()
-                        .forget_queue(deletion.queue_key(), deletion.name());
+                        .forget_queue(deletion.queue_key(), deletion.name().into());
                 });
             });
         }
@@ -175,7 +163,8 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
             methods::Next::Idle { freed } => self.wake_route(epoch, freed)?,
             methods::Next::Resume { next, freed } => {
                 self.wake_route(epoch, freed)?;
-                self.port()
+                let _ = self
+                    .port()
                     .control()
                     .write(epoch, lease)
                     .send(local::Access::new(region), next)?;
@@ -227,7 +216,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
         if !start
             .mechanisms()
             .split(' ')
-            .any(|item| !item.is_empty() && item == auth.value())
+            .any(|item| item == auth.value())
         {
             return Err(failure::Error::UnsupportedMechanism);
         }
@@ -263,10 +252,10 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
         region: &mut region::Token<region::Identity<'d>>,
     ) -> Result<(), failure::Error> {
         let config = self.logic().config;
-        if tune.frame_max != 0 && tune.frame_max < 4096 {
+        if tune.frame_max != 0 && tune.frame_max < config::Frame::MIN {
             return Err(failure::Error::Protocol(Fault::TuneFrame {
                 actual: tune.frame_max,
-                min: 4096,
+                min: config::Frame::MIN,
             }));
         }
         let agreed = protocol::Negotiated {
@@ -276,7 +265,6 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
                 (client, server) => client.min(server),
             },
             frame_max: match (config.tune.frame.get(), tune.frame_max) {
-                (0, server) => server,
                 (client, 0) => client,
                 (client, server) => client.min(server),
             },
@@ -319,7 +307,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
         let store = &self.port().content;
         let stores = store.stores();
         let result = self.with_shared(region, |shared| {
-            let Some(lease) = shared.routes.lease(channel) else {
+            let Some(lease) = shared.connection.input.lease() else {
                 Draft::parse(payload)?;
                 return Err(pending::Error::Failure(failure::Error::Protocol(
                     Fault::ChannelUnknown { channel },
@@ -328,7 +316,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
             shared
                 .routes
                 .project(lease, move |view| {
-                    if view.channel.control().phase == Phase::Closing {
+                    if view.channel.protocol().phase == Phase::Closing {
                         return Ok(());
                     }
                     let draft = Draft::parse(payload)?;
@@ -366,7 +354,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
                             Ok((props, resident, body))
                         })
                 })
-                .ok_or(failure::Error::Protocol(Fault::ChannelUnknown { channel }))?
+                .ok_or_else(|| failure::Error::Protocol(Fault::ChannelUnknown { channel }))?
         });
         match result {
             Ok(()) => Ok(Input::Committed),
@@ -386,22 +374,28 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
         let policy = self.logic().config.capacity.body.retention;
         let store = &self.port().content;
         let stores = store.stores();
-        self.with_channel(region, channel, move |channel| {
-            if channel.control().phase == Phase::Closing {
-                return Ok(Input::Committed);
-            }
-            let mut content = channel.content(stores);
-            let length = payload.len();
-            let result = content.body(length, store.wait.wake(), |target| {
-                target.store(payload, policy, store)
-            });
-            match result {
-                Ok(()) => Ok(Input::Committed),
-                Err(pending::Error::Retry(resource)) => Ok(Input::Blocked(attempt.block(resource))),
-                Err(pending::Error::Failure(error)) => Err(error),
-            }
+        self.with_shared(region, |shared| {
+            let lease = shared.connection.input.lease()?;
+            shared.routes.project(lease, move |view| {
+                let channel = view.channel;
+                if channel.protocol().phase == Phase::Closing {
+                    return Ok(Input::Committed);
+                }
+                let mut content = channel.content(stores);
+                let length = payload.len();
+                let result = content.body(length, store.wait.wake(), |target| {
+                    target.store(payload, policy, store)
+                });
+                match result {
+                    Ok(()) => Ok(Input::Committed),
+                    Err(pending::Error::Retry(resource)) => {
+                        Ok(Input::Blocked(attempt.block(resource)))
+                    }
+                    Err(pending::Error::Failure(error)) => Err(error),
+                }
+            })
         })
-        .ok_or(failure::Error::Protocol(Fault::ChannelUnknown { channel }))?
+        .ok_or_else(|| failure::Error::Protocol(Fault::ChannelUnknown { channel }))?
     }
 
     fn fail_session<P: recovery::Policy>(
@@ -431,7 +425,6 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
             change,
             close::Reason::Local(close::LocalOrigin::ResourceFailure),
         ));
-        self.port().coordination().waiters().wake_all();
-        self.port().admission().wake_all();
+        self.port().wake_all();
     }
 }

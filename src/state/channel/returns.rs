@@ -132,7 +132,7 @@ impl<'c, 'b, 'd> Store<'c, 'b, 'd> {
         driver: driver::Reference<'d>,
     ) -> Result<Self, resident::Error> {
         Ok(Self {
-            nodes: depot::raw::Arena::try_new(capacity)?,
+            nodes: depot::raw::Arena::try_new(capacity.get())?,
             wakes: table::Table::try_new(driver, channels)?,
         })
     }
