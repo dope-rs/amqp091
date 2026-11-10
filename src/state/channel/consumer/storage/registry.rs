@@ -196,10 +196,6 @@ impl<'b, 'd, const ID: u8> Registry<'b, 'd, ID> {
         Some((slot, freed))
     }
 
-    pub(in crate::state::channel::consumer) fn is_empty(&self) -> bool {
-        self.slots.is_empty()
-    }
-
     pub(in crate::state::channel::consumer) fn cancel_key(
         &self,
         id: num::NonZero<u64>,

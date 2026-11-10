@@ -26,7 +26,7 @@ pub(super) fn connection(
     phase: Phase,
     receipt: Phase,
     closing: bool,
-) -> Result<bool, failure::Error> {
+) -> Result<(), failure::Error> {
     let valid = match kind {
         conn::Kind::Start => phase == Phase::Start,
         conn::Kind::Secure | conn::Kind::Tune => phase == Phase::Tune,
@@ -44,7 +44,7 @@ pub(super) fn connection(
             conn::Kind::Start | conn::Kind::Secure | conn::Kind::Tune | conn::Kind::Open
         ) || receipt == phase)
     {
-        return Ok(true);
+        return Ok(());
     }
     let phase = if valid { receipt } else { phase };
     let method = match kind {

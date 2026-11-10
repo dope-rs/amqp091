@@ -23,40 +23,34 @@ impl<'c, 'b, 'a, 'd> Vacant<'a, 'c, 'b, 'd> {
     }
 
     pub(crate) fn retire(self, consumer: consumer::Key, ready: bool) -> Option<send::Next> {
-        let key = Slot::insert::<false>(self, |key| {
+        let next = Slot::insert::<false>(self, |key| {
             Entry::new(key, entry::Pending::consumer(consumer))
-        })
-        .key();
-        ready.then_some(send::Next::new(key))
+        });
+        ready.then_some(next)
     }
 
     pub(crate) fn abandon(self, consumer: consumer::Key, blocked: bool) -> Option<send::Next> {
-        let key = Slot::insert::<true>(self, |key| {
+        let next = Slot::insert::<true>(self, |key| {
             Entry::new(key, entry::Pending::consumer(consumer))
-        })
-        .key();
-        (!blocked).then_some(send::Next::new(key))
+        });
+        (!blocked).then_some(next)
     }
 
     pub(crate) fn orphan(self, tag: resident::Short<'b, 'd>, blocked: bool) -> Option<send::Next> {
-        let key = Slot::insert::<true>(self, |key| {
+        let next = Slot::insert::<true>(self, |key| {
             Entry::new(key, entry::Pending::orphan(tag, entry::Origin::Detached))
-        })
-        .key();
-        (!blocked).then_some(send::Next::new(key))
+        });
+        (!blocked).then_some(next)
     }
 
     pub(crate) fn retry(self, tag: resident::Short<'b, 'd>, blocked: bool) -> Option<send::Next> {
-        let key = Slot::insert::<true>(self, |key| {
+        let next = Slot::insert::<true>(self, |key| {
             Entry::new(key, entry::Pending::orphan(tag, entry::Origin::Replay))
-        })
-        .key();
-        (!blocked).then_some(send::Next::new(key))
+        });
+        (!blocked).then_some(next)
     }
 
     pub(crate) fn close(self) -> send::Next {
-        send::Next::new(
-            Slot::insert::<true>(self, |key| Entry::new(key, entry::Pending::close())).key(),
-        )
+        Slot::insert::<true>(self, |key| Entry::new(key, entry::Pending::close()))
     }
 }

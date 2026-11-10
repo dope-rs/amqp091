@@ -27,14 +27,6 @@ impl<'d, const ID: u8> Key<'d, ID> {
         (raw, owner)
     }
 
-    pub(in crate::protocol::topology) const fn index(self) -> u32 {
-        self.raw.index()
-    }
-
-    pub(in crate::protocol::topology) const fn generation(self) -> key::Generation {
-        self.raw.generation()
-    }
-
     pub(crate) const fn identity(self) -> num::NonZero<u64> {
         self.raw.parts().into_raw()
     }

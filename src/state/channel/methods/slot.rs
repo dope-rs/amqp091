@@ -10,7 +10,7 @@ use o3::depot::queue::links;
 use crate::failure::terminal;
 use crate::failure::wire::turn::{Method, Request};
 use crate::protocol::{self, method};
-use crate::state::channel::methods::{Entry, MethodKey, Plane, entry, flight};
+use crate::state::channel::methods::{Entry, MethodKey, Plane, entry, flight, send};
 use crate::state::channel::{self, consumer, methods};
 
 type Queued<'a, 'c, 'b, 'd, P> = keyed::Slot<Slot<'a, 'c, 'b, 'd, P>, Plane>;
@@ -148,10 +148,10 @@ impl<'c, 'b, 'a, 'd> Slot<'a, 'c, 'b, 'd> {
     pub(super) fn insert<const FRONT: bool>(
         vacant: methods::Vacant<'a, 'c, 'b, 'd>,
         build: impl FnOnce(links::Index) -> Entry<'c, 'b, 'd>,
-    ) -> Queued<'a, 'c, 'b, 'd, ()> {
+    ) -> send::Next {
         let methods::Vacant { entry, order } = vacant;
         let entry = entry.stage_with(build).commit();
-        Self { entry, order }.push::<FRONT>()
+        send::Next::new(Self { entry, order }.push::<FRONT>().key())
     }
 
     pub(super) fn push<const FRONT: bool>(self) -> Queued<'a, 'c, 'b, 'd, ()> {

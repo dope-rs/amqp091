@@ -320,8 +320,7 @@ impl Binding<'_> {
         match queue {
             Some(key) => {
                 hash.write(&[1, 1]);
-                hash.write(&key.index().to_le_bytes());
-                hash.write(&key.generation().get().to_le_bytes());
+                hash.write(&key.identity().get().to_le_bytes());
             }
             None => {
                 hash.write(&[0]);

@@ -19,7 +19,7 @@ impl<'b, 'a, 'd, const ID: u8> Read<'a, 'b, 'd, ID> {
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.registry.is_empty()
+        self.registry.slots.is_empty()
     }
 
     pub(crate) fn has_replay(&self) -> bool {

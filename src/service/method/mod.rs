@@ -110,9 +110,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
         if closing && !matches!(kind, conn::Kind::Close | conn::Kind::CloseOk) {
             return Ok(ops::Input::Committed);
         }
-        if !gates::connection(kind, parts.state.phase, receipt, admitted_close)? {
-            return Ok(ops::Input::Committed);
-        }
+        gates::connection(kind, parts.state.phase, receipt, admitted_close)?;
         let event = conn::Event::decode(&args, kind, budget)?;
         let mut close = |next| parts.close.request(next);
         self.recv_conn(

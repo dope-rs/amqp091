@@ -105,10 +105,9 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Store<'r, 'c, 'b, 'd, ID> {
             };
             return Err(pending::Error::Failure(failure::Error::Capacity(error)));
         }
-        source.try_retain().map_err(|(source, error)| {
-            drop(source);
-            self.admission(wire::Allocation::Content, error)
-        })
+        let retained = source.try_retain();
+        drop(source);
+        retained.map_err(|error| self.admission(wire::Allocation::Content, error))
     }
 
     pub(crate) fn discard(&self, body: payload::Payload<'b, 'd>) {
@@ -141,7 +140,10 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Store<'r, 'c, 'b, 'd, ID> {
     ) -> Result<(), failure::Error> {
         match freed {
             channel::Freed::Available => Ok(()),
-            channel::Freed::Route => self.wait.wake_route(conn).map_err(failure::Error::WaitRoute),
+            channel::Freed::Route => self
+                .wait
+                .wake_route(conn)
+                .map_err(failure::Error::WaitRoute),
         }
     }
 
