@@ -318,6 +318,115 @@ fn closes_abandoned_open_before_new_method() {
 }
 
 #[test]
+fn releases_abandoned_channel_after_confirm_failure() {
+    use dope_amqp091::adapter::publish;
+    use dope_amqp091::message::property::Properties;
+    use dope_amqp091::protocol::method::confirm;
+
+    AcceptScript::with(
+        |broker| {
+            let mut first = broker.accept().expect("first connection");
+            first.read_wait(Some(Duration::from_secs(10))).expect("read timeout");
+            Peer::new(&mut first).open(TUNE).expect("first handshake");
+            Method::read(&mut first).expect("channel open").check(1, 20, 10).expect("open route");
+            Method::write(&mut first, 1, 20, 11, &[0; 4]).expect("open reply");
+            common::client::confirm_select(&mut first, 1).expect("confirm selection");
+            common::client::check_publish(&mut first, 1, "pending", b"").expect("pending publish");
+            Method::read(&mut first).expect("abandoned close").check(1, 20, 40).expect("close route");
+            drop(first);
+
+            let mut second = broker.accept().expect("recovered connection");
+            second.read_wait(Some(Duration::from_secs(10))).expect("read timeout");
+            Peer::new(&mut second).open(TUNE).expect("recovered handshake");
+            Method::read(&mut second).expect("reused channel").check(1, 20, 10).expect("open route");
+            Method::write(&mut second, 1, 20, 11, &[0; 4]).expect("reused open reply");
+            assert_eq!(second.read(&mut [0]).expect("shutdown"), 0);
+        },
+        |broker| {
+            let config = config::Config::new("guest", "guest").expect("config").capacity(
+                config::Capacity::default()
+                    .channels(1)
+                    .channel(config::Channel::default().methods(2).confirms(1)),
+            );
+            Endpoint::new(broker.addr(), config).try_check::<timing::Throughput, _>(
+                Policy::new(1, 16, Duration::from_secs(10)),
+                |scope| {
+                    let amqp = adapter::Adapter::new(scope.port());
+                    scope.block_on(dope_fiber::fiber!('_ => async move {
+                        let target = Ready {
+                            state: amqp.connection().observe(),
+                            wait: fanout::Registration::new(),
+                        }.await.expect("first ready");
+                        let (lease, mut opening) = Once::new(|mut access| {
+                            let lease = amqp.channels().reserve(access.reborrow(), target, 1)?.commit();
+                            amqp.methods().reserve(access, target, lease, channel::Open)
+                                .map(|opening| (lease, opening))
+                        }).await.expect("open reservation");
+                        poll_fn(|mut cx| {
+                            let wake = cx.as_ref().completion();
+                            let access = local::Access::new(cx.as_mut().region_token());
+                            assert!(opening.poll(access, wake).is_pending());
+                            std::task::Poll::Ready(())
+                        }).await;
+                        while Once::new(|access| amqp.channels().flow_active(access, target, lease))
+                            .await.expect("channel state") != Some(true)
+                        {
+                            Yield::new().await;
+                        }
+                        let mut select = Once::new(|access| {
+                            amqp.methods().reserve(access, target, lease, confirm::Select)
+                        }).await.expect("confirm reservation");
+                        poll_fn(|mut cx| {
+                            let wake = cx.as_ref().completion();
+                            let access = local::Access::new(cx.as_mut().region_token());
+                            select.poll(access, wake)
+                        }).await.expect("confirm selected");
+                        let properties = Properties::default();
+                        let mut pending = Once::new(|access| amqp.publish().confirm(
+                            access.read(), target, lease, publish::Request {
+                                exchange: "", routing_key: "pending", mandatory: false,
+                                properties: &properties, body: b"",
+                            },
+                        )).await.expect("confirm publish");
+                        poll_fn(|mut cx| {
+                            let wake = cx.as_ref().completion();
+                            let access = local::Access::new(cx.as_mut().region_token());
+                            assert!(pending.poll(access, wake).is_pending());
+                            std::task::Poll::Ready(())
+                        }).await;
+                        drop(opening);
+                        let mut wait = fanout::Registration::new();
+                        poll_fn(|mut cx| {
+                            let wake = cx.as_ref().completion();
+                            let access = local::Access::new(cx.as_mut().region_token());
+                            amqp.connection().observe().poll_retired(access, target.epoch(), &mut wait, wake)
+                        }).await.expect("old transport retired");
+                        let target = Ready {
+                            state: amqp.connection().observe(),
+                            wait: fanout::Registration::new(),
+                        }.await.expect("recovered ready");
+                        let error = poll_fn(|mut cx| {
+                            let wake = cx.as_ref().completion();
+                            let access = local::Access::new(cx.as_mut().region_token());
+                            pending.poll(access, wake)
+                        }).await.expect_err("failed confirmation");
+                        let failure::Runtime::Terminal(cause) = error else {
+                            panic!("terminal confirmation: {error:?}");
+                        };
+                        Open { adapter: amqp, target, lease: None, call: None }
+                            .await.expect("channel slot released after failed confirmation");
+                        assert!(matches!(cause.error(), failure::Error::Disconnected(_)));
+                    })).expect("fiber drive");
+                },
+                recover,
+                complete,
+            );
+            broker.finish().expect("broker");
+        },
+    ).expect("scripted broker");
+}
+
+#[test]
 fn wakes_publish_after_notified_waiter_is_cancelled() {
     use std::task::Poll;
 

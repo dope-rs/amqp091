@@ -236,10 +236,7 @@ pub(crate) struct Encoder<'a, S: ?Sized> {
 #[derive(Clone, Copy)]
 pub(crate) struct Body<'a>(&'a [u8]);
 
-pub(crate) struct Payload<'a> {
-    bytes: &'a [u8],
-    len: u32,
-}
+pub(crate) struct Payload<'a>(&'a [u8]);
 
 impl<'a> Body<'a> {
     pub(crate) const fn new(bytes: &'a [u8]) -> Option<Self> {
@@ -254,21 +251,9 @@ impl<'a> Body<'a> {
         let cap = max.get() as usize;
         if self.0.len() >= cap {
             let (bytes, tail) = self.0.split_at(cap);
-            return (
-                Payload {
-                    bytes,
-                    len: max.get(),
-                },
-                Self::new(tail),
-            );
+            return (Payload(bytes), Self::new(tail));
         }
-        (
-            Payload {
-                bytes: self.0,
-                len: self.0.len() as u32,
-            },
-            None,
-        )
+        (Payload(self.0), None)
     }
 }
 
@@ -281,8 +266,8 @@ impl<'a, S: Write + ?Sized> Encoder<'a, S> {
         let out = self.out;
         out.push(Type::BODY);
         out.extend(&channel.to_be_bytes());
-        out.extend(&payload.len.to_be_bytes());
-        out.extend(payload.bytes);
+        out.extend(&(payload.0.len() as u32).to_be_bytes());
+        out.extend(payload.0);
         out.push(Type::END);
     }
 

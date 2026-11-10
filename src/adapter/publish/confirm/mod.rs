@@ -94,6 +94,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'exchange, 'key, 'properties, 'body, 'd: 'b, co
             service::EpochAccess::Unknown => Err(failure::Runtime::Local(failure::Error::Closed)),
         };
         ticket.complete();
+        receipt.collect(cx);
         task::Poll::Ready(out)
     }
 }

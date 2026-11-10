@@ -65,16 +65,11 @@ impl<'a, L: schema::Layout, P: schema::Append<schema::Offset> + Copy> Fields<'a,
             assert!(INDEX == P::LEN);
             assert!(INDEX < <L::Proof as schema::Proof>::FIELDS);
         };
-        let offset = write_field(self.output, self.base, value);
+        let offset = self.offset();
+        Plain::new(self.output).put_short(value);
         let proof = self.proof.append(offset);
         self.advance(proof)
     }
-}
-
-fn write_field(output: &mut Writer, base: u32, value: short::Short<'_>) -> schema::Offset {
-    let offset = schema::Offset::new(output.position() - base);
-    Plain::new(output).put_short(value);
-    offset
 }
 
 impl<'a, const N: usize, L: schema::Layout<Proof = schema::Identity<N>>>
