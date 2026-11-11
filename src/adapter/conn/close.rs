@@ -99,15 +99,12 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Wait<'o, 'r, 'c, 'b, 'd, 
             {
                 CloseResult::Pending => {}
                 CloseResult::Complete => {
-                    self.registration.clear();
                     return task::Poll::Ready(Ok(()));
                 }
                 CloseResult::Terminal(cause) => {
-                    self.registration.clear();
                     return task::Poll::Ready(Err(terminal::Outcome::retain(cause).branded()));
                 }
                 CloseResult::Unknown => {
-                    self.registration.clear();
                     return task::Poll::Ready(Err(failure::Runtime::from(failure::Error::Closed)));
                 }
             }

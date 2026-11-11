@@ -10,7 +10,7 @@ use crate::failure::{self, recovery, wire};
 use crate::protocol::method;
 use crate::protocol::method::conn::CloseRef;
 use crate::protocol::wire::frame;
-use crate::protocol::wire::text::resident;
+use crate::protocol::wire::text::{resident, short};
 use crate::service::content::ops::{FailureOwner, Input, Ops as _};
 use crate::service::content::wait::Attempt;
 use crate::service::method::Ops as _;
@@ -185,8 +185,22 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> SessionOps<'o, 'r, 'c, 'b
             );
             return;
         }
-        let code = reply.code();
-        let text = reply.text();
+        let (code, text) = match reply {
+            wire::Reply::Frame => (
+                501,
+                short::literal!(short::Short::try_new("frame too large")),
+            ),
+            wire::Reply::Syntax => (502, short::literal!(short::Short::try_new("syntax error"))),
+            wire::Reply::Command => (
+                503,
+                short::literal!(short::Short::try_new("command invalid")),
+            ),
+            wire::Reply::Channel => (504, short::literal!(short::Short::try_new("channel error"))),
+            wire::Reply::Unexpected => (
+                505,
+                short::literal!(short::Short::try_new("unexpected frame")),
+            ),
+        };
         if let Err(error) = self.send_method(
             sink,
             region,
