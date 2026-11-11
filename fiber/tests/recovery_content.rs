@@ -106,21 +106,13 @@ fn rejects_early_method() {
                 .check(1, 50, 30)
                 .expect("queue.purge");
 
-            let mut deliver = vec![3, b't', b'a', b'g'];
-            deliver.extend_from_slice(&1_u64.to_be_bytes());
-            deliver.push(0);
-            deliver.push(0);
-            deliver.push(0);
             stream
-                .write_all(&Method::try_encode(1, 60, 60, &deliver).expect("AMQP frame fixture"))
+                .write_all(
+                    &common::basic::delivery::method(1, "tag", 1).expect("AMQP frame fixture"),
+                )
                 .expect("Basic.Deliver");
-            let mut header = Vec::new();
-            header.extend_from_slice(&60_u16.to_be_bytes());
-            header.extend_from_slice(&0_u16.to_be_bytes());
-            header.extend_from_slice(&10_u64.to_be_bytes());
-            header.extend_from_slice(&0_u16.to_be_bytes());
             stream
-                .write_all(&Frame::try_encode(2, 1, &header).expect("AMQP frame fixture"))
+                .write_all(&common::basic::content_header(1, 10).expect("AMQP frame fixture"))
                 .expect("content header");
             stream
                 .write_all(&Frame::try_encode(3, 1, b"12345").expect("AMQP frame fixture"))
@@ -187,11 +179,11 @@ fn accepts_empty_fragment() {
                 .expect("Queue.Declare")
                 .check(1, 50, 10)
                 .expect("AMQP method route");
-            let mut declared = vec![1, b'q'];
-            declared.extend_from_slice(&0_u32.to_be_bytes());
-            declared.extend_from_slice(&0_u32.to_be_bytes());
             stream
-                .write_all(&Method::try_encode(1, 50, 11, &declared).expect("AMQP frame fixture"))
+                .write_all(
+                    &common::recovery::broker::queue_declare_ok(1, "q", 0, 0)
+                        .expect("AMQP frame fixture"),
+                )
                 .expect("Queue.DeclareOk");
             Method::read(stream)
                 .expect("Basic.Consume")
@@ -204,19 +196,13 @@ fn accepts_empty_fragment() {
                 )
                 .expect("Basic.ConsumeOk");
 
-            let mut deliver = vec![3, b't', b'a', b'g'];
-            deliver.extend_from_slice(&1_u64.to_be_bytes());
-            deliver.extend_from_slice(&[0, 0, 0]);
             stream
-                .write_all(&Method::try_encode(1, 60, 60, &deliver).expect("AMQP frame fixture"))
+                .write_all(
+                    &common::basic::delivery::method(1, "tag", 1).expect("AMQP frame fixture"),
+                )
                 .expect("Basic.Deliver");
-            let mut header = Vec::new();
-            header.extend_from_slice(&60_u16.to_be_bytes());
-            header.extend_from_slice(&0_u16.to_be_bytes());
-            header.extend_from_slice(&5_u64.to_be_bytes());
-            header.extend_from_slice(&0_u16.to_be_bytes());
             stream
-                .write_all(&Frame::try_encode(2, 1, &header).expect("AMQP frame fixture"))
+                .write_all(&common::basic::content_header(1, 5).expect("AMQP frame fixture"))
                 .expect("content header");
             stream
                 .write_all(&Frame::try_encode(3, 1, &[]).expect("AMQP frame fixture"))
