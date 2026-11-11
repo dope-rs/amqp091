@@ -21,12 +21,6 @@ pub(super) const DELETE_OK: method::Id = method::Id::new(class::QUEUE, 41);
 pub(super) const UNBIND: method::Id = method::Id::new(class::QUEUE, 50);
 pub(super) const UNBIND_OK: method::Id = method::Id::new(class::QUEUE, 51);
 
-enum DeclareText {}
-
-impl DeclareText {
-    const QUEUE: schema::Field<Self, 0> = schema::Field::new();
-}
-
 /// Declares a queue and records it for recovery.
 pub struct Declare<'a> {
     pub queue: short::Name<'a>,
@@ -173,7 +167,7 @@ impl<'input> View<'input> {
         input: &scope::Deferred<'input, 'd, R>,
     ) -> Result<Self, failure::Error> {
         let ((msgs, users), queue) =
-            fields::Decoder::<DeclareText>::hold(input, DeclareText::QUEUE, |decoder| {
+            fields::Decoder::<Declaration>::hold(input, Declaration::QUEUE, |decoder| {
                 Ok((decoder.read::<u32>()?, decoder.read::<u32>()?))
             })?;
         Ok(Self {

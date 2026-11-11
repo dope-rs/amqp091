@@ -107,9 +107,6 @@ impl<'b, 'd> Pending<'b, 'd> {
         if self.sent {
             return Err(turn::Method::Sent);
         }
-        if !self.is_control() {
-            return Err(turn::Method::Waiting);
-        }
         Ok(self)
     }
 }
