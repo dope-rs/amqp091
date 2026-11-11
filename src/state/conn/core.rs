@@ -39,14 +39,25 @@ impl<'c, 'b, 'd, const ID: u8> Core<'c, 'b, 'd, ID> {
         target: epoch::Id<'d, ID>,
         hold: terminal::Reservation<'c, 'b, 'd>,
     ) -> Start<'c, 'b, 'd, ID> {
-        let start = self.lifecycle.begin(target, hold);
-        match &start {
-            Start::Ignored => {}
-            Start::Applied | Start::Replaced { .. } => {
-                self.input = super::Input::Empty;
-                self.unblock();
+        let start = match mem::replace(
+            &mut self.lifecycle.status,
+            status::Status::Handshaking(target, hold),
+        ) {
+            status::Status::AwaitingTransport | status::Status::AdmissionRejected => Start::Applied,
+            status::Status::Reconnecting(epoch, cause) => Start::Replaced { epoch, cause },
+            prior @ (status::Status::Handshaking(_, _)
+            | status::Status::OpeningFailed(_)
+            | status::Status::Open(_, _)
+            | status::Status::Ready(_, _)
+            | status::Status::Closing(_, _, _)
+            | status::Status::Closed(_, _, _, _)
+            | status::Status::Failed(_, _)) => {
+                self.lifecycle.status = prior;
+                return Start::Ignored;
             }
-        }
+        };
+        self.input = super::Input::Empty;
+        self.unblock();
         start
     }
 
@@ -57,7 +68,22 @@ impl<'c, 'b, 'd, const ID: u8> Core<'c, 'b, 'd, ID> {
     }
 
     pub(crate) fn start_close(&mut self, target: epoch::Id<'d, ID>) -> Result<(), failure::Error> {
-        self.lifecycle.start_close(target)?;
+        let hold = match mem::replace(
+            &mut self.lifecycle.status,
+            status::Status::AwaitingTransport,
+        ) {
+            status::Status::Open(current, hold) | status::Status::Ready(current, hold)
+                if current == target =>
+            {
+                hold
+            }
+            status => {
+                self.lifecycle.status = status;
+                return Err(failure::Error::Closed);
+            }
+        };
+        let cause = hold.commit(self.lifecycle.generation, failure::Error::Closed);
+        self.lifecycle.status = status::Status::Closing(target, cause, status::CloseKind::Graceful);
         self.unblock();
         Ok(())
     }
@@ -67,7 +93,27 @@ impl<'c, 'b, 'd, const ID: u8> Core<'c, 'b, 'd, ID> {
         target: epoch::Id<'d, ID>,
         failure: failure::Error<resident::Short<'b, 'd>>,
     ) -> Result<&terminal::Lease<'c, 'b, 'd>, failure::Error<resident::Short<'b, 'd>>> {
-        let cause = self.lifecycle.try_fail(target, failure)?;
+        let hold = match mem::replace(
+            &mut self.lifecycle.status,
+            status::Status::AwaitingTransport,
+        ) {
+            status::Status::Open(current, hold)
+            | status::Status::Ready(current, hold)
+            | status::Status::Handshaking(current, hold)
+                if current == target =>
+            {
+                hold
+            }
+            status => {
+                self.lifecycle.status = status;
+                return Err(failure);
+            }
+        };
+        let cause = hold.commit(self.lifecycle.generation, failure);
+        self.lifecycle.status = status::Status::Closing(target, cause, status::CloseKind::Failure);
+        let status::Status::Closing(_, cause, _) = &self.lifecycle.status else {
+            unreachable!("closing");
+        };
         self.blocked = None;
         Ok(cause)
     }
@@ -119,11 +165,79 @@ impl<'c, 'b, 'd, const ID: u8> Core<'c, 'b, 'd, ID> {
         reserve: impl FnOnce() -> Option<terminal::Reservation<'c, 'b, 'd>>,
         finish: impl FnOnce(&terminal::Lease<'c, 'b, 'd>, status::Retirement) -> R,
     ) -> Option<R> {
-        let next = self.lifecycle.fail(source, failure, reserve, finish);
-        if next.is_some() {
-            self.unblock();
-        }
-        next
+        let output = {
+            let reserve = reserve;
+            let finish = finish;
+            if !self
+                .lifecycle
+                .status
+                .can_accept(source, status::Input::Failure)
+            {
+                return None;
+            }
+            let (class, error) = P::classify(failure);
+            let status = mem::replace(
+                &mut self.lifecycle.status,
+                status::Status::AwaitingTransport,
+            );
+            let (output, next) = match status {
+                status::Status::Handshaking(_, hold)
+                | status::Status::Open(_, hold)
+                | status::Status::Ready(_, hold) => {
+                    let cause = hold.commit(self.lifecycle.generation, error);
+                    match class {
+                        recovery::Class::Recoverable => (
+                            finish(&cause, status::Retirement::Reconnect),
+                            status::Status::Reconnecting(source, terminal::State::Active(cause)),
+                        ),
+                        recovery::Class::Fatal => (
+                            finish(&cause, status::Retirement::Permanent),
+                            status::Status::Failed(source, terminal::State::Active(cause)),
+                        ),
+                    }
+                }
+                status::Status::Reconnecting(current, cause) => match class {
+                    recovery::Class::Recoverable => (
+                        finish(&cause, status::Retirement::Reconnect),
+                        status::Status::Reconnecting(current, cause),
+                    ),
+                    recovery::Class::Fatal => {
+                        let cause = match reserve() {
+                            Some(hold) => {
+                                if let terminal::State::Retired(exit) = cause {
+                                    self.lifecycle.previous = Some(exit);
+                                }
+                                terminal::State::Active(
+                                    hold.commit(self.lifecycle.generation, error),
+                                )
+                            }
+                            None => cause,
+                        };
+                        (
+                            finish(&cause, status::Retirement::Permanent),
+                            status::Status::Failed(current, cause),
+                        )
+                    }
+                },
+                status::Status::Closing(current, cause, kind) => (
+                    finish(&cause, status::Retirement::Permanent),
+                    status::Status::Closed(
+                        current,
+                        terminal::State::Active(cause),
+                        kind,
+                        status::CloseOutcome::HandshakeInterrupted,
+                    ),
+                ),
+                status => {
+                    self.lifecycle.status = status;
+                    return None;
+                }
+            };
+            self.lifecycle.status = next;
+            output
+        };
+        self.unblock();
+        Some(output)
     }
 }
 
@@ -134,27 +248,6 @@ impl<'c, 'b, 'd, const ID: u8> Lifecycle<'c, 'b, 'd, ID> {
             previous: None,
             generation: 0,
             transport_deadline: None,
-        }
-    }
-
-    fn begin(
-        &mut self,
-        target: epoch::Id<'d, ID>,
-        hold: terminal::Reservation<'c, 'b, 'd>,
-    ) -> Start<'c, 'b, 'd, ID> {
-        match mem::replace(&mut self.status, status::Status::Handshaking(target, hold)) {
-            status::Status::AwaitingTransport | status::Status::AdmissionRejected => Start::Applied,
-            status::Status::Reconnecting(epoch, cause) => Start::Replaced { epoch, cause },
-            prior @ (status::Status::Handshaking(_, _)
-            | status::Status::OpeningFailed(_)
-            | status::Status::Open(_, _)
-            | status::Status::Ready(_, _)
-            | status::Status::Closing(_, _, _)
-            | status::Status::Closed(_, _, _, _)
-            | status::Status::Failed(_, _)) => {
-                self.status = prior;
-                Start::Ignored
-            }
         }
     }
 
@@ -266,49 +359,6 @@ impl<'c, 'b, 'd, const ID: u8> Lifecycle<'c, 'b, 'd, ID> {
         Ok(())
     }
 
-    fn start_close(&mut self, target: epoch::Id<'d, ID>) -> Result<(), failure::Error> {
-        let hold = match mem::replace(&mut self.status, status::Status::AwaitingTransport) {
-            status::Status::Open(current, hold) | status::Status::Ready(current, hold)
-                if current == target =>
-            {
-                hold
-            }
-            status => {
-                self.status = status;
-                return Err(failure::Error::Closed);
-            }
-        };
-        let cause = hold.commit(self.generation, failure::Error::Closed);
-        self.status = status::Status::Closing(target, cause, status::CloseKind::Graceful);
-        Ok(())
-    }
-
-    fn try_fail(
-        &mut self,
-        target: epoch::Id<'d, ID>,
-        failure: failure::Error<resident::Short<'b, 'd>>,
-    ) -> Result<&terminal::Lease<'c, 'b, 'd>, failure::Error<resident::Short<'b, 'd>>> {
-        let hold = match mem::replace(&mut self.status, status::Status::AwaitingTransport) {
-            status::Status::Open(current, hold)
-            | status::Status::Ready(current, hold)
-            | status::Status::Handshaking(current, hold)
-                if current == target =>
-            {
-                hold
-            }
-            status => {
-                self.status = status;
-                return Err(failure);
-            }
-        };
-        let cause = hold.commit(self.generation, failure);
-        self.status = status::Status::Closing(target, cause, status::CloseKind::Failure);
-        let status::Status::Closing(_, cause, _) = &self.status else {
-            unreachable!("closing");
-        };
-        Ok(cause)
-    }
-
     fn finish_close(
         &mut self,
         target: epoch::Id<'d, ID>,
@@ -386,73 +436,6 @@ impl<'c, 'b, 'd, const ID: u8> Lifecycle<'c, 'b, 'd, ID> {
                 status::Retirement::Permanent
             }
         }
-    }
-
-    fn fail<P: recovery::Policy, R>(
-        &mut self,
-        source: epoch::Id<'d, ID>,
-        failure: recovery::Fault<'b, 'd, P>,
-        reserve: impl FnOnce() -> Option<terminal::Reservation<'c, 'b, 'd>>,
-        finish: impl FnOnce(&terminal::Lease<'c, 'b, 'd>, status::Retirement) -> R,
-    ) -> Option<R> {
-        if !self.status.can_accept(source, status::Input::Failure) {
-            return None;
-        }
-        let (class, error) = P::classify(failure);
-        let status = mem::replace(&mut self.status, status::Status::AwaitingTransport);
-        let (output, next) = match status {
-            status::Status::Handshaking(_, hold)
-            | status::Status::Open(_, hold)
-            | status::Status::Ready(_, hold) => {
-                let cause = hold.commit(self.generation, error);
-                match class {
-                    recovery::Class::Recoverable => (
-                        finish(&cause, status::Retirement::Reconnect),
-                        status::Status::Reconnecting(source, terminal::State::Active(cause)),
-                    ),
-                    recovery::Class::Fatal => (
-                        finish(&cause, status::Retirement::Permanent),
-                        status::Status::Failed(source, terminal::State::Active(cause)),
-                    ),
-                }
-            }
-            status::Status::Reconnecting(current, cause) => match class {
-                recovery::Class::Recoverable => (
-                    finish(&cause, status::Retirement::Reconnect),
-                    status::Status::Reconnecting(current, cause),
-                ),
-                recovery::Class::Fatal => {
-                    let cause = match reserve() {
-                        Some(hold) => {
-                            if let terminal::State::Retired(exit) = cause {
-                                self.previous = Some(exit);
-                            }
-                            terminal::State::Active(hold.commit(self.generation, error))
-                        }
-                        None => cause,
-                    };
-                    (
-                        finish(&cause, status::Retirement::Permanent),
-                        status::Status::Failed(current, cause),
-                    )
-                }
-            },
-            status::Status::Closing(current, cause, kind) => (
-                finish(&cause, status::Retirement::Permanent),
-                status::Status::Closed(
-                    current,
-                    terminal::State::Active(cause),
-                    kind,
-                    status::CloseOutcome::HandshakeInterrupted,
-                ),
-            ),
-            status => {
-                self.status = status;
-                return None;
-            }
-        };
-        self.status = next;
-        Some(output)
     }
 }
 
