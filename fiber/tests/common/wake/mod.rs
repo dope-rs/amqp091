@@ -38,7 +38,7 @@ pub fn with_client(
         Err(error) => return finish(Err(error::Error::Config(error))),
     };
     let policy = Policy::new(1, slots, Duration::from_secs(10));
-    Endpoint::new(addr, cfg).try_check::<timing::Throughput, _>(policy, test, recover, finish)
+    Endpoint::new(addr, cfg).try_check::<timing::Throughput, _, _>(policy, test, recover, finish)
 }
 
 pub struct Ready<'o, 'r, 'c, 'b, 'd> {

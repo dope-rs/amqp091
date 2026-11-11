@@ -43,7 +43,7 @@ fn honors_negotiated_heartbeat_deadlines() {
             |broker| {
                 let config = config::Config::new("guest", "guest").expect("config")
                     .tune(config::Tune::default().heartbeat(heartbeat));
-                Endpoint::new(broker.addr(), config).shutdown(broker.completion()).try_check::<timing::Throughput, _>(
+                Endpoint::new(broker.addr(), config).shutdown(broker.completion()).try_check::<timing::Throughput, _, _>(
                     Policy::new(1, 16, Duration::from_secs(5)),
                     |rt| {
                         let conn = rt.connection();
@@ -159,7 +159,7 @@ fn readies_after_replay() {
             let config = config::Config::new("guest", "guest").expect("config");
             let policy = Policy::new(1, schedule::LIMIT, Duration::from_secs(10))
                 .backoff(Duration::from_millis(10), Duration::from_secs(1));
-            Endpoint::new(broker.addr(), config).try_check::<timing::Throughput, _>(
+            Endpoint::new(broker.addr(), config).try_check::<timing::Throughput, _, _>(
                 policy,
                 move |rt| {
                     let conn = rt.connection();

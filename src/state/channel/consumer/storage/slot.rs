@@ -1,26 +1,27 @@
 use dope::core::driver::schedule::ready::wake::store;
+use o3::depot::arena::linked::fifo;
 
+use crate::failure::wire::turn::Consumer;
 use crate::protocol::topology::records::consumer::Record;
 use crate::protocol::wire::text::short;
-use crate::state::channel::consumer::delivery::queue::Queue;
-use crate::state::channel::consumer::storage::status::Status;
+use crate::state::channel::consumer::delivery;
 use crate::state::layout;
 
 #[repr(C)]
 pub(in crate::state::channel::consumer) struct Slot<'b, 'd, const ID: u8> {
     pub(in crate::state::channel::consumer) spec: Record<'b, 'd, ID>,
-    pub(in crate::state::channel::consumer) queue: Queue,
+    pub(in crate::state::channel::consumer) queue: fifo::Fifo<delivery::Tag>,
     pub(in crate::state::channel::consumer) waker: store::Entry<'d>,
-    pub(in crate::state::channel::consumer) status: Status,
+    pub(in crate::state::channel::consumer) status: Consumer,
 }
 
 impl<'b, 'd, const ID: u8> Slot<'b, 'd, ID> {
     pub(in crate::state::channel::consumer) fn pending(spec: Record<'b, 'd, ID>) -> Self {
         Self {
             spec,
-            queue: Queue::empty(),
+            queue: fifo::Fifo::new(),
             waker: store::Entry::empty(),
-            status: Status::Pending,
+            status: Consumer::Pending,
         }
     }
 
@@ -29,7 +30,7 @@ impl<'b, 'd, const ID: u8> Slot<'b, 'd, ID> {
     }
 
     pub(in crate::state::channel::consumer) const fn buffered(&self) -> u64 {
-        self.queue.len()
+        self.queue.len() as u64
     }
 }
 

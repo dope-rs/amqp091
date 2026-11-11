@@ -28,7 +28,7 @@ fn roundtrip() {
         .expect("RabbitMQ environment must be configured");
     const QUEUE_DOCUMENT: &str = "https://www.rabbitmq.com/docs/queues";
     const ACK_DOCUMENT: &str = "https://www.rabbitmq.com/docs/confirms";
-    endpoint.try_check::<timing::Throughput, _>(
+    endpoint.try_check::<timing::Throughput, _, _>(
         POLICY,
         |rt| {
             let conn = rt.connection();
@@ -119,7 +119,7 @@ fn publisher_confirms_ack() {
     let endpoint = Endpoint::from_vars(vars::NAMES.map(env::var))
         .expect("RabbitMQ environment must be configured");
     const DOCUMENT: &str = "https://www.rabbitmq.com/docs/confirms";
-    endpoint.try_check::<timing::Throughput, _>(
+    endpoint.try_check::<timing::Throughput, _, _>(
         POLICY,
         |rt| {
             let conn = rt.connection();
@@ -247,7 +247,7 @@ fn recovers_consumer() {
     const QUEUE_DOCUMENT: &str = "https://www.rabbitmq.com/docs/queues";
     endpoint
         .tune(config::Tune::default().heartbeat(2))
-        .try_check::<timing::Throughput, _>(POLICY, |rt| {
+        .try_check::<timing::Throughput, _, _>(POLICY, |rt| {
             let conn = rt.connection();
             let timer = rt.timer();
             let run = dope_fiber::fiber!('_ => async move {

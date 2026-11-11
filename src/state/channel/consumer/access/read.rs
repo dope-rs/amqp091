@@ -1,12 +1,12 @@
 use std::num;
 
 use crate::failure;
+use crate::failure::wire::turn::Consumer;
 use crate::failure::wire::{self, turn};
 use crate::protocol::topology::records::consumer::Record;
 use crate::protocol::wire::text::{resident, short};
 use crate::state::channel::consumer::storage::registry::Registry;
 use crate::state::channel::consumer::storage::slot::Slot;
-use crate::state::channel::consumer::storage::status::Status;
 use crate::state::channel::consumer::{self, replay};
 
 pub(crate) struct Read<'a, 'b, 'd, const ID: u8> {
@@ -26,7 +26,7 @@ impl<'b, 'a, 'd, const ID: u8> Read<'a, 'b, 'd, ID> {
         self.registry.slots.values().any(|slot| {
             matches!(
                 slot.status,
-                Status::Active | Status::Recovering | Status::Replaying
+                Consumer::Active | Consumer::Recovering | Consumer::Replaying
             )
         })
     }
@@ -38,7 +38,7 @@ impl<'b, 'a, 'd, const ID: u8> Read<'a, 'b, 'd, ID> {
         };
         (start..self.registry.slots.capacity()).find_map(|index| {
             let (key, slot) = self.registry.slots.key_value_at(index)?;
-            (slot.status == Status::Recovering)
+            (slot.status == Consumer::Recovering)
                 .then(|| replay::Item::new(index, consumer::Key::from_raw(key), &slot.spec))
         })
     }
@@ -71,11 +71,11 @@ impl<'b, 'a, 'd, const ID: u8> Read<'a, 'b, 'd, ID> {
                 }));
             }
         };
-        if slot.status != Status::Retiring {
+        if slot.status != Consumer::Retiring {
             return Err(failure::Error::Protocol(wire::Fault::ConsumerPhase {
                 consumer: num::NonZero::from(key),
                 expected: turn::Consumer::Retiring,
-                actual: slot.status.phase(),
+                actual: slot.status,
             }));
         }
         slot.spec.try_tag().map_err(failure::Error::Retain)

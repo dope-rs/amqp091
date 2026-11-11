@@ -31,7 +31,8 @@ pub fn with(
     recover: impl recovery::Recover,
     finish: impl for<'owner> FnOnce(Result<(), error::Error<'owner, ()>>),
 ) {
-    Endpoint::new(address, config).try_check::<timing::Throughput, _>(POLICY, test, recover, finish)
+    Endpoint::new(address, config)
+        .try_check::<timing::Throughput, _, _>(POLICY, test, recover, finish)
 }
 
 pub fn queue_declare_ok_frame(channel: u16, name: &[u8]) -> Result<Vec<u8>, Error> {

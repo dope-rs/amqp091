@@ -5,7 +5,6 @@ use crate::common::recovery::client::complete;
 use crate::common::recovery::recover;
 pub mod common;
 
-use dope::core::io::Reclaimed;
 use dope::manifold::timing;
 use dope_amqp091::message::property::Properties;
 use dope_amqp091::{adapter, config};
@@ -75,78 +74,70 @@ fn interleaves_by_channel() {
                 .expect("AMQP config")
                 .capacity(cap);
 
-            {
-                let mut reports = Vec::new();
-                Endpoint::new(broker.addr(), cfg).enter::<timing::Throughput, _, _>(
-                    basic::POLICY,
-                    |rt| {
-                        let conn = rt.connection();
-                        assert!(
-                            rt.block_on(dope_fiber::fiber!('_ => async move {
-                                let ready = conn.observe().ready().await.expect("ready");
-                                let first = conn.channels().open(1).await.expect("first channel");
-                                let second = conn.channels().open(2).await.expect("second channel");
-                                let props = Properties::default();
-                                first
-                                    .basic()
-                                    .publish(adapter::publish::Request {
-                                        exchange: basic::EXCHANGE,
-                                        routing_key: "official.first",
-                                        mandatory: true,
-                                        properties: &props,
-                                        body: FIRST_BODY,
-                                    })
-                                    .await
-                                    .expect("first mandatory publish");
-                                second
-                                    .basic()
-                                    .publish(adapter::publish::Request {
-                                        exchange: basic::EXCHANGE,
-                                        routing_key: "official.empty",
-                                        mandatory: true,
-                                        properties: &props,
-                                        body: &[],
-                                    })
-                                    .await
-                                    .expect("second mandatory publish");
+            Endpoint::new(broker.addr(), cfg).try_check::<timing::Throughput, _, _>(
+                basic::POLICY,
+                |rt| {
+                    let conn = rt.connection();
+                    assert!(
+                        rt.block_on(dope_fiber::fiber!('_ => async move {
+                            let ready = conn.observe().ready().await.expect("ready");
+                            let first = conn.channels().open(1).await.expect("first channel");
+                            let second = conn.channels().open(2).await.expect("second channel");
+                            let props = Properties::default();
+                            first
+                                .basic()
+                                .publish(adapter::publish::Request {
+                                    exchange: basic::EXCHANGE,
+                                    routing_key: "official.first",
+                                    mandatory: true,
+                                    properties: &props,
+                                    body: FIRST_BODY,
+                                })
+                                .await
+                                .expect("first mandatory publish");
+                            second
+                                .basic()
+                                .publish(adapter::publish::Request {
+                                    exchange: basic::EXCHANGE,
+                                    routing_key: "official.empty",
+                                    mandatory: true,
+                                    properties: &props,
+                                    body: &[],
+                                })
+                                .await
+                                .expect("second mandatory publish");
 
-                                let empty = second
-                                    .next_return()
-                                    .await
-                                    .expect("second return state")
-                                    .expect("second basic.return");
-                                assert_eq!(empty.routing_key(), "official.empty");
-                                assert!(empty.body().is_empty());
-                                assert_eq!(empty.body().as_slice(), Some(&[][..]));
+                            let empty = second
+                                .next_return()
+                                .await
+                                .expect("second return state")
+                                .expect("second basic.return");
+                            assert_eq!(empty.routing_key(), "official.empty");
+                            assert!(empty.body().is_empty());
+                            assert_eq!(empty.body().as_slice(), Some(&[][..]));
 
-                                let fragmented = first
-                                    .next_return()
-                                    .await
-                                    .expect("first return state")
-                                    .expect("first basic.return");
-                                assert_eq!(fragmented.routing_key(), "official.first");
-                                assert!(fragmented.body() == FIRST_BODY[..]);
-                                empty.release();
-                                fragmented.release();
-                                conn
-                                    .control()
-                                    .close(ready, 200, "official interleave complete")
-                                    .await
-                                    .expect("connection close");
-                            }))
-                            .is_ok(),
-                            "AMQP fiber must complete"
-                        );
-                    },
-                    |event| reports.push(event),
-                    recover,
-                    complete,
-                );
-                assert!(
-                    matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]),
-                    "unexpected reclaimed AMQP completion: {reports:?}"
-                );
-            };
+                            let fragmented = first
+                                .next_return()
+                                .await
+                                .expect("first return state")
+                                .expect("first basic.return");
+                            assert_eq!(fragmented.routing_key(), "official.first");
+                            assert!(fragmented.body() == FIRST_BODY[..]);
+                            empty.release();
+                            fragmented.release();
+                            conn
+                                .control()
+                                .close(ready, 200, "official interleave complete")
+                                .await
+                                .expect("connection close");
+                        }))
+                        .is_ok(),
+                        "AMQP fiber must complete"
+                    );
+                },
+                recover,
+                complete,
+            );
             broker.finish().expect("scripted AMQP broker completion");
         },
     )
@@ -196,82 +187,74 @@ fn held_returns_block() {
                 .expect("AMQP config")
                 .capacity(cap);
 
-            {
-                let mut reports = Vec::new();
-                Endpoint::new(broker.addr(), cfg).enter::<timing::Throughput, _, _>(
-                    basic::POLICY,
-                    |rt| {
-                        let conn = rt.connection();
-                        assert!(
-                            rt.block_on(dope_fiber::fiber!('_ => async move {
-                                let ready = conn.observe().ready().await.expect("ready");
-                                let channel = conn.channels().open(1).await.expect("channel open");
-                                let props = Properties::default();
-                                for (route, body) in [
-                                    ("official.return.a", b"a".as_slice()),
-                                    ("official.return.b", b"b".as_slice()),
-                                    ("official.return.c", b"c".as_slice()),
-                                ] {
-                                    channel
-                                        .basic()
-                                        .publish(adapter::publish::Request {
-                                            exchange: basic::EXCHANGE,
-                                            routing_key: route,
-                                            mandatory: true,
-                                            properties: &props,
-                                            body,
-                                        })
-                                        .await
-                                        .expect("mandatory publish");
-                                }
-                                let first = channel
-                                    .next_return()
+            Endpoint::new(broker.addr(), cfg).try_check::<timing::Throughput, _, _>(
+                basic::POLICY,
+                |rt| {
+                    let conn = rt.connection();
+                    assert!(
+                        rt.block_on(dope_fiber::fiber!('_ => async move {
+                            let ready = conn.observe().ready().await.expect("ready");
+                            let channel = conn.channels().open(1).await.expect("channel open");
+                            let props = Properties::default();
+                            for (route, body) in [
+                                ("official.return.a", b"a".as_slice()),
+                                ("official.return.b", b"b".as_slice()),
+                                ("official.return.c", b"c".as_slice()),
+                            ] {
+                                channel
+                                    .basic()
+                                    .publish(adapter::publish::Request {
+                                        exchange: basic::EXCHANGE,
+                                        routing_key: route,
+                                        mandatory: true,
+                                        properties: &props,
+                                        body,
+                                    })
                                     .await
-                                    .expect("first return state")
-                                    .expect("first basic.return");
-                                let second = channel
-                                    .next_return()
-                                    .await
-                                    .expect("second return state")
-                                    .expect("second basic.return");
-                                assert_eq!(first.routing_key(), "official.return.a");
-                                assert!(first.body() == b"a"[..]);
-                                assert_eq!(second.routing_key(), "official.return.b");
-                                assert!(second.body() == b"b"[..]);
+                                    .expect("mandatory publish");
+                            }
+                            let first = channel
+                                .next_return()
+                                .await
+                                .expect("first return state")
+                                .expect("first basic.return");
+                            let second = channel
+                                .next_return()
+                                .await
+                                .expect("second return state")
+                                .expect("second basic.return");
+                            assert_eq!(first.routing_key(), "official.return.a");
+                            assert!(first.body() == b"a"[..]);
+                            assert_eq!(second.routing_key(), "official.return.b");
+                            assert!(second.body() == b"b"[..]);
 
-                                let result = Race::new(channel.next_return(), Yield::new()).await;
-                                assert!(matches!(result, Either::Right(())));
+                            let result = Race::new(channel.next_return(), Yield::new()).await;
+                            assert!(matches!(result, Either::Right(())));
 
-                                first.release();
-                                let third = channel
-                                    .next_return()
-                                    .await
-                                    .expect("third return state")
-                                    .expect("third basic.return");
-                                assert_eq!(third.routing_key(), "official.return.c");
-                                assert!(third.body() == b"c"[..]);
-                                assert!(second.body() == b"b"[..]);
-                                second.release();
-                                third.release();
-                                conn
-                                    .control()
-                                    .close(ready, 200, "official return backpressure complete")
-                                    .await
-                                    .expect("connection close");
-                            }))
-                            .is_ok(),
-                            "AMQP fiber must complete"
-                        );
-                    },
-                    |event| reports.push(event),
-                    recover,
-                    complete,
-                );
-                assert!(
-                    matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]),
-                    "unexpected reclaimed AMQP completion: {reports:?}"
-                );
-            };
+                            first.release();
+                            let third = channel
+                                .next_return()
+                                .await
+                                .expect("third return state")
+                                .expect("third basic.return");
+                            assert_eq!(third.routing_key(), "official.return.c");
+                            assert!(third.body() == b"c"[..]);
+                            assert!(second.body() == b"b"[..]);
+                            second.release();
+                            third.release();
+                            conn
+                                .control()
+                                .close(ready, 200, "official return backpressure complete")
+                                .await
+                                .expect("connection close");
+                        }))
+                        .is_ok(),
+                        "AMQP fiber must complete"
+                    );
+                },
+                recover,
+                complete,
+            );
             broker.finish().expect("scripted AMQP broker completion");
         },
     )

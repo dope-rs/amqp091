@@ -65,7 +65,7 @@ fn owns_deadline() {
                 broker.addr(),
                 config::Config::new("guest", "guest").expect("AMQP config"),
             )
-            .try_check::<Profile, _>(
+            .try_check::<Profile, _, _>(
                 POLICY.retire_after(AGE),
                 |rt| {
                     let conn = rt.connection();

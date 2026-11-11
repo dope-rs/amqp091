@@ -46,7 +46,7 @@ fn incomplete_closes_505() {
         },
         |broker| {
             Endpoint::new(broker.addr(), plan::returns().expect("AMQP configuration"))
-                .try_check::<timing::Throughput, _>(
+                .try_check::<timing::Throughput, _, _>(
                 basic::POLICY,
                 |rt| {
                     let conn = rt.connection();
@@ -110,7 +110,7 @@ fn wrong_class_closes_502() {
         },
         |broker| {
             Endpoint::new(broker.addr(), plan::returns().expect("AMQP configuration"))
-                .try_check::<timing::Throughput, _>(
+                .try_check::<timing::Throughput, _, _>(
                 basic::POLICY,
                 |rt| {
                     let conn = rt.connection();

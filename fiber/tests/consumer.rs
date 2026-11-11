@@ -7,7 +7,6 @@ pub mod common;
 
 use std::time::Duration;
 
-use dope::core::io::Reclaimed;
 use dope::manifold::timing;
 use dope_amqp091::message::ack;
 use dope_amqp091::message::field::Table;
@@ -41,45 +40,41 @@ fn retains_collision() {
         },
         |broker| {
             let config = config::Config::new("guest", "guest").expect("config");
-            {
-    let mut reports = Vec::new();
      Endpoint::new(broker.addr(), config)
-                .enter::<timing::Throughput, _, _>(POLICY, |rt| {
-                    let conn = rt.connection();
-                    rt.block_on(dope_fiber::fiber!('_ => async move {
-                        conn.observe().ready().await.expect("ready");
-                        let (error, again) = {
-                            let channel = conn.channels().open(1).await.expect("channel");
-                            let args = Table::new();
-                            let first = channel.basic().consume(basic::Consume {
-                                queue: "q", consumer_tag: "", no_local: false,
-                                ack: ack::Auto, exclusive: false, arguments: &args,
-                            }).await.expect("fresh consumer");
-                            assert_eq!(first.tag(), "shared");
-                            let error = channel.basic().consume(basic::Consume {
-                                queue: "q", consumer_tag: "", no_local: false,
-                                ack: ack::Auto, exclusive: false, arguments: &args,
-                            }).await.err().expect("duplicate tag");
-                            let again = conn.observe().ready().await.expect_err("terminal connection");
-                            (error, again)
-                        };
-                        let (cause, next) = match (&error, &again) {
-                            (failure::Runtime::Terminal(cause), failure::Runtime::Terminal(next)) => Some((cause, next)),
-                            _ => None,
-                        }.expect("shared terminal cause");
-                        assert!(cause.is_same(next));
-                        assert_eq!(cause.generation(), 1);
-                        let tag = match cause.error() {
-                            failure::Error::ConsumerCollision { tag, error: _ } => Some(tag),
-                            _ => None,
-                        }.expect("collision payload");
-                        assert_eq!(tag.as_ref(), "shared");
-                        drop(again);
-                        assert!(matches!(error.error(), failure::Error::ConsumerCollision { tag, .. } if tag.as_ref() == "shared"));
-                    })).expect("fiber");
-                }, |event| reports.push(event), recover, complete);
-    assert!(matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]), "unexpected reclaimed AMQP completion: {reports:?}");
-    };
+            .try_check::<timing::Throughput, _, _>(POLICY, |rt| {
+                let conn = rt.connection();
+                rt.block_on(dope_fiber::fiber!('_ => async move {
+                    conn.observe().ready().await.expect("ready");
+                    let (error, again) = {
+                        let channel = conn.channels().open(1).await.expect("channel");
+                        let args = Table::new();
+                        let first = channel.basic().consume(basic::Consume {
+                            queue: "q", consumer_tag: "", no_local: false,
+                            ack: ack::Auto, exclusive: false, arguments: &args,
+                        }).await.expect("fresh consumer");
+                        assert_eq!(first.tag(), "shared");
+                        let error = channel.basic().consume(basic::Consume {
+                            queue: "q", consumer_tag: "", no_local: false,
+                            ack: ack::Auto, exclusive: false, arguments: &args,
+                        }).await.err().expect("duplicate tag");
+                        let again = conn.observe().ready().await.expect_err("terminal connection");
+                        (error, again)
+                    };
+                    let (cause, next) = match (&error, &again) {
+                        (failure::Runtime::Terminal(cause), failure::Runtime::Terminal(next)) => Some((cause, next)),
+                        _ => None,
+                    }.expect("shared terminal cause");
+                    assert!(cause.is_same(next));
+                    assert_eq!(cause.generation(), 1);
+                    let tag = match cause.error() {
+                        failure::Error::ConsumerCollision { tag, error: _ } => Some(tag),
+                        _ => None,
+                    }.expect("collision payload");
+                    assert_eq!(tag.as_ref(), "shared");
+                    drop(again);
+                    assert!(matches!(error.error(), failure::Error::ConsumerCollision { tag, .. } if tag.as_ref() == "shared"));
+                })).expect("fiber");
+            }, recover, complete);
             broker.finish().expect("broker completion");
         },
     ).expect("broker");
@@ -125,55 +120,51 @@ fn retains_names() {
         },
         |broker| {
             let config = config::Config::new("guest", "guest").expect("config");
-            {
-    let mut reports = Vec::new();
      Endpoint::new(broker.addr(), config)
-                .enter::<timing::Throughput, _, _>(POLICY, |rt| {
-                    let conn = rt.connection();
-                    rt.block_on(dope_fiber::fiber!('_ => async move {
-                        conn.observe().ready().await.expect("ready");
-                        let error = {
-                            let channel = conn.channels().open(1).await.expect("channel");
-                            let args = Table::new();
-                            let mut consumer = channel.basic().consume(basic::Consume {
-                                queue: "q", consumer_tag: "", no_local: false,
-                                ack: ack::Auto, exclusive: false, arguments: &args,
-                            }).await.expect("server-named consumer");
-                            assert_eq!(consumer.tag(), expected);
-                            channel.queue().purge("replay").await
-                                .expect_err("disconnect after retaining the broker identity");
-                            consumer.recv().await.err().expect("mismatched replay tag")
-                        };
-                        let cause = match &error {
-                            failure::Runtime::Terminal(cause) => Some(cause),
-                            failure::Runtime::Local(_) => None,
-                        }.expect("retained terminal cause");
-                        assert_eq!(cause.generation(), 2);
-                        let (retained, actual) = match cause.error() {
-                            failure::Error::ConsumerTag { expected, actual } => Some((expected, actual)),
-                            _ => None,
-                        }.expect("both original text owners");
-                        assert_eq!(retained.as_ref(), expected);
-                        assert_eq!(actual.as_ref(), "observed");
-                        assert!(retained.identity().is_some());
-                        assert!(actual.identity().is_none());
-                        let again = conn.observe().ready().await.expect_err("terminal connection");
-                        let next = match &again {
-                            failure::Runtime::Terminal(next) => Some(next),
-                            failure::Runtime::Local(_) => None,
-                        }.expect("same terminal cause");
-                        assert!(cause.is_same(next));
-                        let ((), counts) = Tracker::measure(|| {
-                            drop(error);
-                            assert!(matches!(again.error(), failure::Error::ConsumerTag { expected: retained, actual }
-                                if retained.as_ref() == expected && actual.as_ref() == "observed"));
-                            drop(again);
-                        });
-                        assert_eq!(counts, [0; 4]);
-                    })).expect("fiber");
-                }, |event| reports.push(event), recover, complete);
-    assert!(matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]), "unexpected reclaimed AMQP completion: {reports:?}");
-    };
+            .try_check::<timing::Throughput, _, _>(POLICY, |rt| {
+                let conn = rt.connection();
+                rt.block_on(dope_fiber::fiber!('_ => async move {
+                    conn.observe().ready().await.expect("ready");
+                    let error = {
+                        let channel = conn.channels().open(1).await.expect("channel");
+                        let args = Table::new();
+                        let mut consumer = channel.basic().consume(basic::Consume {
+                            queue: "q", consumer_tag: "", no_local: false,
+                            ack: ack::Auto, exclusive: false, arguments: &args,
+                        }).await.expect("server-named consumer");
+                        assert_eq!(consumer.tag(), expected);
+                        channel.queue().purge("replay").await
+                            .expect_err("disconnect after retaining the broker identity");
+                        consumer.recv().await.err().expect("mismatched replay tag")
+                    };
+                    let cause = match &error {
+                        failure::Runtime::Terminal(cause) => Some(cause),
+                        failure::Runtime::Local(_) => None,
+                    }.expect("retained terminal cause");
+                    assert_eq!(cause.generation(), 2);
+                    let (retained, actual) = match cause.error() {
+                        failure::Error::ConsumerTag { expected, actual } => Some((expected, actual)),
+                        _ => None,
+                    }.expect("both original text owners");
+                    assert_eq!(retained.as_ref(), expected);
+                    assert_eq!(actual.as_ref(), "observed");
+                    assert!(retained.identity().is_some());
+                    assert!(actual.identity().is_none());
+                    let again = conn.observe().ready().await.expect_err("terminal connection");
+                    let next = match &again {
+                        failure::Runtime::Terminal(next) => Some(next),
+                        failure::Runtime::Local(_) => None,
+                    }.expect("same terminal cause");
+                    assert!(cause.is_same(next));
+                    let ((), counts) = Tracker::measure(|| {
+                        drop(error);
+                        assert!(matches!(again.error(), failure::Error::ConsumerTag { expected: retained, actual }
+                            if retained.as_ref() == expected && actual.as_ref() == "observed"));
+                        drop(again);
+                    });
+                    assert_eq!(counts, [0; 4]);
+                })).expect("fiber");
+            }, recover, complete);
             broker.finish().expect("broker completion");
         },
     ).expect("broker");

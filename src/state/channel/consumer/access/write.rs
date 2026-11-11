@@ -5,6 +5,7 @@ use o3::depot::map::Vacancy;
 use o3::mem::rc;
 
 use crate::failure::wire::turn;
+use crate::failure::wire::turn::Consumer;
 use crate::failure::{self, wire};
 use crate::protocol::topology::records::consumer::Record;
 use crate::protocol::wire::Fingerprint;
@@ -13,7 +14,6 @@ use crate::state::channel::consumer;
 use crate::state::channel::consumer::replay;
 use crate::state::channel::consumer::storage::registry::Registry;
 use crate::state::channel::consumer::storage::slot::Slot;
-use crate::state::channel::consumer::storage::status::Status;
 
 pub(crate) struct Write<'a, 'b, 'd, const ID: u8> {
     registry: &'a mut Registry<'b, 'd, ID>,
@@ -43,12 +43,12 @@ impl<'b, 'd> From<consumer::Mismatch<'b, 'd>> for Fault<'b, 'd> {
 impl<'b, 'd, const ID: u8> Named<'_, 'b, 'd, ID> {
     pub(crate) fn try_commit(self) -> Result<resident::Short<'b, 'd>, rc::Error> {
         let tag = self.entry.get().spec.try_tag()?;
-        self.entry.commit().into_mut().status = Status::Active;
+        self.entry.commit().into_mut().status = Consumer::Active;
         Ok(tag)
     }
 
     pub(crate) fn retire(self) {
-        self.entry.commit().into_mut().status = Status::Retiring;
+        self.entry.commit().into_mut().status = Consumer::Retiring;
     }
 }
 
@@ -57,7 +57,7 @@ impl<'b, 'd, const ID: u8> Fresh<'_, 'b, 'd, '_, ID> {
         let (stored, tag) = writer.commit_pair(self.name, self.entry.hash());
         let slot = self.entry.get_mut();
         slot.spec.set_tag(stored);
-        self.entry.commit().into_mut().status = Status::Active;
+        self.entry.commit().into_mut().status = Consumer::Active;
         tag.into()
     }
 
@@ -65,7 +65,7 @@ impl<'b, 'd, const ID: u8> Fresh<'_, 'b, 'd, '_, ID> {
         let tag = writer.commit(self.name, self.entry.hash());
         let slot = self.entry.get_mut();
         slot.spec.set_tag(tag);
-        self.entry.commit().into_mut().status = Status::Retiring;
+        self.entry.commit().into_mut().status = Consumer::Retiring;
     }
 }
 
@@ -132,11 +132,11 @@ impl<'b, 'a, 'd, const ID: u8> Write<'a, 'b, 'd, ID> {
             .try_entry(key, turn::Step::Pending)
             .map_err(Fault::Protocol)?;
         let slot = entry.get();
-        if slot.status != Status::Pending {
+        if slot.status != Consumer::Pending {
             return Err(Fault::Protocol(wire::Fault::ConsumerPhase {
                 consumer: num::NonZero::from(key),
                 expected: turn::Consumer::Pending,
-                actual: slot.status.phase(),
+                actual: slot.status,
             }));
         }
         let expected = slot.spec.tag();
@@ -184,14 +184,14 @@ impl<'b, 'a, 'd, const ID: u8> Write<'a, 'b, 'd, ID> {
                 }));
             }
         };
-        if entry.get().status != Status::Recovering {
+        if entry.get().status != Consumer::Recovering {
             return Err(failure::Error::Protocol(wire::Fault::ConsumerPhase {
                 consumer: id,
                 expected: turn::Consumer::Recovering,
-                actual: entry.get().status.phase(),
+                actual: entry.get().status,
             }));
         }
-        entry.get_mut().status = Status::Replaying;
+        entry.get_mut().status = Consumer::Replaying;
         Ok(token)
     }
 
@@ -211,19 +211,19 @@ impl<'b, 'a, 'd, const ID: u8> Write<'a, 'b, 'd, ID> {
             .into());
         }
         match entry.get().status {
-            Status::Replaying => {
-                entry.get_mut().status = Status::Active;
+            Consumer::Replaying => {
+                entry.get_mut().status = Consumer::Active;
                 Ok(replay::Completion::Active)
             }
-            Status::Retiring => Ok(replay::Completion::Retiring),
-            Status::Canceled => Ok(replay::Completion::Canceled(
+            Consumer::Retiring => Ok(replay::Completion::Retiring),
+            Consumer::Canceled => Ok(replay::Completion::Canceled(
                 entry.get().spec.try_tag().map_err(Fault::Retain)?,
             )),
-            Status::Pending | Status::Active | Status::Untracked | Status::Recovering => {
+            Consumer::Pending | Consumer::Active | Consumer::Untracked | Consumer::Recovering => {
                 Err(Fault::Protocol(wire::Fault::ConsumerPhase {
                     consumer: num::NonZero::from(key),
                     expected: turn::Consumer::Replaying,
-                    actual: entry.get().status.phase(),
+                    actual: entry.get().status,
                 }))
             }
         }

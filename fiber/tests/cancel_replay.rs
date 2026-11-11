@@ -240,7 +240,7 @@ fn cancels_before_replay_is_ready() {
                         config::Channel::default().methods(1).consumers(2),
                     ),
                 );
-                Endpoint::new(broker.addr(), cfg).try_check::<timing::Throughput, _>(
+                Endpoint::new(broker.addr(), cfg).try_check::<timing::Throughput, _, _>(
                     Policy::new(1, schedule::LIMIT, Duration::from_secs(10)),
                     |rt| {
                         let conn = rt.connection();

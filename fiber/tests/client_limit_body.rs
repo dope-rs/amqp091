@@ -495,7 +495,7 @@ fn rejects_fragment_exhaustion() {
                         .capacity(config::Capacity::default().body(body)),
                 )
                 .shutdown(broker.completion())
-                .try_check::<timing::Throughput, _>(
+                .try_check::<timing::Throughput, _, _>(
                     POLICY,
                     |rt| {
                         let conn = rt.connection();
@@ -576,7 +576,7 @@ fn rejects_fragment_cycle() {
                     .capacity(config::Capacity::default().body(config::Body::new(3, 6, 1))),
             )
             .shutdown(broker.completion())
-            .try_check::<timing::Throughput, _>(
+            .try_check::<timing::Throughput, _, _>(
                 POLICY,
                 |rt| {
                     let conn = rt.connection();
@@ -672,7 +672,7 @@ fn rejects_resident_cycle() {
                         ),
                 )
                 .shutdown(broker.completion())
-                .try_check::<timing::Throughput, _>(
+                .try_check::<timing::Throughput, _, _>(
                     POLICY,
                     |rt| {
                         let conn = rt.connection();

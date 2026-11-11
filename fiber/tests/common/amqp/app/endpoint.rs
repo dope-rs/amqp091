@@ -73,14 +73,14 @@ impl<Q: executor::Build> Endpoint<Q> {
         self
     }
 
-    pub(crate) fn try_check<P, Done>(
+    pub(crate) fn try_check<P, R, Done>(
         self,
         policy: Policy,
         run: impl for<'app, 'life, 'q, 'h, 'p, 'o, 'r, 'c, 'b, 'd> FnOnce(
             &mut Scope<'app, 'life, 'q, 'h, 'p, 'o, 'r, 'c, 'b, 'd, 0, P, Q::Shutdown>,
-        ),
+        ) -> R,
         recover: impl recovery::Recover,
-        finish: impl for<'owner> FnOnce(Result<(), Error<'owner, (), Q::Shutdown>>) -> Done,
+        finish: impl for<'owner> FnOnce(Result<R, Error<'owner, R, Q::Shutdown>>) -> Done,
     ) -> Done
     where
         P: settings::Profile + timing::Policy,
@@ -92,15 +92,15 @@ impl<Q: executor::Build> Endpoint<Q> {
             |event| reports.push(event),
             recover,
             |result| match result {
-                Ok(()) => ControlFlow::Continue(finish),
+                Ok(value) => ControlFlow::Continue((finish, value)),
                 Err(error) => ControlFlow::Break(finish(Err(error))),
             },
         );
         match result {
             ControlFlow::Break(done) => done,
-            ControlFlow::Continue(finish) => {
+            ControlFlow::Continue((finish, value)) => {
                 if matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]) {
-                    finish(Ok(()))
+                    finish(Ok(value))
                 } else {
                     finish(Err(Error::Reports(reports)))
                 }
@@ -108,7 +108,7 @@ impl<Q: executor::Build> Endpoint<Q> {
         }
     }
 
-    pub fn enter<P, R, Done>(
+    fn enter<P, R, Done>(
         self,
         policy: Policy,
         test: impl for<'app, 'life, 'q, 'h, 'p, 'o, 'r, 'c, 'b, 'd> FnOnce(

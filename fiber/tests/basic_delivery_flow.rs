@@ -6,7 +6,6 @@ use crate::common::recovery::client::complete;
 use crate::common::recovery::recover;
 pub mod common;
 
-use dope::core::io::Reclaimed;
 use dope::manifold::timing;
 use dope_amqp091::config;
 use dope_amqp091::message::ack;
@@ -94,76 +93,68 @@ fn interleaves_by_channel() {
                 .expect("AMQP config")
                 .capacity(cap);
 
-            {
-                let mut reports = Vec::new();
-                Endpoint::new(broker.addr(), cfg).enter::<timing::Throughput, _, _>(
-                    basic::POLICY,
-                    |rt| {
-                        let conn = rt.connection();
-                        assert!(
-                            rt.block_on(dope_fiber::fiber!('_ => async move {
-                                let ready = conn.observe().ready().await.expect("ready");
-                                let first = conn.channels().open(1).await.expect("first channel");
-                                let second = conn.channels().open(2).await.expect("second channel");
-                                let args = Table::new();
-                                let mut first_consumer = first
-                                    .basic()
-                                    .consume(channel::basic::Consume {
-                                        queue: FIRST_QUEUE,
-                                        consumer_tag: FIRST_TAG,
-                                        no_local: false,
-                                        ack: ack::Auto,
-                                        exclusive: false,
-                                        arguments: &args,
-                                    })
-                                    .await
-                                    .expect("first consume");
-                                let mut second_consumer = second
-                                    .basic()
-                                    .consume(channel::basic::Consume {
-                                        queue: SECOND_QUEUE,
-                                        consumer_tag: SECOND_TAG,
-                                        no_local: false,
-                                        ack: ack::Auto,
-                                        exclusive: false,
-                                        arguments: &args,
-                                    })
-                                    .await
-                                    .expect("second consume");
+            Endpoint::new(broker.addr(), cfg).try_check::<timing::Throughput, _, _>(
+                basic::POLICY,
+                |rt| {
+                    let conn = rt.connection();
+                    assert!(
+                        rt.block_on(dope_fiber::fiber!('_ => async move {
+                            let ready = conn.observe().ready().await.expect("ready");
+                            let first = conn.channels().open(1).await.expect("first channel");
+                            let second = conn.channels().open(2).await.expect("second channel");
+                            let args = Table::new();
+                            let mut first_consumer = first
+                                .basic()
+                                .consume(channel::basic::Consume {
+                                    queue: FIRST_QUEUE,
+                                    consumer_tag: FIRST_TAG,
+                                    no_local: false,
+                                    ack: ack::Auto,
+                                    exclusive: false,
+                                    arguments: &args,
+                                })
+                                .await
+                                .expect("first consume");
+                            let mut second_consumer = second
+                                .basic()
+                                .consume(channel::basic::Consume {
+                                    queue: SECOND_QUEUE,
+                                    consumer_tag: SECOND_TAG,
+                                    no_local: false,
+                                    ack: ack::Auto,
+                                    exclusive: false,
+                                    arguments: &args,
+                                })
+                                .await
+                                .expect("second consume");
 
-                                let second_delivery = second_consumer
-                                    .recv()
-                                    .await
-                                    .expect("second delivery state")
-                                    .expect("second delivery");
-                                assert_eq!(second_delivery.delivery_tag().get(), 2);
-                                assert!(second_delivery.body().is_empty());
-                                second_delivery.release();
+                            let second_delivery = second_consumer
+                                .recv()
+                                .await
+                                .expect("second delivery state")
+                                .expect("second delivery");
+                            assert_eq!(second_delivery.delivery_tag().get(), 2);
+                            assert!(second_delivery.body().is_empty());
+                            second_delivery.release();
 
-                                let first_delivery = first_consumer
-                                    .recv()
-                                    .await
-                                    .expect("first delivery state")
-                                    .expect("first delivery");
-                                assert_eq!(first_delivery.delivery_tag().get(), 1);
-                                assert_eq!(first_delivery.body().as_slice(), Some(&b"left"[..]));
-                                first_delivery.release();
-                                conn.control().close(ready, 200, "interleaved deliveries released")
-                                    .await.expect("connection close");
-                            }))
-                            .is_ok(),
-                            "AMQP fiber must complete"
-                        );
-                    },
-                    |event| reports.push(event),
-                    recover,
-                    complete,
-                );
-                assert!(
-                    matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]),
-                    "unexpected reclaimed AMQP completion: {reports:?}"
-                );
-            };
+                            let first_delivery = first_consumer
+                                .recv()
+                                .await
+                                .expect("first delivery state")
+                                .expect("first delivery");
+                            assert_eq!(first_delivery.delivery_tag().get(), 1);
+                            assert_eq!(first_delivery.body().as_slice(), Some(&b"left"[..]));
+                            first_delivery.release();
+                            conn.control().close(ready, 200, "interleaved deliveries released")
+                                .await.expect("connection close");
+                        }))
+                        .is_ok(),
+                        "AMQP fiber must complete"
+                    );
+                },
+                recover,
+                complete,
+            );
             broker.finish().expect("scripted AMQP broker completion");
         },
     )
@@ -216,73 +207,65 @@ fn held_deliveries_block() {
                 .expect("AMQP config")
                 .capacity(cap);
 
-            {
-                let mut reports = Vec::new();
-                Endpoint::new(broker.addr(), cfg).enter::<timing::Throughput, _, _>(
-                    basic::POLICY,
-                    |rt| {
-                        let conn = rt.connection();
-                        assert!(
-                            rt.block_on(dope_fiber::fiber!('_ => async move {
-                                let ready = conn.observe().ready().await.expect("ready");
-                                let channel = conn.channels().open(1).await.expect("channel open");
-                                let args = Table::new();
-                                let mut consumer = channel
-                                    .basic()
-                                    .consume(channel::basic::Consume {
-                                        queue: QUEUE,
-                                        consumer_tag: TAG,
-                                        no_local: false,
-                                        ack: ack::Auto,
-                                        exclusive: false,
-                                        arguments: &args,
-                                    })
-                                    .await
-                                    .expect("basic.consume");
+            Endpoint::new(broker.addr(), cfg).try_check::<timing::Throughput, _, _>(
+                basic::POLICY,
+                |rt| {
+                    let conn = rt.connection();
+                    assert!(
+                        rt.block_on(dope_fiber::fiber!('_ => async move {
+                            let ready = conn.observe().ready().await.expect("ready");
+                            let channel = conn.channels().open(1).await.expect("channel open");
+                            let args = Table::new();
+                            let mut consumer = channel
+                                .basic()
+                                .consume(channel::basic::Consume {
+                                    queue: QUEUE,
+                                    consumer_tag: TAG,
+                                    no_local: false,
+                                    ack: ack::Auto,
+                                    exclusive: false,
+                                    arguments: &args,
+                                })
+                                .await
+                                .expect("basic.consume");
 
-                                let mut held = Vec::with_capacity(3);
-                                for tag in 1..=3 {
-                                    let delivery = consumer
-                                        .recv()
-                                        .await
-                                        .expect("delivery state")
-                                        .expect("basic.deliver");
-                                    assert_eq!(delivery.delivery_tag().get(), tag);
-                                    held.push(delivery);
-                                }
-                                let result = Race::new(consumer.recv(), Yield::new()).await;
-                                assert!(matches!(result, Either::Right(())));
-                                held.remove(0).release();
-
-                                let fourth = consumer
+                            let mut held = Vec::with_capacity(3);
+                            for tag in 1..=3 {
+                                let delivery = consumer
                                     .recv()
                                     .await
-                                    .expect("fourth delivery state")
-                                    .expect("fourth basic.deliver");
-                                assert_eq!(fourth.delivery_tag().get(), 4);
-                                assert_eq!(fourth.body().as_slice(), Some(&b"d"[..]));
-                                assert_eq!(held[0].body().as_slice(), Some(&b"b"[..]));
-                                assert_eq!(held[1].body().as_slice(), Some(&b"c"[..]));
-                                fourth.release();
-                                for delivery in held {
-                                    delivery.release();
-                                }
-                                conn.control().close(ready, 200, "held deliveries released")
-                                    .await.expect("connection close");
-                            }))
-                            .is_ok(),
-                            "AMQP fiber must complete"
-                        );
-                    },
-                    |event| reports.push(event),
-                    recover,
-                    complete,
-                );
-                assert!(
-                    matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]),
-                    "unexpected reclaimed AMQP completion: {reports:?}"
-                );
-            };
+                                    .expect("delivery state")
+                                    .expect("basic.deliver");
+                                assert_eq!(delivery.delivery_tag().get(), tag);
+                                held.push(delivery);
+                            }
+                            let result = Race::new(consumer.recv(), Yield::new()).await;
+                            assert!(matches!(result, Either::Right(())));
+                            held.remove(0).release();
+
+                            let fourth = consumer
+                                .recv()
+                                .await
+                                .expect("fourth delivery state")
+                                .expect("fourth basic.deliver");
+                            assert_eq!(fourth.delivery_tag().get(), 4);
+                            assert_eq!(fourth.body().as_slice(), Some(&b"d"[..]));
+                            assert_eq!(held[0].body().as_slice(), Some(&b"b"[..]));
+                            assert_eq!(held[1].body().as_slice(), Some(&b"c"[..]));
+                            fourth.release();
+                            for delivery in held {
+                                delivery.release();
+                            }
+                            conn.control().close(ready, 200, "held deliveries released")
+                                .await.expect("connection close");
+                        }))
+                        .is_ok(),
+                        "AMQP fiber must complete"
+                    );
+                },
+                recover,
+                complete,
+            );
             broker.finish().expect("scripted AMQP broker completion");
         },
     )
@@ -361,84 +344,76 @@ fn cancel_wakes_route() {
                 .expect("AMQP config")
                 .capacity(cap);
 
-            {
-                let mut reports = Vec::new();
-                Endpoint::new(broker.addr(), cfg).enter::<timing::Throughput, _, _>(
-                    basic::POLICY,
-                    |rt| {
-                        let conn = rt.connection();
-                        assert!(rt.block_on(dope_fiber::fiber!('_ => async move {
-                    let ready = conn.observe().ready().await.expect("ready");
-                    let channel = conn.channels().open(1).await.expect("channel open");
-                    let args = Table::new();
-                    let first = channel
-                        .basic()
-                        .consume(channel::basic::Consume {
-                            queue: FIRST_QUEUE,
-                            consumer_tag: FIRST_TAG,
-                            no_local: false,
-                            ack: ack::Auto,
-                            exclusive: false,
-                            arguments: &args,
-                        })
-                        .await
-                        .expect("first basic.consume");
-                    let mut second = channel
-                        .basic()
-                        .consume(channel::basic::Consume {
-                            queue: SECOND_QUEUE,
-                            consumer_tag: SECOND_TAG,
-                            no_local: false,
-                            ack: ack::Auto,
-                            exclusive: false,
-                            arguments: &args,
-                        })
-                        .await
-                        .expect("second basic.consume");
+            Endpoint::new(broker.addr(), cfg).try_check::<timing::Throughput, _, _>(
+                basic::POLICY,
+                |rt| {
+                    let conn = rt.connection();
+                    assert!(rt.block_on(dope_fiber::fiber!('_ => async move {
+                let ready = conn.observe().ready().await.expect("ready");
+                let channel = conn.channels().open(1).await.expect("channel open");
+                let args = Table::new();
+                let first = channel
+                    .basic()
+                    .consume(channel::basic::Consume {
+                        queue: FIRST_QUEUE,
+                        consumer_tag: FIRST_TAG,
+                        no_local: false,
+                        ack: ack::Auto,
+                        exclusive: false,
+                        arguments: &args,
+                    })
+                    .await
+                    .expect("first basic.consume");
+                let mut second = channel
+                    .basic()
+                    .consume(channel::basic::Consume {
+                        queue: SECOND_QUEUE,
+                        consumer_tag: SECOND_TAG,
+                        no_local: false,
+                        ack: ack::Auto,
+                        exclusive: false,
+                        arguments: &args,
+                    })
+                    .await
+                    .expect("second basic.consume");
 
-                    loop {
-                        let snap = first.snapshot().await.expect("first consumer snapshot");
-                        assert_eq!(snap.queue.as_ref(), FIRST_QUEUE);
-                        if snap.buffered_deliveries == 1 {
-                            break;
-                        }
-                        Yield::new().await;
+                loop {
+                    let snap = first.snapshot().await.expect("first consumer snapshot");
+                    assert_eq!(snap.queue.as_ref(), FIRST_QUEUE);
+                    if snap.buffered_deliveries == 1 {
+                        break;
                     }
-                    let snapshot = second.snapshot().await.expect("second consumer snapshot");
-                    assert_eq!(snapshot.queue.as_ref(), SECOND_QUEUE);
-                    assert_eq!(snapshot.buffered_deliveries, 0);
-                    let result = Race::new(second.recv(), Yield::new()).await;
-                    assert!(matches!(result, Either::Right(())));
+                    Yield::new().await;
+                }
+                let snapshot = second.snapshot().await.expect("second consumer snapshot");
+                assert_eq!(snapshot.queue.as_ref(), SECOND_QUEUE);
+                assert_eq!(snapshot.buffered_deliveries, 0);
+                let result = Race::new(second.recv(), Yield::new()).await;
+                assert!(matches!(result, Either::Right(())));
 
-                    drop(first);
-                    let delivery = second
-                        .recv()
-                        .await
-                        .expect("second delivery state")
-                        .expect("second basic.deliver");
-                    assert_eq!(delivery.consumer_tag(), SECOND_TAG);
-                    assert_eq!(delivery.delivery_tag().get(), 2);
-                    assert_eq!(delivery.body().as_slice(), Some(&b"b"[..]));
-                    delivery.release();
+                drop(first);
+                let delivery = second
+                    .recv()
+                    .await
+                    .expect("second delivery state")
+                    .expect("second basic.deliver");
+                assert_eq!(delivery.consumer_tag(), SECOND_TAG);
+                assert_eq!(delivery.delivery_tag().get(), 2);
+                assert_eq!(delivery.body().as_slice(), Some(&b"b"[..]));
+                delivery.release();
 
-                    let result = Race::new(second.recv(), Yield::new()).await;
-                    assert!(matches!(result, Either::Right(())));
-                    // Receiving the second delivery proves retirement freed the only route;
-                    // its Cancel is already queued before this method can be admitted.
-                    channel.queue().purge("canceled").await.expect("cancellation barrier");
-                    conn.control().close(ready, 200, "canceled route released")
-                        .await.expect("connection close");
-                })).is_ok(), "AMQP fiber must complete");
-                    },
-                    |event| reports.push(event),
-                    recover,
-                    complete,
-                );
-                assert!(
-                    matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]),
-                    "unexpected reclaimed AMQP completion: {reports:?}"
-                );
-            };
+                let result = Race::new(second.recv(), Yield::new()).await;
+                assert!(matches!(result, Either::Right(())));
+                // Receiving the second delivery proves retirement freed the only route;
+                // its Cancel is already queued before this method can be admitted.
+                channel.queue().purge("canceled").await.expect("cancellation barrier");
+                conn.control().close(ready, 200, "canceled route released")
+                    .await.expect("connection close");
+            })).is_ok(), "AMQP fiber must complete");
+                },
+                recover,
+                complete,
+            );
             broker.finish().expect("scripted AMQP broker completion");
         },
     )

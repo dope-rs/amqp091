@@ -46,7 +46,8 @@ pub fn with_client(
     recover: impl recovery::Recover,
     finish: impl for<'owner> FnOnce(Result<(), error::Error<'owner, ()>>),
 ) {
-    Endpoint::new(address, config).try_check::<timing::Throughput, _>(POLICY, test, recover, finish)
+    Endpoint::new(address, config)
+        .try_check::<timing::Throughput, _, _>(POLICY, test, recover, finish)
 }
 
 pub fn frame(channel: u16, tag: &str) -> Result<Vec<u8>, Error> {

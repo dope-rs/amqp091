@@ -336,7 +336,7 @@ fn abort_discards_partial_publish() {
                 .capacity(config::Capacity::default().egress(config::Egress::new(1, 1024)));
             Endpoint::new(broker.addr(), cfg)
                 .shutdown(broker.completion())
-                .try_check::<timing::Throughput, _>(
+                .try_check::<timing::Throughput, _, _>(
                     Policy::new(1, 0, Duration::from_secs(10)),
                     |rt| {
                         let conn = rt.connection();

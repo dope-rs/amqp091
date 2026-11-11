@@ -6,10 +6,10 @@ use o3::depot::arena::hash::runtime::{self, entry};
 
 use crate::failure::wire;
 use crate::failure::wire::turn;
+use crate::failure::wire::turn::Consumer;
 use crate::protocol::wire::Fingerprint;
 use crate::state::channel::consumer::delivery::{Claim, Next, Route, Store};
 use crate::state::channel::consumer::storage::slot::Slot;
-use crate::state::channel::consumer::storage::status::Status;
 use crate::state::channel::{self, consumer};
 
 pub(in crate::state::channel::consumer) struct Registry<'b, 'd, const ID: u8> {
@@ -51,7 +51,7 @@ impl<'b, 'd, const ID: u8> Registry<'b, 'd, ID> {
         };
         let slot = entry.into_mut();
         match slot.status {
-            Status::Active | Status::Untracked => {
+            Consumer::Active | Consumer::Untracked => {
                 let (delivery, freed) = values.pop(&mut slot.queue);
                 if let Some(delivery) = delivery {
                     return Next::Delivery { delivery, freed };
@@ -59,8 +59,8 @@ impl<'b, 'd, const ID: u8> Registry<'b, 'd, ID> {
                 wakes.set(&slot.waker, wake);
                 Next::Pending
             }
-            Status::Recovering | Status::Pending | Status::Replaying => Next::Unavailable,
-            Status::Canceled | Status::Retiring => Next::Closed,
+            Consumer::Recovering | Consumer::Pending | Consumer::Replaying => Next::Unavailable,
+            Consumer::Canceled | Consumer::Retiring => Next::Closed,
         }
     }
 
@@ -77,7 +77,7 @@ impl<'b, 'd, const ID: u8> Registry<'b, 'd, ID> {
         else {
             return Some(Route::Discard);
         };
-        if !matches!(entry.get().status, Status::Active | Status::Untracked) {
+        if !matches!(entry.get().status, Consumer::Active | Consumer::Untracked) {
             return Some(Route::Discard);
         }
         values.vacant().map(Route::Queue)
@@ -97,7 +97,7 @@ impl<'b, 'd, const ID: u8> Registry<'b, 'd, ID> {
         else {
             return;
         };
-        if !matches!(entry.get().status, Status::Active | Status::Untracked) {
+        if !matches!(entry.get().status, Consumer::Active | Consumer::Untracked) {
             return;
         }
         let slot = entry.into_mut();
@@ -155,7 +155,7 @@ impl<'b, 'd, const ID: u8> Registry<'b, 'd, ID> {
             entry::Entry::Indexed(entry) => {
                 if !matches!(
                     entry.get().status,
-                    Status::Active | Status::Untracked | Status::Replaying
+                    Consumer::Active | Consumer::Untracked | Consumer::Replaying
                 ) {
                     return None;
                 }
@@ -164,13 +164,13 @@ impl<'b, 'd, const ID: u8> Registry<'b, 'd, ID> {
                 (slot, freed)
             }
             entry::Entry::Staged(entry) => {
-                if entry.get().status != Status::Canceled || !replay() {
+                if entry.get().status != Consumer::Canceled || !replay() {
                     return None;
                 }
                 (entry.into_mut(), channel::Freed::Available)
             }
         };
-        slot.status = Status::Retiring;
+        slot.status = Consumer::Retiring;
         Some((slot, freed))
     }
 
@@ -186,12 +186,12 @@ impl<'b, 'd, const ID: u8> Registry<'b, 'd, ID> {
             })?;
         if !matches!(
             entry.get().status,
-            Status::Active | Status::Untracked | Status::Recovering | Status::Replaying
+            Consumer::Active | Consumer::Untracked | Consumer::Recovering | Consumer::Replaying
         ) {
             return None;
         }
         let slot = entry.unindex().into_mut();
-        slot.status = Status::Canceled;
+        slot.status = Consumer::Canceled;
         let freed = store.drain(&mut slot.queue);
         Some((slot, freed))
     }

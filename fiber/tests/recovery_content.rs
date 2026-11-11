@@ -48,7 +48,7 @@ fn rejects_partial_body_credit_cycle() {
         |broker| {
             let config = config::Config::new("guest", "guest").expect("config")
                 .capacity(config::Capacity::default().body(config::Body::default().buffer(6)));
-            Endpoint::new(broker.addr(), config).shutdown(broker.completion()).try_check::<timing::Throughput, _>(POLICY, |rt| {
+            Endpoint::new(broker.addr(), config).shutdown(broker.completion()).try_check::<timing::Throughput, _, _>(POLICY, |rt| {
                 let conn = rt.connection();
                 rt.until_shutdown(dope_fiber::fiber!('_ => async move {
                     let ready = conn.observe().ready().await.expect("ready");

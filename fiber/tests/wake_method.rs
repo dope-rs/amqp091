@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use common::wake::Purge;
 use dope::core::driver::schedule::ready::wake::fanout;
-use dope::core::io::Reclaimed;
 use dope::manifold::timing;
 use dope_amqp091::adapter::Poll as _;
 use dope_amqp091::message::ack;
@@ -237,7 +236,7 @@ fn closes_abandoned_open_before_new_method() {
                     .capacity(config::Capacity::default()
                         .channel(config::Channel::default().methods(1))
                         .egress(config::Egress::new(3, 4096)));
-                Endpoint::new(broker.addr(), config).try_check::<timing::Throughput, _>(
+                Endpoint::new(broker.addr(), config).try_check::<timing::Throughput, _, _>(
                     Policy::new(1, 16, Duration::from_secs(10)),
                     |scope| {
                         let amqp = adapter::Adapter::new(scope.port());
@@ -348,7 +347,7 @@ fn releases_abandoned_channel_after_confirm_failure() {
                     .channels(1)
                     .channel(config::Channel::default().methods(2).confirms(1)),
             );
-            Endpoint::new(broker.addr(), config).try_check::<timing::Throughput, _>(
+            Endpoint::new(broker.addr(), config).try_check::<timing::Throughput, _, _>(
                 Policy::new(1, 16, Duration::from_secs(10)),
                 |scope| {
                     let amqp = adapter::Adapter::new(scope.port());
@@ -617,7 +616,7 @@ fn keeps_publish_credit_while_close_waits_for_input() {
             let config = config::Config::new("guest", "guest")
                 .expect("config")
                 .capacity(config::Capacity::default().egress(config::Egress::new(1, 4096)));
-            Endpoint::new(broker.addr(), config).try_check::<timing::Throughput, _>(
+            Endpoint::new(broker.addr(), config).try_check::<timing::Throughput, _, _>(
                 Policy::new(1, 16, Duration::from_secs(10)),
                 |scope| {
                     let amqp = adapter::Adapter::new(scope.port());
@@ -734,81 +733,73 @@ fn consumes_once() {
                 config::Capacity::default().channel(config::Channel::default().methods(1)),
             );
             let policy = Policy::new(1, 16, Duration::from_secs(10));
-            {
-                let mut reports = Vec::new();
-                Endpoint::new(broker.addr(), config).enter::<timing::Throughput, _, _>(
-                    policy,
-                    |scope| {
-                        let amqp = adapter::Adapter::new(scope.port());
-                        let target = scope
-                            .block_on(Ready {
-                                state: amqp.connection().observe(),
-                                wait: fanout::Registration::new(),
-                            })
-                            .expect("fiber drive")
-                            .expect("method connection must become ready");
-                        let lease = scope
-                            .block_on(Open {
-                                adapter: amqp,
+            Endpoint::new(broker.addr(), config).try_check::<timing::Throughput, _, _>(
+                policy,
+                |scope| {
+                    let amqp = adapter::Adapter::new(scope.port());
+                    let target = scope
+                        .block_on(Ready {
+                            state: amqp.connection().observe(),
+                            wait: fanout::Registration::new(),
+                        })
+                        .expect("fiber drive")
+                        .expect("method connection must become ready");
+                    let lease = scope
+                        .block_on(Open {
+                            adapter: amqp,
+                            target,
+                            lease: None,
+                            call: None,
+                        })
+                        .expect("fiber drive")
+                        .expect("method channel must open");
+                    let mut first = scope
+                        .block_on(Once::new(move |local| {
+                            amqp.methods().reserve(
+                                local,
                                 target,
-                                lease: None,
-                                call: None,
-                            })
-                            .expect("fiber drive")
-                            .expect("method channel must open");
-                        let mut first = scope
-                            .block_on(Once::new(move |local| {
-                                amqp.methods().reserve(
-                                    local,
-                                    target,
-                                    lease,
-                                    queue::Purge {
-                                        queue: short::Name::EMPTY,
-                                    },
-                                )
-                            }))
-                            .expect("fiber drive")
-                            .expect("first method must reserve the sole slot");
-                        let reply = scope
-                            .block_on(Purge { call: &mut first })
-                            .expect("fiber drive")
-                            .expect("first method must complete");
-                        assert_eq!(reply.message_count, 7);
-                        let mut next = scope
-                            .block_on(Once::new(move |local| {
-                                amqp.methods().reserve(
-                                    local,
-                                    target,
-                                    lease,
-                                    queue::Purge {
-                                        queue: short::Name::EMPTY,
-                                    },
-                                )
-                            }))
-                            .expect("fiber drive")
-                            .expect("completion must release the sole slot");
-                        assert!(matches!(
-                            scope.block_on(Purge { call: &mut first }),
-                            Ok(Err(Fault::Runtime(failure::Runtime::Local(
-                                failure::Error::Polled
-                            ))))
-                        ));
-                        drop(first);
-                        let reply = scope
-                            .block_on(Purge { call: &mut next })
-                            .expect("fiber drive")
-                            .expect("the reused slot must retain its own response");
-                        assert_eq!(reply.message_count, 11);
-                    },
-                    |event| reports.push(event),
-                    recover,
-                    complete,
-                );
-                assert!(
-                    matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]),
-                    "unexpected reclaimed AMQP completion: {reports:?}"
-                );
-            };
+                                lease,
+                                queue::Purge {
+                                    queue: short::Name::EMPTY,
+                                },
+                            )
+                        }))
+                        .expect("fiber drive")
+                        .expect("first method must reserve the sole slot");
+                    let reply = scope
+                        .block_on(Purge { call: &mut first })
+                        .expect("fiber drive")
+                        .expect("first method must complete");
+                    assert_eq!(reply.message_count, 7);
+                    let mut next = scope
+                        .block_on(Once::new(move |local| {
+                            amqp.methods().reserve(
+                                local,
+                                target,
+                                lease,
+                                queue::Purge {
+                                    queue: short::Name::EMPTY,
+                                },
+                            )
+                        }))
+                        .expect("fiber drive")
+                        .expect("completion must release the sole slot");
+                    assert!(matches!(
+                        scope.block_on(Purge { call: &mut first }),
+                        Ok(Err(Fault::Runtime(failure::Runtime::Local(
+                            failure::Error::Polled
+                        ))))
+                    ));
+                    drop(first);
+                    let reply = scope
+                        .block_on(Purge { call: &mut next })
+                        .expect("fiber drive")
+                        .expect("the reused slot must retain its own response");
+                    assert_eq!(reply.message_count, 11);
+                },
+                recover,
+                complete,
+            );
             assert!(matches!(broker.finish(), Ok(Ok(()))));
         },
     )
@@ -859,7 +850,7 @@ fn drops_unbound_consumer() {
                     config::Capacity::default()
                         .channel(config::Channel::default().methods(1).consumers(1)),
                 );
-            Endpoint::new(broker.addr(), config).try_check::<timing::Throughput, _>(
+            Endpoint::new(broker.addr(), config).try_check::<timing::Throughput, _, _>(
                 Policy::new(1, 16, Duration::from_secs(10)),
                 |scope| {
                     let amqp = adapter::Adapter::new(scope.port());

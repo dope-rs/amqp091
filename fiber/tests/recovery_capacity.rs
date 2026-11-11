@@ -52,7 +52,7 @@ fn rejects_reconnect() {
                 .capacity(config::Capacity::default().causes(1));
             Endpoint::new(broker.addr(), config)
                 .shutdown(broker.completion())
-                .try_check::<timing::Throughput, _>(
+                .try_check::<timing::Throughput, _, _>(
                 POLICY,
                 |rt| {
                     let conn = rt.connection();

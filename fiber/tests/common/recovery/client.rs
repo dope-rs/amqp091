@@ -35,7 +35,8 @@ pub fn with_config(
     recover: impl recovery::Recover,
     finish: impl for<'owner> FnOnce(Result<(), error::Error<'owner, ()>>),
 ) {
-    Endpoint::new(address, config).try_check::<timing::Throughput, _>(POLICY, test, recover, finish)
+    Endpoint::new(address, config)
+        .try_check::<timing::Throughput, _, _>(POLICY, test, recover, finish)
 }
 
 pub fn complete<Q>(result: Result<(), error::Error<'_, (), Q>>) {

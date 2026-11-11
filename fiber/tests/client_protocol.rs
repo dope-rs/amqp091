@@ -171,7 +171,7 @@ fn rejects_server_version() {
             config::Config::new("guest", "guest").expect("config"),
         )
         .shutdown(broker.completion())
-        .try_check::<timing::Throughput, _>(
+        .try_check::<timing::Throughput, _, _>(
             POLICY,
             |rt| {
                 let conn = rt.connection();
@@ -266,7 +266,7 @@ fn rejects_retained_method() {
             config::Config::new("guest", "guest").expect("config"),
         )
         .shutdown(broker.completion())
-        .try_check::<timing::Throughput, _>(
+        .try_check::<timing::Throughput, _, _>(
             POLICY,
             |rt| {
                 let conn = rt.connection();
@@ -309,7 +309,7 @@ fn rejects_handshake_flow() {
             config::Config::new("guest", "guest").expect("config"),
         )
         .shutdown(broker.completion())
-        .try_check::<timing::Throughput, _>(
+        .try_check::<timing::Throughput, _, _>(
             POLICY,
             |rt| {
                 let conn = rt.connection();
@@ -352,7 +352,7 @@ fn rejects_server_locale() {
             config::Config::new("guest", "guest").expect("config"),
         )
         .shutdown(broker.completion())
-        .try_check::<timing::Throughput, _>(
+        .try_check::<timing::Throughput, _, _>(
             POLICY,
             |rt| {
                 let conn = rt.connection();
@@ -388,7 +388,7 @@ fn close_is_terminal() {
             config::Config::new("guest", "guest").expect("config"),
         )
         .shutdown(broker.completion())
-        .try_check::<timing::Throughput, _>(
+        .try_check::<timing::Throughput, _, _>(
             POLICY,
             |rt| {
                 let conn = rt.connection();
@@ -436,7 +436,7 @@ fn close_loss_is_terminal() {
             config::Config::new("guest", "guest").expect("config"),
         )
         .shutdown(broker.completion())
-        .try_check::<timing::Throughput, _>(
+        .try_check::<timing::Throughput, _, _>(
             POLICY,
             |rt| {
                 let conn = rt.connection();

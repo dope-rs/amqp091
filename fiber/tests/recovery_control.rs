@@ -147,7 +147,7 @@ fn times_out_startup_before_ready() {
                 let config = config::Config::new("guest", "guest")
                     .expect("AMQP config")
                     .tune(config::Tune::default().heartbeat(0));
-                Endpoint::new(broker.addr(), config).try_check::<Startup, _>(
+                Endpoint::new(broker.addr(), config).try_check::<Startup, _, _>(
                     POLICY,
                     |rt| {
                         let timer = rt.timer();

@@ -5,7 +5,6 @@ use crate::common::recovery::client::complete;
 use crate::common::recovery::recover;
 pub mod common;
 
-use dope::core::io::Reclaimed;
 use dope::manifold::timing;
 use dope_amqp091::message::Builder;
 use dope_amqp091::protocol::Confirmation;
@@ -65,65 +64,57 @@ fn precedes_confirm() {
                 .expect("AMQP config")
                 .capacity(capacity);
 
-            {
-                let mut reports = Vec::new();
-                Endpoint::new(broker.addr(), config).enter::<timing::Throughput, _, _>(
-                    basic::POLICY,
-                    |rt| {
-                        let conn = rt.connection();
-                        assert!(rt.block_on(dope_fiber::fiber!('_ => async move {
-                    let ready = conn.observe().ready().await.expect("ready");
-                    let channel = conn.channels().open(1).await.expect("channel open");
-                    let confirms = channel.confirm().select().await.expect("confirm.select");
-                    let properties = Builder::default()
-                        .content_type("obsolete")
-                        .expect("initial content type")
-                        .content_type(returned::CONTENT_TYPE)
-                        .expect("content type")
-                        .build();
-                    let outcome = confirms
-                        .publish(adapter::publish::Request {
-                            exchange: basic::EXCHANGE,
-                            routing_key: basic::ROUTING_KEY,
-                            mandatory: true,
-                            properties: &properties,
-                            body: basic::BODY,
-                        })
-                        .await
-                        .expect("mandatory publish confirm");
-                    assert_eq!(outcome, Confirmation::Ack);
+            Endpoint::new(broker.addr(), config).try_check::<timing::Throughput, _, _>(
+                basic::POLICY,
+                |rt| {
+                    let conn = rt.connection();
+                    assert!(rt.block_on(dope_fiber::fiber!('_ => async move {
+                let ready = conn.observe().ready().await.expect("ready");
+                let channel = conn.channels().open(1).await.expect("channel open");
+                let confirms = channel.confirm().select().await.expect("confirm.select");
+                let properties = Builder::default()
+                    .content_type("obsolete")
+                    .expect("initial content type")
+                    .content_type(returned::CONTENT_TYPE)
+                    .expect("content type")
+                    .build();
+                let outcome = confirms
+                    .publish(adapter::publish::Request {
+                        exchange: basic::EXCHANGE,
+                        routing_key: basic::ROUTING_KEY,
+                        mandatory: true,
+                        properties: &properties,
+                        body: basic::BODY,
+                    })
+                    .await
+                    .expect("mandatory publish confirm");
+                assert_eq!(outcome, Confirmation::Ack);
 
-                    let returned = channel
-                        .next_return()
-                        .await
-                        .expect("return state")
-                        .expect("basic.return");
-                    assert_eq!(returned.reply_code(), returned::REPLY_CODE);
-                    assert_eq!(returned.reply_text(), returned::REPLY_TEXT);
-                    assert_eq!(returned.exchange(), basic::EXCHANGE);
-                    assert_eq!(returned.routing_key(), basic::ROUTING_KEY);
-                    assert_eq!(
-                        returned.properties().content_type(),
-                        Some(returned::CONTENT_TYPE)
-                    );
-                    assert!(returned.body() == basic::BODY[..]);
-                    returned.release();
-                    conn
-                        .control()
-                        .close(ready, 200, "official return complete")
-                        .await
-                        .expect("connection close");
-                })).is_ok(), "AMQP fiber must complete");
-                    },
-                    |event| reports.push(event),
-                    recover,
-                    complete,
+                let returned = channel
+                    .next_return()
+                    .await
+                    .expect("return state")
+                    .expect("basic.return");
+                assert_eq!(returned.reply_code(), returned::REPLY_CODE);
+                assert_eq!(returned.reply_text(), returned::REPLY_TEXT);
+                assert_eq!(returned.exchange(), basic::EXCHANGE);
+                assert_eq!(returned.routing_key(), basic::ROUTING_KEY);
+                assert_eq!(
+                    returned.properties().content_type(),
+                    Some(returned::CONTENT_TYPE)
                 );
-                assert!(
-                    matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]),
-                    "unexpected reclaimed AMQP completion: {reports:?}"
-                );
-            };
+                assert!(returned.body() == basic::BODY[..]);
+                returned.release();
+                conn
+                    .control()
+                    .close(ready, 200, "official return complete")
+                    .await
+                    .expect("connection close");
+            })).is_ok(), "AMQP fiber must complete");
+                },
+                recover,
+                complete,
+            );
             broker.finish().expect("scripted AMQP broker completion");
         },
     )

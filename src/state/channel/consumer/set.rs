@@ -3,13 +3,13 @@ use dope::core::driver::{self};
 use o3::alloc;
 use wake::store;
 
+use crate::failure::wire::turn::Consumer;
 use crate::protocol::topology::records::consumer::Record;
 use crate::protocol::topology::records::queue;
 use crate::protocol::wire::text::short;
 use crate::state::channel::consumer::access::{Read, Write};
 use crate::state::channel::consumer::delivery::{Claim, Next, Route, Store};
 use crate::state::channel::consumer::storage::registry::Registry;
-use crate::state::channel::consumer::storage::status::Status;
 use crate::state::channel::{self, consumer};
 
 pub(crate) struct Set<'b, 'd, const ID: u8> {
@@ -109,7 +109,7 @@ impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
                 let Some(entry) = self.registry.slots.entry(key.raw()) else {
                     return;
                 };
-                if entry.get().status == Status::Pending {
+                if entry.get().status == Consumer::Pending {
                     entry.discard();
                 }
             }
@@ -117,8 +117,8 @@ impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
                 let Some(mut entry) = self.registry.slots.entry(key.raw()) else {
                     return;
                 };
-                if entry.get().status == Status::Replaying {
-                    entry.get_mut().status = Status::Recovering;
+                if entry.get().status == Consumer::Replaying {
+                    entry.get_mut().status = Consumer::Recovering;
                 }
             }
         }
@@ -146,20 +146,20 @@ impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
                 continue;
             };
             match entry.get().status {
-                Status::Active => {
-                    entry.get_mut().status = Status::Recovering;
+                Consumer::Active => {
+                    entry.get_mut().status = Consumer::Recovering;
                 }
-                Status::Untracked | Status::Replaying => {
+                Consumer::Untracked | Consumer::Replaying => {
                     let mut staged = entry.unindex();
-                    staged.get_mut().status = Status::Canceled;
+                    staged.get_mut().status = Consumer::Canceled;
                     self.wakes.wake_once(&staged.get_mut().waker);
                     continue;
                 }
-                Status::Pending => {
+                Consumer::Pending => {
                     entry.discard();
                     continue;
                 }
-                Status::Recovering | Status::Canceled | Status::Retiring => {}
+                Consumer::Recovering | Consumer::Canceled | Consumer::Retiring => {}
             }
             self.wakes.wake_once(&entry.get_mut().waker);
         }
@@ -186,14 +186,14 @@ fn forget_if<'b, 'd, const ID: u8>(
             continue;
         }
         match entry.get().status {
-            Status::Active => {
-                entry.get_mut().status = Status::Untracked;
+            Consumer::Active => {
+                entry.get_mut().status = Consumer::Untracked;
             }
-            Status::Recovering | Status::Replaying => {
+            Consumer::Recovering | Consumer::Replaying => {
                 let mut staged = entry.unindex();
-                staged.get_mut().status = Status::Canceled;
+                staged.get_mut().status = Consumer::Canceled;
             }
-            Status::Pending | Status::Untracked | Status::Canceled | Status::Retiring => {}
+            Consumer::Pending | Consumer::Untracked | Consumer::Canceled | Consumer::Retiring => {}
         }
     }
 }

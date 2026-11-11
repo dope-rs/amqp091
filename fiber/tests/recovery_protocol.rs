@@ -176,7 +176,7 @@ fn stops_replay_when_protocol_close_starts() {
                 .tune(config::Tune::default().heartbeat(1));
             Endpoint::new(broker.addr(), config)
                 .shutdown(broker.completion())
-                .try_check::<timing::Throughput, _>(
+                .try_check::<timing::Throughput, _, _>(
                     POLICY,
                     |rt| {
                         let conn = rt.connection();
@@ -217,7 +217,7 @@ fn rejects_invalid_end() {
             config::Config::new("guest", "guest").expect("config"),
         )
         .shutdown(broker.completion())
-        .try_check::<timing::Throughput, _>(
+        .try_check::<timing::Throughput, _, _>(
             POLICY,
             |rt| {
                 let conn = rt.connection();
@@ -258,7 +258,7 @@ fn stops_without_redial() {
             config::Config::new("guest", "guest").expect("config"),
         )
         .shutdown(broker.completion())
-        .try_check::<timing::Throughput, _>(
+        .try_check::<timing::Throughput, _, _>(
             POLICY,
             |rt| {
                 let conn = rt.connection();

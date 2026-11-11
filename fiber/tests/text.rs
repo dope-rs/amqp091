@@ -7,7 +7,6 @@ pub mod common;
 
 use std::time::Duration;
 
-use dope::core::io::Reclaimed;
 use dope::manifold::timing;
 use dope_amqp091::failure::wire;
 use dope_amqp091::protocol::wire::reader;
@@ -44,42 +43,32 @@ fn close(
             let config = (config::Config::new("guest", "guest"))
                 .expect("the fixture credentials must fit the wire limits");
             let policy = Policy::new(1, 8, Duration::from_secs(5));
-            let allocs = {
-                let mut reports = Vec::new();
-                let allocs = Endpoint::new(broker.addr(), config)
-                    .enter::<timing::Throughput, _, _>(
-                        policy,
-                        |scope| {
-                            let conn = scope.connection();
-                            ((scope.block_on(conn.observe().ready()))
-                                .expect("the server must complete its handshake before closing"))
-                            .expect("the server must complete its handshake before closing");
-                            let ((), allocs) = Tracker::measure(|| {
-                                let observed =
-                                    scope.block_on(dope_fiber::fiber!('_ => async move {
-                                        let error = conn.channels().open(1).await
-                                            .err().expect("server close rejects the open request");
-                                        verify(error.error());
-                                    }));
-                                assert!(observed.is_ok(), "close observation failed: {observed:?}");
-                            });
-                            allocs[0]
-                        },
-                        |event| reports.push(event),
-                        recover,
-                        |result| {
-                            *result
-                                .as_ref()
-                                .map_err(|error| error.kind())
-                                .expect("endpoint completion")
-                        },
-                    );
-                assert!(
-                    matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]),
-                    "unexpected reclaimed AMQP completion: {reports:?}"
+            let allocs = Endpoint::new(broker.addr(), config)
+                .try_check::<timing::Throughput, _, _>(
+                    policy,
+                    |scope| {
+                        let conn = scope.connection();
+                        ((scope.block_on(conn.observe().ready()))
+                            .expect("the server must complete its handshake before closing"))
+                        .expect("the server must complete its handshake before closing");
+                        let ((), allocs) = Tracker::measure(|| {
+                            let observed = scope.block_on(dope_fiber::fiber!('_ => async move {
+                                let error = conn.channels().open(1).await
+                                    .err().expect("server close rejects the open request");
+                                verify(error.error());
+                            }));
+                            assert!(observed.is_ok(), "close observation failed: {observed:?}");
+                        });
+                        allocs[0]
+                    },
+                    recover,
+                    |result| {
+                        *result
+                            .as_ref()
+                            .map_err(|error| error.kind())
+                            .expect("endpoint completion")
+                    },
                 );
-                allocs
-            };
             assert!(broker.finish().is_ok());
             allocs
         },

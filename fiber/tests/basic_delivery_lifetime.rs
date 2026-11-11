@@ -6,7 +6,6 @@ use crate::common::recovery::client::complete;
 use crate::common::recovery::recover;
 pub mod common;
 
-use dope::core::io::Reclaimed;
 use dope::manifold::timing;
 use dope_amqp091::config;
 use dope_amqp091::message::ack;
@@ -91,56 +90,48 @@ fn outlives_consumer() {
                 .expect("AMQP config")
                 .capacity(capacity);
 
-            {
-                let mut reports = Vec::new();
-                Endpoint::new(broker.addr(), config).enter::<timing::Throughput, _, _>(
-                    basic::POLICY,
-                    |runtime| {
-                        let conn = runtime.connection();
-                        assert!(runtime.block_on(dope_fiber::fiber!('_ => async move {
-                    let ready = conn.observe().ready().await.expect("ready");
-                    let channel = conn.channels().open(1).await.expect("channel open");
-                    let arguments = Table::new();
-                    let mut consumer = channel
-                        .basic()
-                        .consume(channel::basic::Consume {
-                            queue: QUEUE,
-                            consumer_tag: TAG,
-                            no_local: false,
-                            ack: ack::Manual,
-                            exclusive: false,
-                            arguments: &arguments,
-                        })
-                        .await
-                        .expect("basic.consume");
-                    assert_eq!(consumer.tag(), TAG);
+            Endpoint::new(broker.addr(), config).try_check::<timing::Throughput, _, _>(
+                basic::POLICY,
+                |runtime| {
+                    let conn = runtime.connection();
+                    assert!(runtime.block_on(dope_fiber::fiber!('_ => async move {
+                let ready = conn.observe().ready().await.expect("ready");
+                let channel = conn.channels().open(1).await.expect("channel open");
+                let arguments = Table::new();
+                let mut consumer = channel
+                    .basic()
+                    .consume(channel::basic::Consume {
+                        queue: QUEUE,
+                        consumer_tag: TAG,
+                        no_local: false,
+                        ack: ack::Manual,
+                        exclusive: false,
+                        arguments: &arguments,
+                    })
+                    .await
+                    .expect("basic.consume");
+                assert_eq!(consumer.tag(), TAG);
 
-                    let delivery = consumer
-                        .recv()
-                        .await
-                        .expect("delivery state")
-                        .expect("basic.deliver");
-                    drop(consumer);
-                    assert_eq!(delivery.consumer_tag(), TAG);
-                    assert_eq!(delivery.exchange(), basic::EXCHANGE);
-                    assert_eq!(delivery.routing_key(), basic::ROUTING_KEY);
-                    assert_eq!(delivery.body().try_to_vec().expect("body copy"), basic::BODY);
-                    let settled = delivery.settle(Disposition::Ack).await;
-                    assert!(settled.is_ok(), "basic.ack");
+                let delivery = consumer
+                    .recv()
+                    .await
+                    .expect("delivery state")
+                    .expect("basic.deliver");
+                drop(consumer);
+                assert_eq!(delivery.consumer_tag(), TAG);
+                assert_eq!(delivery.exchange(), basic::EXCHANGE);
+                assert_eq!(delivery.routing_key(), basic::ROUTING_KEY);
+                assert_eq!(delivery.body().try_to_vec().expect("body copy"), basic::BODY);
+                let settled = delivery.settle(Disposition::Ack).await;
+                assert!(settled.is_ok(), "basic.ack");
 
-                    conn.control().close(ready, 200, "retained delivery settled")
-                        .await.expect("connection close");
-                })).is_ok(), "AMQP fiber must complete");
-                    },
-                    |event| reports.push(event),
-                    recover,
-                    complete,
-                );
-                assert!(
-                    matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]),
-                    "unexpected reclaimed AMQP completion: {reports:?}"
-                );
-            };
+                conn.control().close(ready, 200, "retained delivery settled")
+                    .await.expect("connection close");
+            })).is_ok(), "AMQP fiber must complete");
+                },
+                recover,
+                complete,
+            );
             broker.finish().expect("scripted AMQP broker completion");
         },
     )
@@ -189,51 +180,48 @@ fn empty_ends_at_header() {
                 .expect("AMQP config")
                 .capacity(capacity);
 
-            {
-                let mut reports = Vec::new();
-                Endpoint::new(broker.addr(), config).enter::<timing::Throughput, _, _>(
-                    basic::POLICY,
-                    |runtime| {
-                        let conn = runtime.connection();
-                        assert!(runtime.block_on(dope_fiber::fiber!('_ => async move {
-                    let ready = conn.observe().ready().await.expect("ready");
-                    let channel = conn.channels().open(1).await.expect("channel open");
-                    let arguments = Table::new();
-                    let mut consumer = channel
-                        .basic()
-                        .consume(channel::basic::Consume {
-                            queue: QUEUE,
-                            consumer_tag: TAG,
-                            no_local: false,
-                            ack: ack::Auto,
-                            exclusive: false,
-                            arguments: &arguments,
-                        })
-                        .await
-                        .expect("basic.consume");
+            Endpoint::new(broker.addr(), config).try_check::<timing::Throughput, _, _>(
+                basic::POLICY,
+                |runtime| {
+                    let conn = runtime.connection();
+                    assert!(
+                        runtime
+                            .block_on(dope_fiber::fiber!('_ => async move {
+                                let ready = conn.observe().ready().await.expect("ready");
+                                let channel = conn.channels().open(1).await.expect("channel open");
+                                let arguments = Table::new();
+                                let mut consumer = channel
+                                    .basic()
+                                    .consume(channel::basic::Consume {
+                                        queue: QUEUE,
+                                        consumer_tag: TAG,
+                                        no_local: false,
+                                        ack: ack::Auto,
+                                        exclusive: false,
+                                        arguments: &arguments,
+                                    })
+                                    .await
+                                    .expect("basic.consume");
 
-                    let delivery = consumer
-                        .recv()
-                        .await
-                        .expect("delivery state")
-                        .expect("empty basic.deliver");
-                    assert_eq!(delivery.delivery_tag().get(), 2);
-                    assert!(delivery.body().is_empty());
-                    assert_eq!(delivery.body().as_slice(), Some(&[][..]));
-                    delivery.release();
-                    conn.control().close(ready, 200, "empty delivery released")
-                        .await.expect("connection close");
-                })).is_ok(), "AMQP fiber must complete");
-                    },
-                    |event| reports.push(event),
-                    recover,
-                    complete,
-                );
-                assert!(
-                    matches!(reports.as_slice(), [] | [Reclaimed::Shutdown]),
-                    "unexpected reclaimed AMQP completion: {reports:?}"
-                );
-            };
+                                let delivery = consumer
+                                    .recv()
+                                    .await
+                                    .expect("delivery state")
+                                    .expect("empty basic.deliver");
+                                assert_eq!(delivery.delivery_tag().get(), 2);
+                                assert!(delivery.body().is_empty());
+                                assert_eq!(delivery.body().as_slice(), Some(&[][..]));
+                                delivery.release();
+                                conn.control().close(ready, 200, "empty delivery released")
+                                    .await.expect("connection close");
+                            }))
+                            .is_ok(),
+                        "AMQP fiber must complete"
+                    );
+                },
+                recover,
+                complete,
+            );
             broker.finish().expect("scripted AMQP broker completion");
         },
     )
