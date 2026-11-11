@@ -60,11 +60,11 @@ impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
         key: consumer::Key,
         store: &'r Store<'c, 'b, 'd>,
     ) -> channel::Freed {
-        let Some((slot, freed)) = self.registry.remove(key, store) else {
+        let Some(entry) = self.registry.slots.entry(key.raw()) else {
             return channel::Freed::Available;
         };
-        slot.waker.clear();
-        freed
+        let mut slot = entry.remove();
+        store.drain(&mut slot.queue)
     }
 
     pub(crate) fn cancel<'r, 'c>(

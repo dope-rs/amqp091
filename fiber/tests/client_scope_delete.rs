@@ -40,12 +40,14 @@ fn prevents_replay() {
                     &Method::try_encode(1, 20, 11, &[0, 0, 0, 0]).expect("AMQP frame fixture"),
                 )
                 .expect("first channel open-ok");
-            for (request, response) in [(20, 21), (40, 41)] {
+            for (request, response, name) in
+                [(20, 21, "external"), (40, 41, "external"), (40, 41, "")]
+            {
                 let operation = Method::read(&mut first).expect("external queue operation");
                 operation
                     .check(1, 50, request)
                     .expect("external queue route");
-                assert_eq!(queue_name(&operation).expect("queue name"), "external");
+                assert_eq!(queue_name(&operation).expect("queue name"), name);
                 let args = if response == 41 { &[0_u8; 4][..] } else { &[] };
                 Method::write(&mut first, 1, 50, response, args).expect("external queue reply");
             }
@@ -149,6 +151,8 @@ fn prevents_replay() {
                                 .await.expect("external queue binding");
                             first.queue().delete("external", false, false)
                                 .await.expect("external queue delete");
+                            first.queue().delete("", false, false)
+                                .await.expect("empty queue delete");
                             let request = basic::Consume {
                                 queue: "shared",
                                 consumer_tag: "deleted-queue",

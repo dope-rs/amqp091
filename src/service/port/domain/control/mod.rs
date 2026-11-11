@@ -88,23 +88,21 @@ impl<'a, 'r, 'c, 'b, 'd, const ID: u8> Control<'a, 'r, 'c, 'b, 'd, ID> {
             });
         let freed = match admit {
             Admission::Missing(freed) => {
-                freed.merge(self.detach(access.reborrow(), lease.raw(), key, stores))
-            }
-            Admission::Continue(freed) | Admission::Pending(freed) => freed,
-            Admission::Failed(cause) => {
+                let freed = freed.merge(self.detach(access.reborrow(), lease.raw(), key, stores));
                 self.domain.session.write(access.reborrow(), |state| {
                     state.routes.collect(lease.raw());
                 });
+                freed
+            }
+            Admission::Continue(freed) | Admission::Pending(freed) => freed,
+            Admission::Failed(cause) => {
                 self.domain.fail(access, target, cause);
                 return;
             }
         };
         if let Err(error) = self.wake(target, freed) {
-            self.domain.fail(access.reborrow(), target, error);
+            self.domain.fail(access, target, error);
         }
-        self.domain.session.write(access, |state| {
-            state.routes.collect(lease.raw());
-        });
     }
 
     pub(crate) fn cancel(

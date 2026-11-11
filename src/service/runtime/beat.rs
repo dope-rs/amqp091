@@ -3,7 +3,6 @@ use std::{num, time};
 use dope::core::driver::schedule::{self, app, clock};
 use o3::base::cell::{local, region};
 
-use crate::failure;
 use crate::protocol::wire::frame;
 use crate::service::{self, port};
 use crate::state::epoch;
@@ -69,11 +68,7 @@ impl<'d, const ID: u8> Heartbeat<'d, ID> {
                 target,
                 None,
                 |output| frame::Encoder::new(output).heartbeat(),
-                |shared| {
-                    (shared.connection.lifecycle.status().epoch() == Some(target))
-                        .then_some(())
-                        .ok_or_else(|| failure::Error::Closed)
-                },
+                |_| Ok(()),
             ) {
                 port.fail(local::Access::new(region), target, error);
             }

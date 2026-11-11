@@ -135,16 +135,6 @@ impl<'b, 'd, const ID: u8> Registry<'b, 'd, ID> {
         }
     }
 
-    pub(in crate::state::channel::consumer) fn remove<'r, 'c>(
-        &mut self,
-        key: consumer::Key,
-        store: &'r Store<'c, 'b, 'd>,
-    ) -> Option<(Slot<'b, 'd, ID>, channel::Freed)> {
-        let mut slot = self.slots.entry(key.raw())?.remove();
-        let freed = store.drain(&mut slot.queue);
-        Some((slot, freed))
-    }
-
     pub(in crate::state::channel::consumer) fn begin_retire<'r, 'c>(
         &mut self,
         key: consumer::Key,

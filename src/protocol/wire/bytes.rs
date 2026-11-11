@@ -210,15 +210,13 @@ impl<'d> Field<'d> {
         budget: &Budget<'d>,
         field: short::Name<'_>,
     ) -> Result<Self, failure::Error> {
-        let len = field.len();
-        let bytes = Exact::try_slices(budget, [&[len], field.value().as_bytes()])
+        let bytes = Exact::try_slices(budget, [field.value().as_bytes()])
             .map_err(|error| failure::Error::resident(Allocation::Topology, error))?;
         Ok(Self { bytes })
     }
 
     pub(crate) fn value(&self) -> short::Name<'_> {
-        let range = Range::new(self.bytes.as_slice(), schema::Offset::default());
-        let bytes = range.as_slice();
+        let bytes = self.bytes.as_slice();
         // SAFETY: Field copied these exact value bytes from a live Name.
         unsafe { short::raw::name(short::raw::Encoded::new(bytes).bind()) }
     }
