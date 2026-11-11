@@ -80,7 +80,6 @@ pub(crate) trait Key: Copy + Eq {
 pub(crate) struct Store<'c, T, K: Key> {
     values: Vec<T>,
     identities: flat::Table<K>,
-    limit: usize,
     held: usize,
     scope: marker::PhantomData<fn(&'c ()) -> &'c ()>,
 }
@@ -160,14 +159,13 @@ impl<'c, T, K: Key> Store<'c, T, K> {
         Ok(Self {
             values: <Vec<T> as alloc::VecExt<T>>::try_new(cap.get())?,
             identities: flat::Table::try_new(ids)?,
-            limit: cap.get(),
             held: 0,
             scope: marker::PhantomData,
         })
     }
 
     pub(super) fn reserve(&mut self) -> Result<Hold<'c, K>, wire::Capacity> {
-        if self.values.len() + self.held >= self.limit {
+        if self.values.len() + self.held >= self.values.capacity() {
             return Err(wire::Capacity::TopologyMetadata);
         }
         self.held += 1;
@@ -215,15 +213,15 @@ impl<'c, T, K: Key> Store<'c, T, K> {
             }
             Some(flat::Entry::Vacant(entry)) => {
                 if matches!(&plan.entry, Upsert::Existing(_))
-                    && self.values.len() + self.held >= self.limit
+                    && self.values.len() + self.held >= self.values.capacity()
                 {
                     return Err((value, plan, wire::Capacity::TopologyMetadata));
                 }
                 let key = K::new(self.values.len() as u32);
                 entry.insert(key);
                 // SAFETY: the retained hold, or the Existing admission above,
-                // proves len < limit. Construction reserved at least limit;
-                // this exclusive store preserves that capacity and length.
+                // proves len < capacity. This store preserves the exact
+                // configured capacity established at construction.
                 (unsafe { alloc::raw::VecExt::vacancy(&mut self.values) })(value);
             }
             None => return Err((value, plan, wire::Capacity::TopologyMetadata)),

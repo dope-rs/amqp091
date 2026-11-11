@@ -244,7 +244,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
                             Retirement::Permanent.abort(close::Reason::Protocol)
                         };
                         close(directive);
-                        shared.routes.transport_ended(&cause, stores)
+                        shared.routes.transport_ended(cause, stores)
                     })
                 })?;
                 self.wake_route(epoch, freed)?;

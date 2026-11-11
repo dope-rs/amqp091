@@ -75,9 +75,9 @@ impl<'c, 'b, 'd, const ID: u8> Core<'c, 'b, 'd, ID> {
     pub(crate) fn finish_close(
         &mut self,
         target: epoch::Id<'d, ID>,
-    ) -> Result<terminal::Lease<'c, 'b, 'd>, failure::Error> {
+    ) -> Result<&terminal::Lease<'c, 'b, 'd>, failure::Error> {
         let cause = self.lifecycle.finish_close(target)?;
-        self.unblock();
+        self.blocked = None;
         Ok(cause)
     }
 
@@ -312,7 +312,7 @@ impl<'c, 'b, 'd, const ID: u8> Lifecycle<'c, 'b, 'd, ID> {
     fn finish_close(
         &mut self,
         target: epoch::Id<'d, ID>,
-    ) -> Result<terminal::Lease<'c, 'b, 'd>, failure::Error> {
+    ) -> Result<&terminal::Lease<'c, 'b, 'd>, failure::Error> {
         let (cause, kind) = match mem::replace(&mut self.status, status::Status::AwaitingTransport)
         {
             status::Status::Closing(current, cause, kind) if current == target => (cause, kind),
@@ -321,20 +321,16 @@ impl<'c, 'b, 'd, const ID: u8> Lifecycle<'c, 'b, 'd, ID> {
                 return Err(failure::Error::Protocol(wire::Fault::CloseClosed));
             }
         };
-        let returned = match cause.try_clone() {
-            Ok(returned) => returned,
-            Err(error) => {
-                self.status = status::Status::Closing(target, cause, kind);
-                return Err(failure::Error::Retain(error));
-            }
-        };
         self.status = status::Status::Closed(
             target,
             terminal::State::Active(cause),
             kind,
             status::CloseOutcome::Graceful,
         );
-        Ok(returned)
+        let status::Status::Closed(_, terminal::State::Active(cause), _, _) = &self.status else {
+            unreachable!("closed");
+        };
+        Ok(cause)
     }
 
     fn retire(&mut self, target: epoch::Id<'d, ID>, reason: failure::Reason) -> status::Retirement {

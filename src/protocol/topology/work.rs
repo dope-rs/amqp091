@@ -134,7 +134,7 @@ impl<'c, 'b, 'd, const ID: u8> Work<'c, 'b, 'd, ID> {
 
 const _: () = {
     assert!(mem::size_of::<topology::Local<'static, 0>>() <= 20 * mem::size_of::<u64>());
-    assert!(mem::size_of::<topology::Table<'static, 'static, 0>>() == 35 * mem::size_of::<u64>());
+    assert!(mem::size_of::<topology::Table<'static, 'static, 0>>() == 32 * mem::size_of::<u64>());
     assert!(
         mem::size_of::<topology::State<'_, 'static, 'static, 'static, 0>>()
             == 3 * mem::size_of::<usize>()

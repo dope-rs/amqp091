@@ -287,21 +287,18 @@ impl<'c, 'b, 'd, P> Detached<'_, 'c, 'b, 'd, P> {
         // SAFETY: consuming unlink retained this slot's Pending variant and owner.
         let pending = Variant::read(unsafe { depot::raw::Proof::new(self.slot.get()) });
         if pending.origin == entry::Origin::User {
-            let (slot, Entry { link, state }) = self.slot.take();
-            let state = mem::ManuallyDrop::new(state);
-            // SAFETY: Detached owns this exact Pending variant until its consuming reply.
-            let pending = unsafe {
-                ptr::addr_of!(
-                    (*ptr::from_ref(&*state).cast::<Variant<entry::Pending<'b, 'd>>>()).value
-                )
-                .read()
-            };
-            let state = entry::Stage::Ready(entry::Ready {
-                expect: pending.expect,
-                outcome,
-            });
-            slot.insert(Entry { link, state });
-            wakes.wake_once(&pending.waker);
+            let expect = pending.expect;
+            // SAFETY: this exclusive slot transfers its wake entry before overwrite.
+            let waker = unsafe { ptr::read(&pending.waker) };
+            // SAFETY: User retains Outbound::None; the other Pending fields have
+            // no Drop. Publish Ready in the same initialized slot before waking.
+            unsafe {
+                ptr::write(
+                    &mut self.slot.into_mut().state,
+                    entry::Stage::Ready(entry::Ready { expect, outcome }),
+                );
+            }
+            wakes.wake_once(&waker);
         } else {
             self.slot.discard();
         }
