@@ -1,5 +1,3 @@
-use std::num;
-
 use client::session::ingress;
 use dope::core::driver::route::KeyTag;
 use dope::core::driver::schedule::ready;
@@ -94,13 +92,11 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Store<'r, 'c, 'b, 'd, ID> {
         &self,
         source: scope::Bound<'input, 'd, R>,
     ) -> Result<hold::Retained<'d>, pending::Error> {
-        let Some(demand) = num::NonZero::<usize>::new(source.ceiling()) else {
-            return Ok(resident::Shared::new().into());
-        };
+        let demand = source.ceiling();
         let capacity = self.wait.resident().capacity();
-        if demand.get() > capacity {
+        if demand > capacity {
             let error = wire::Capacity::InboundContent {
-                attempted: demand.get(),
+                attempted: demand,
                 capacity,
             };
             return Err(pending::Error::Failure(failure::Error::Capacity(error)));

@@ -393,9 +393,9 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Ops<'o, 'r, 'c, 'b, 'd, I
                         let done = view.retain(queue);
                         self.complete(lease, || done.into(), epoch, region)
                     }
-                    Err(flight::Fault::Mismatch(mismatch)) => {
+                    Err(flight::Fault::Mismatch(expected)) => {
                         let error = failure::Error::QueueName {
-                            expected: mismatch.into_name(),
+                            expected,
                             actual: view.try_name(self.port().budget())?,
                         };
                         self.start_close(close, epoch, error, Reply::Channel, out, region);

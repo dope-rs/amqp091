@@ -54,20 +54,10 @@ pub(crate) struct Replay<'a, 'c, 'b, 'd, const ID: u8> {
     key: consumer::Key,
 }
 
-pub(crate) struct Mismatch<'b, 'd> {
-    expected: resident::Short<'b, 'd>,
-}
-
 pub(crate) enum Fault<'b, 'd> {
-    Mismatch(Mismatch<'b, 'd>),
+    Mismatch(resident::Short<'b, 'd>),
     Protocol(wire::Fault),
     Retain(rc::Error),
-}
-
-impl<'b, 'd> Mismatch<'b, 'd> {
-    pub(crate) fn into_name(self) -> resident::Short<'b, 'd> {
-        self.expected
-    }
 }
 
 impl<const ID: u8> Named<'_, '_, '_, '_, ID> {
@@ -233,7 +223,7 @@ impl<'c, 'b, 'd, const ID: u8> Flight<'c, 'b, 'd, ID> {
                     }
                 };
                 if name.as_ref() != value.value() {
-                    return Err(Fault::Mismatch(Mismatch { expected: name }));
+                    return Err(Fault::Mismatch(name));
                 }
                 return Ok(name);
             }
