@@ -66,9 +66,9 @@ fn bounds_channel_stores() {
                 .egress(config::Egress::new(4, 4096)),
         );
     let mut attempt = Attempt::new();
-    let executor = Executor::new(&mut attempt, profile());
-    assert!(executor.is_ok(), "executor creation");
-    let executor = executor.ok().expect("executor creation");
+    let executor = Executor::new(&mut attempt, profile())
+        .map_err(|error| format!("{:?}", error.kind()))
+        .expect("executor creation");
     let plan = (service::Spec::<0>::try_new(config, 1, 4)).expect("valid AMQP storage plan");
     let mut reports = Vec::new();
     executor.run(|active| {

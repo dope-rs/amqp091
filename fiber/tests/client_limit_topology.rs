@@ -6,6 +6,7 @@ use crate::common::amqp::Peer;
 use crate::common::amqp::wire::{Method, put_short};
 use crate::common::client::broker::rejection;
 
+use crate::common::recovery::client::complete;
 use crate::common::recovery::recover;
 pub mod common;
 
@@ -59,10 +60,7 @@ fn rejects_without_budget() {
                 broker.finish().expect("broker").expect("broker protocol");
             },
             recover,
-            |result| {
-                let result = result.as_ref().map_err(|error| error.kind());
-                assert!(result.is_ok(), "endpoint completion: {result:?}");
-            },
+            complete,
         );
     })
     .expect("bind topology broker");
@@ -106,10 +104,7 @@ fn rejects_without_records() {
                 broker.finish().expect("broker").expect("broker protocol");
             },
             recover,
-            |result| {
-                let result = result.as_ref().map_err(|error| error.kind());
-                assert!(result.is_ok(), "endpoint completion: {result:?}");
-            },
+            complete,
         );
     })
     .expect("bind topology broker");
@@ -152,10 +147,7 @@ fn rejects_without_identity() {
                 broker.finish().expect("broker").expect("broker protocol");
             },
             recover,
-            |result| {
-                let result = result.as_ref().map_err(|error| error.kind());
-                assert!(result.is_ok(), "endpoint completion: {result:?}");
-            },
+            complete,
         );
     })
     .expect("bind topology broker");
@@ -257,10 +249,7 @@ fn explicit_skips_identity() {
                     );
                 },
                 recover,
-                |result| {
-                    let result = result.as_ref().map_err(|error| error.kind());
-                    assert!(result.is_ok(), "endpoint completion: {result:?}");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
@@ -335,10 +324,7 @@ fn commits_generated_tag() {
                     );
                 },
                 recover,
-                |result| {
-                    let result = result.as_ref().map_err(|error| error.kind());
-                    assert!(result.is_ok(), "endpoint completion: {result:?}");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
@@ -384,10 +370,7 @@ fn rejects_generated_tag() {
                 broker.finish().expect("broker").expect("broker protocol");
             },
             recover,
-            |result| {
-                let result = result.as_ref().map_err(|error| error.kind());
-                assert!(result.is_ok(), "endpoint completion: {result:?}");
-            },
+            complete,
         );
     })
     .expect("bind topology broker");
@@ -435,10 +418,7 @@ fn rejects_consumer_limit() {
                 broker.finish().expect("broker").expect("broker protocol");
             },
             recover,
-            |result| {
-                let result = result.as_ref().map_err(|error| error.kind());
-                assert!(result.is_ok(), "endpoint completion: {result:?}");
-            },
+            complete,
         );
     })
     .expect("bind topology broker");
@@ -477,10 +457,7 @@ fn rejects_ambiguous_queue() {
                 broker.finish().expect("broker").expect("broker protocol");
             },
             recover,
-            |result| {
-                let result = result.as_ref().map_err(|error| error.kind());
-                assert!(result.is_ok(), "endpoint completion: {result:?}");
-            },
+            complete,
         );
     })
     .expect("bind topology broker");

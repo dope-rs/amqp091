@@ -249,7 +249,8 @@ fn resumes_cancellation_and_control_after_shared_quota() {
             let (spec, plan) = inputs;
             let mut attempt = Attempt::new();
             let executor = executor::Executor::new(&mut attempt, config)
-                .unwrap_or_else(|_| panic!("driver construction"));
+                .map_err(|error| format!("{:?}", error.kind()))
+                .expect("driver construction");
             let mut outcome = session::Completion::new();
             executor.run(|active| {
                 let result = active.enter_with(
@@ -359,10 +360,10 @@ fn resumes_cancellation_and_control_after_shared_quota() {
                                                 })))
                                                 .unwrap_or_else(|error| panic!("shared quota control={control}: {error:?}"));
                                             },
-                                        ).unwrap_or_else(|_| panic!("application lifecycle"));
+                                        ).expect("application lifecycle");
                                     },
                                 )
-                                .unwrap_or_else(|_| panic!("connector installation"));
+                                .expect("connector installation");
                         })
                         .expect("AMQP storage");
                     },

@@ -97,12 +97,7 @@ fn replays_consumer_without_tracked_queue() {
                     .expect("fiber");
                 },
                 recover,
-                |result| {
-                    result
-                        .as_ref()
-                        .map_err(|error| error.kind())
-                        .expect("endpoint");
-                },
+                complete,
             );
             broker.finish().expect("broker");
         },
