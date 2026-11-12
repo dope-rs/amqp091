@@ -104,7 +104,9 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Settle<'o, 'r, 'c, 'b, 'd
 
 impl<const ID: u8> Drop for Settle<'_, '_, '_, '_, '_, ID> {
     fn drop(&mut self) {
-        self.source.core().permits().cancel(&mut self.credit);
+        if self.credit.is_active() {
+            self.source.core().permits().cancel(&mut self.credit);
+        }
     }
 }
 
