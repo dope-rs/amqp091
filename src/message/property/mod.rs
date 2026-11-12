@@ -360,7 +360,11 @@ impl Properties {
         out.put_u16(class::BASIC.get());
         out.put_u16(0);
         out.put_u64(size);
-        out.put_u16(self.flags());
+        let flags = self.flags();
+        out.put_u16(flags);
+        if flags == 0 {
+            return;
+        }
         self.text.encode(Field::ContentType, out);
         self.text.encode(Field::ContentEncoding, out);
         if let Some(t) = self.headers.as_ref() {
