@@ -141,8 +141,8 @@ impl<'b, 'd, const ID: u8> Registry<'b, 'd, ID> {
         store: &'r Store<'c, 'b, 'd>,
         replay: impl FnOnce() -> bool,
     ) -> Option<(&mut Slot<'b, 'd, ID>, channel::Freed)> {
-        let (slot, freed) = match self.slots.entry(key.raw())? {
-            entry::Entry::Indexed(entry) => {
+        let (slot, freed) = match self.slots.entry(key.raw())?.into_phase() {
+            entry::Phase::Indexed(entry) => {
                 if !matches!(
                     entry.get().status,
                     Consumer::Active | Consumer::Untracked | Consumer::Replaying
@@ -153,7 +153,7 @@ impl<'b, 'd, const ID: u8> Registry<'b, 'd, ID> {
                 let freed = store.drain(&mut slot.queue);
                 (slot, freed)
             }
-            entry::Entry::Staged(entry) => {
+            entry::Phase::Staged(entry) => {
                 if entry.get().status != Consumer::Canceled || !replay() {
                     return None;
                 }

@@ -145,9 +145,9 @@ impl<'b, 'a, 'd, const ID: u8> Write<'a, 'b, 'd, ID> {
                 consumer::Mismatch::Tag(slot.spec.try_tag().map_err(Fault::Retain)?).into(),
             );
         }
-        let staged = match entry {
-            entry::Entry::Staged(staged) => staged,
-            entry::Entry::Indexed(indexed) => {
+        let staged = match entry.into_phase() {
+            entry::Phase::Staged(staged) => staged,
+            entry::Phase::Indexed(indexed) => {
                 return Err(Fault::Protocol(wire::Fault::ConsumerIndex {
                     consumer: indexed.key().parts().into_raw(),
                     expected: turn::Index::Staged,
@@ -174,9 +174,9 @@ impl<'b, 'a, 'd, const ID: u8> Write<'a, 'b, 'd, ID> {
             .registry
             .try_entry(token, turn::Step::Replay)
             .map_err(failure::Error::Protocol)?;
-        let mut entry = match entry {
-            entry::Entry::Indexed(entry) => entry,
-            entry::Entry::Staged(staged) => {
+        let mut entry = match entry.into_phase() {
+            entry::Phase::Indexed(entry) => entry,
+            entry::Phase::Staged(staged) => {
                 return Err(failure::Error::Protocol(wire::Fault::ConsumerIndex {
                     consumer: staged.key().parts().into_raw(),
                     expected: turn::Index::Indexed,

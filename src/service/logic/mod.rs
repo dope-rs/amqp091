@@ -327,7 +327,9 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
         )
     }
 
-    fn flush() -> Option<
+    fn flush<'w, W: dope::net::wire::Spec + 'w>(
+        _: &W::Connection<'w, KeyTag<ID>>,
+    ) -> Option<
         impl for<'a, 'x, 'y, 'z> Call<
             output::BoundArgs<
                 'a,
