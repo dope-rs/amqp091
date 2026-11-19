@@ -440,8 +440,7 @@ impl<'c, 'd, const ID: u8> Recovery<'c, 'd, ID> {
                             }
                             let mut item = item;
                             loop {
-                                let Some(replay) =
-                                    view.channel.consumers().read().next_replay(item)
+                                let Some(replay) = view.channel.consumers().next_replay(item)
                                 else {
                                     return ops::ControlFlow::Continue(None);
                                 };

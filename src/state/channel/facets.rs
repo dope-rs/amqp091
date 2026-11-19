@@ -177,9 +177,7 @@ impl<'c, 'b, 'a, 'd, const ID: u8> Method<'a, 'c, 'b, 'd, ID> {
     ) -> Result<Option<send::Command<'_>>, wire::Fault> {
         let pending = self.methods.claim(channel, next)?;
         Ok(match pending.outbound() {
-            send::Outbound::Consumer(key) => {
-                self.consumers.read().tag(*key).map(send::Command::Cancel)
-            }
+            send::Outbound::Consumer(key) => self.consumers.tag(*key).map(send::Command::Cancel),
             send::Outbound::Orphan(tag) => Some(send::Command::Cancel(short::Short::from(tag))),
             send::Outbound::Close => Some(send::Command::Close),
             send::Outbound::None => None,
@@ -237,7 +235,7 @@ impl<'c, 'b, 'a, 'd, const ID: u8> Method<'a, 'c, 'b, 'd, ID> {
             }
             replays::Action::Consumer(token) => {
                 let permit = self.methods.replay(expect)?;
-                let key = self.consumers.write().begin_replay(token)?;
+                let key = self.consumers.begin_replay(token)?;
                 permit.commit(flight::Prepared::ConsumerReplay(key));
                 topo.track();
             }
@@ -265,7 +263,7 @@ impl<'c, 'b, 'd, const ID: u8> Permit<'_, 'c, 'b, 'd, ID> {
                 } else {
                     None
                 };
-                let key = self.consumers.write().insert(spec)?;
+                let key = self.consumers.insert(spec)?;
                 self.method
                     .commit(flight::Prepared::ConsumerNew { key, identity });
                 topo.track();

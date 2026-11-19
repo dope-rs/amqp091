@@ -108,7 +108,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Turn<'_, 'r, 'c, 'b, 'd, ID> {
         let front = Front::begin(self.methods, method::Kind::CancelOk)
             .map_err(failure::Error::<resident::Short<'b, 'd>>::Protocol)?;
         let expected = match &front.member.get().outbound {
-            entry::Outbound::Consumer(key) => self.consumers.read().retiree(*key)?,
+            entry::Outbound::Consumer(key) => self.consumers.retiree(*key)?,
             entry::Outbound::Orphan(tag) => tag.try_clone().map_err(|error| failure::Error::<
                 resident::Short<'b, 'd>,
             >::Resident {
@@ -206,7 +206,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Turn<'_, 'r, 'c, 'b, 'd, ID> {
         let (reply, cancel) = match consumer {
             flight::Consumer::Named(consumer) => {
                 let key = consumer.key();
-                let pending = match self.consumers.write().named(key, name) {
+                let pending = match self.consumers.named(key, name) {
                     Ok(pending) => pending,
                     Err(error) => {
                         consumer.restore();
@@ -233,7 +233,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Turn<'_, 'r, 'c, 'b, 'd, ID> {
             }
             flight::Consumer::Fresh(consumer) => {
                 let key = consumer.key();
-                let pending = match self.consumers.write().fresh(key, name) {
+                let pending = match self.consumers.fresh(key, name) {
                     Ok(pending) => pending,
                     Err(error) => {
                         consumer.restore();
@@ -256,7 +256,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Turn<'_, 'r, 'c, 'b, 'd, ID> {
                 use consumer::replay::Completion;
 
                 let key = consumer.key();
-                let replay = match self.consumers.write().finish(key, name) {
+                let replay = match self.consumers.finish(key, name) {
                     Ok(replay) => replay,
                     Err(error) => {
                         consumer.restore();

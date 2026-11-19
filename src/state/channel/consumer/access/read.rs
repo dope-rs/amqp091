@@ -5,25 +5,16 @@ use crate::failure::wire::turn::Consumer;
 use crate::failure::wire::{self, turn};
 use crate::protocol::topology::records::consumer::Record;
 use crate::protocol::wire::text::{resident, short};
-use crate::state::channel::consumer::storage::registry::Registry;
 use crate::state::channel::consumer::storage::slot::Slot;
-use crate::state::channel::consumer::{self, replay};
+use crate::state::channel::consumer::{self, Set, replay};
 
-pub(crate) struct Read<'a, 'b, 'd, const ID: u8> {
-    registry: &'a Registry<'b, 'd, ID>,
-}
-
-impl<'b, 'a, 'd, const ID: u8> Read<'a, 'b, 'd, ID> {
-    pub(in crate::state::channel::consumer) const fn new(set: &'a Registry<'b, 'd, ID>) -> Self {
-        Self { registry: set }
-    }
-
+impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
     pub(crate) fn is_empty(&self) -> bool {
-        self.registry.slots.is_empty()
+        self.slots.is_empty()
     }
 
     pub(crate) fn has_replay(&self) -> bool {
-        self.registry.slots.values().any(|slot| {
+        self.slots.values().any(|slot| {
             matches!(
                 slot.status,
                 Consumer::Active | Consumer::Recovering | Consumer::Replaying
@@ -31,36 +22,32 @@ impl<'b, 'a, 'd, const ID: u8> Read<'a, 'b, 'd, ID> {
         })
     }
 
-    pub(crate) fn next_replay(&self, after: Option<usize>) -> Option<replay::Item<'a, 'b, 'd, ID>> {
+    pub(crate) fn next_replay(&self, after: Option<usize>) -> Option<replay::Item<'_, 'b, 'd, ID>> {
         let start = match after {
             Some(cursor) => cursor.checked_add(1)?,
             None => 0,
         };
-        (start..self.registry.slots.capacity()).find_map(|index| {
-            let (key, slot) = self.registry.slots.key_value_at(index)?;
+        (start..self.slots.capacity()).find_map(|index| {
+            let (key, slot) = self.slots.key_value_at(index)?;
             (slot.status == Consumer::Recovering)
                 .then(|| replay::Item::new(index, consumer::Key::from_raw(key), &slot.spec))
         })
     }
 
-    pub(crate) fn cancel_key(&self, id: num::NonZero<u64>) -> Option<consumer::Key> {
-        self.registry.cancel_key(id)
-    }
-
-    pub(crate) fn snapshot(&self, key: consumer::Key) -> Option<(&'a Record<'b, 'd, ID>, u64)> {
-        let slot = self.registry.get(key)?;
+    pub(crate) fn snapshot(&self, key: consumer::Key) -> Option<(&Record<'b, 'd, ID>, u64)> {
+        let slot = self.get(key)?;
         Some((&slot.spec, slot.buffered()))
     }
 
-    pub(crate) fn tag(&self, key: consumer::Key) -> Option<short::Short<'a>> {
-        self.registry.get(key).map(Slot::tag)
+    pub(crate) fn tag(&self, key: consumer::Key) -> Option<short::Short<'_>> {
+        self.get(key).map(Slot::tag)
     }
 
     pub(crate) fn retiree(
         &self,
         key: consumer::Key,
     ) -> Result<resident::Short<'b, 'd>, failure::Error<resident::Short<'b, 'd>>> {
-        let slot = match self.registry.slots.key_value_at(key.index() as usize) {
+        let slot = match self.slots.key_value_at(key.index() as usize) {
             Some((actual, slot)) if actual == key.raw() => slot,
             entry => {
                 return Err(failure::Error::Protocol(wire::Fault::ConsumerKey {

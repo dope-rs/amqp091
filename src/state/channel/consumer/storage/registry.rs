@@ -1,35 +1,19 @@
 use std::num;
 
-use dope::core::driver::schedule::ready::wake::{self, store};
-use o3::alloc;
-use o3::depot::arena::hash::runtime::{self, entry};
+use dope::core::driver::schedule::ready::wake;
+use o3::depot::arena::hash::runtime::entry;
 
 use crate::failure::wire;
 use crate::failure::wire::turn;
 use crate::failure::wire::turn::Consumer;
 use crate::protocol::wire::Fingerprint;
+use crate::state::channel::consumer::Set;
 use crate::state::channel::consumer::delivery::{Claim, Next, Route, Store};
 use crate::state::channel::consumer::storage::slot::Slot;
 use crate::state::channel::{self, consumer};
 
-pub(in crate::state::channel::consumer) struct Registry<'b, 'd, const ID: u8> {
-    pub(in crate::state::channel::consumer) slots:
-        runtime::Registry<Slot<'b, 'd, ID>, consumer::Tag>,
-}
-
-impl<'b, 'd, const ID: u8> Registry<'b, 'd, ID> {
-    pub(in crate::state::channel::consumer) fn try_new(
-        plan: consumer::Plan,
-    ) -> Result<Self, alloc::Error> {
-        Ok(Self {
-            slots: runtime::Registry::<Slot<'b, 'd, ID>, consumer::Tag>::try_new(plan.resident)?,
-        })
-    }
-
-    pub(in crate::state::channel::consumer) fn clear<'c>(
-        &mut self,
-        values: &Store<'c, 'b, 'd>,
-    ) -> channel::Freed {
+impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
+    pub(crate) fn drain<'c>(&mut self, values: &Store<'c, 'b, 'd>) -> channel::Freed {
         let mut freed = channel::Freed::Available;
         for index in 0..self.slots.capacity() {
             if let Some(mut entry) = self.slots.entry_at(index) {
@@ -39,12 +23,11 @@ impl<'b, 'd, const ID: u8> Registry<'b, 'd, ID> {
         freed
     }
 
-    pub(in crate::state::channel::consumer) fn next<'c>(
+    pub(crate) fn next<'c>(
         &mut self,
-        values: &Store<'c, 'b, 'd>,
-        wakes: store::Store<'d>,
         key: consumer::Key,
         wake: wake::Waker<'d>,
+        values: &Store<'c, 'b, 'd>,
     ) -> Next<'c, 'b, 'd> {
         let Some(entry) = self.slots.entry(key.raw()) else {
             return Next::Closed;
@@ -56,7 +39,7 @@ impl<'b, 'd, const ID: u8> Registry<'b, 'd, ID> {
                 if let Some(delivery) = delivery {
                     return Next::Delivery { delivery, freed };
                 }
-                wakes.set(&slot.waker, wake);
+                self.wakes.set(&slot.waker, wake);
                 Next::Pending
             }
             Consumer::Recovering | Consumer::Pending | Consumer::Replaying => Next::Unavailable,
@@ -64,10 +47,10 @@ impl<'b, 'd, const ID: u8> Registry<'b, 'd, ID> {
         }
     }
 
-    pub(in crate::state::channel::consumer) fn reserve<'r, 'c>(
+    pub(crate) fn reserve<'r, 'c>(
         &mut self,
-        values: &'r Store<'c, 'b, 'd>,
         tag: &str,
+        values: &'r Store<'c, 'b, 'd>,
     ) -> Option<Route<'r, 'c, 'b, 'd>> {
         let Some(entry) = self
             .slots
@@ -83,11 +66,7 @@ impl<'b, 'd, const ID: u8> Registry<'b, 'd, ID> {
         values.vacant().map(Route::Queue)
     }
 
-    pub(in crate::state::channel::consumer) fn route<'r, 'c>(
-        &mut self,
-        claim: Claim<'r, 'c, 'b, 'd>,
-        wakes: store::Store<'d>,
-    ) {
+    pub(crate) fn route<'r, 'c>(&mut self, claim: Claim<'r, 'c, 'b, 'd>) {
         let tag = claim.value().consumer_tag();
         let Some(entry) = self
             .slots
@@ -102,7 +81,7 @@ impl<'b, 'd, const ID: u8> Registry<'b, 'd, ID> {
         }
         let slot = entry.into_mut();
         claim.push(&mut slot.queue);
-        wakes.wake_once(&slot.waker);
+        self.wakes.wake_once(&slot.waker);
     }
 
     pub(in crate::state::channel::consumer) fn key(&self, tag: &str) -> Option<consumer::Key> {
@@ -135,12 +114,13 @@ impl<'b, 'd, const ID: u8> Registry<'b, 'd, ID> {
         }
     }
 
-    pub(in crate::state::channel::consumer) fn begin_retire<'r, 'c>(
+    #[must_use = "consumer retirement can free a blocked route"]
+    pub(crate) fn retire<'r, 'c>(
         &mut self,
         key: consumer::Key,
         store: &'r Store<'c, 'b, 'd>,
         replay: impl FnOnce() -> bool,
-    ) -> Option<(&mut Slot<'b, 'd, ID>, channel::Freed)> {
+    ) -> Option<channel::Freed> {
         let (slot, freed) = match self.slots.entry(key.raw())?.into_phase() {
             entry::Phase::Indexed(entry) => {
                 if !matches!(
@@ -161,35 +141,37 @@ impl<'b, 'd, const ID: u8> Registry<'b, 'd, ID> {
             }
         };
         slot.status = Consumer::Retiring;
-        Some((slot, freed))
+        slot.waker.clear();
+        Some(freed)
     }
 
-    pub(in crate::state::channel::consumer) fn cancel<'r, 'c>(
+    pub(crate) fn cancel<'r, 'c>(
         &mut self,
         tag: &str,
         store: &'r Store<'c, 'b, 'd>,
-    ) -> Option<(&mut Slot<'b, 'd, ID>, channel::Freed)> {
-        let entry = self
+    ) -> channel::Freed {
+        let Some(entry) = self
             .slots
             .find(Fingerprint::of(tag.as_bytes()).get(), |slot| {
                 slot.tag().value() == tag
-            })?;
+            })
+        else {
+            return channel::Freed::Available;
+        };
         if !matches!(
             entry.get().status,
             Consumer::Active | Consumer::Untracked | Consumer::Recovering | Consumer::Replaying
         ) {
-            return None;
+            return channel::Freed::Available;
         }
         let slot = entry.unindex().into_mut();
         slot.status = Consumer::Canceled;
         let freed = store.drain(&mut slot.queue);
-        Some((slot, freed))
+        self.wakes.wake_once(&slot.waker);
+        freed
     }
 
-    pub(in crate::state::channel::consumer) fn cancel_key(
-        &self,
-        id: num::NonZero<u64>,
-    ) -> Option<consumer::Key> {
+    pub(crate) fn cancel_key(&self, id: num::NonZero<u64>) -> Option<consumer::Key> {
         let (key, _) = self.slots.key_value_at(id.get() as u32 as usize)?;
         let key = consumer::Key::from_raw(key);
         (num::NonZero::from(key) == id).then_some(key)

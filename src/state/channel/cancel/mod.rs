@@ -33,7 +33,7 @@ impl<'c, 'b, 'd, const ID: u8> Access<'_, 'c, 'b, 'd, ID> {
                 self.publishing.is_active(),
                 id,
             ))),
-            lanes::Kind::Consumer => self.consumers.read().cancel_key(id).map(Outcome::Consumer),
+            lanes::Kind::Consumer => self.consumers.cancel_key(id).map(Outcome::Consumer),
             lanes::Kind::Confirm => self.confirm.reap(id).map(|()| Outcome::Confirm),
             lanes::Kind::Publish => {
                 let key = streams::Key::new(id);

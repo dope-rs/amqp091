@@ -10,14 +10,9 @@ use crate::failure::{self, wire};
 use crate::protocol::topology::records::consumer::Record;
 use crate::protocol::wire::Fingerprint;
 use crate::protocol::wire::text::{resident, short};
-use crate::state::channel::consumer;
 use crate::state::channel::consumer::replay;
-use crate::state::channel::consumer::storage::registry::Registry;
 use crate::state::channel::consumer::storage::slot::Slot;
-
-pub(crate) struct Write<'a, 'b, 'd, const ID: u8> {
-    registry: &'a mut Registry<'b, 'd, ID>,
-}
+use crate::state::channel::consumer::{self, Set};
 
 pub(crate) struct Named<'a, 'b, 'd, const ID: u8> {
     entry: Vacancy<entry::Live<'a, Slot<'b, 'd, ID>, consumer::Tag, entry::Staged>, u64>,
@@ -69,20 +64,14 @@ impl<'b, 'd, const ID: u8> Fresh<'_, 'b, 'd, '_, ID> {
     }
 }
 
-impl<'b, 'a, 'd, const ID: u8> Write<'a, 'b, 'd, ID> {
-    pub(in crate::state::channel::consumer) const fn new(
-        registry: &'a mut Registry<'b, 'd, ID>,
-    ) -> Self {
-        Self { registry }
-    }
-
+impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
     pub(crate) fn insert(
         &mut self,
         spec: Record<'b, 'd, ID>,
     ) -> Result<consumer::Key, failure::Error> {
         let tag = spec.tag();
         if !tag.is_empty()
-            && let Some(actual) = self.registry.key(tag.value())
+            && let Some(actual) = self.key(tag.value())
         {
             return Err(failure::Error::Protocol(wire::Fault::ConsumerKey {
                 expected: None,
@@ -90,7 +79,7 @@ impl<'b, 'a, 'd, const ID: u8> Write<'a, 'b, 'd, ID> {
                 step: turn::Step::Pending,
             }));
         }
-        let Some(vacant) = self.registry.slots.vacant() else {
+        let Some(vacant) = self.slots.vacant() else {
             return Err(failure::Error::Capacity(wire::Capacity::Consumer));
         };
         Ok(consumer::Key::from_raw(
@@ -99,20 +88,20 @@ impl<'b, 'a, 'd, const ID: u8> Write<'a, 'b, 'd, ID> {
     }
 
     pub(crate) fn named(
-        self,
+        &mut self,
         key: consumer::Key,
         tag: short::Short<'_>,
-    ) -> Result<Named<'a, 'b, 'd, ID>, Fault<'b, 'd>> {
+    ) -> Result<Named<'_, 'b, 'd, ID>, Fault<'b, 'd>> {
         Ok(Named {
             entry: self.try_reserve::<false>(key, tag)?,
         })
     }
 
     pub(crate) fn fresh<'n>(
-        self,
+        &mut self,
         key: consumer::Key,
         tag: short::Short<'n>,
-    ) -> Result<Fresh<'a, 'b, 'd, 'n, ID>, Fault<'b, 'd>> {
+    ) -> Result<Fresh<'_, 'b, 'd, 'n, ID>, Fault<'b, 'd>> {
         Ok(Fresh {
             entry: self.try_reserve::<true>(key, tag)?,
             name: tag,
@@ -120,15 +109,14 @@ impl<'b, 'a, 'd, const ID: u8> Write<'a, 'b, 'd, ID> {
     }
 
     fn try_reserve<const FRESH: bool>(
-        self,
+        &mut self,
         key: consumer::Key,
         tag: short::Short<'_>,
     ) -> Result<
-        Vacancy<entry::Live<'a, Slot<'b, 'd, ID>, consumer::Tag, entry::Staged>, u64>,
+        Vacancy<entry::Live<'_, Slot<'b, 'd, ID>, consumer::Tag, entry::Staged>, u64>,
         Fault<'b, 'd>,
     > {
         let entry = self
-            .registry
             .try_entry(key, turn::Step::Pending)
             .map_err(Fault::Protocol)?;
         let slot = entry.get();
@@ -171,7 +159,6 @@ impl<'b, 'a, 'd, const ID: u8> Write<'a, 'b, 'd, ID> {
     ) -> Result<consumer::Key, failure::Error> {
         let id = num::NonZero::from(token);
         let entry = self
-            .registry
             .try_entry(token, turn::Step::Replay)
             .map_err(failure::Error::Protocol)?;
         let mut entry = match entry.into_phase() {
@@ -201,7 +188,6 @@ impl<'b, 'a, 'd, const ID: u8> Write<'a, 'b, 'd, ID> {
         tag: short::Short<'_>,
     ) -> Result<replay::Completion<'b, 'd>, Fault<'b, 'd>> {
         let mut entry = self
-            .registry
             .try_entry(key, turn::Step::Replay)
             .map_err(Fault::Protocol)?;
         if entry.get().tag().value() != tag.value() {
@@ -231,7 +217,6 @@ impl<'b, 'a, 'd, const ID: u8> Write<'a, 'b, 'd, ID> {
 }
 
 const _: () = {
-    assert!(mem::size_of::<Write<'static, 'static, 'static, 0>>() == mem::size_of::<usize>());
     assert!(mem::size_of::<Named<'static, 'static, 'static, 0>>() == 4 * mem::size_of::<usize>());
     assert!(
         mem::size_of::<Fresh<'static, 'static, 'static, 'static, 0>>()

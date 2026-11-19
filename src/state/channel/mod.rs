@@ -262,7 +262,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Session<'r, 'c, 'b, 'd, ID> {
     }
 
     pub(crate) fn has_replay(&self, topo: &topology::State<'_, 'c, 'b, 'd, ID>) -> bool {
-        topo.graph().has_replay() || self.stable.consumers.read().has_replay()
+        topo.graph().has_replay() || self.stable.consumers.has_replay()
     }
 
     pub(crate) fn change(
@@ -312,7 +312,7 @@ impl<'r, 'c, 'b, 'd, const ID: u8> Session<'r, 'c, 'b, 'd, ID> {
     pub(crate) fn can_release(&self) -> bool {
         self.epoch.control.phase == Phase::Closed
             && self.stable.methods.is_quiescent()
-            && self.stable.consumers.read().is_empty()
+            && self.stable.consumers.is_empty()
             && self.stable.confirm.is_empty()
             && !self.stable.publishing.is_active()
     }

@@ -1,20 +1,20 @@
 use dope::core::driver::schedule::ready::wake;
 use dope::core::driver::{self};
 use o3::alloc;
+use o3::depot::arena::hash::runtime;
 use wake::store;
 
 use crate::failure::wire::turn::Consumer;
 use crate::protocol::topology::records::consumer::Record;
 use crate::protocol::topology::records::queue;
 use crate::protocol::wire::text::short;
-use crate::state::channel::consumer::access::{Read, Write};
-use crate::state::channel::consumer::delivery::{Claim, Next, Route, Store};
-use crate::state::channel::consumer::storage::registry::Registry;
+use crate::state::channel::consumer::delivery::Store;
+use crate::state::channel::consumer::storage::slot::Slot;
 use crate::state::channel::{self, consumer};
 
 pub(crate) struct Set<'b, 'd, const ID: u8> {
-    wakes: store::Store<'d>,
-    registry: Registry<'b, 'd, ID>,
+    pub(super) wakes: store::Store<'d>,
+    pub(super) slots: runtime::Registry<Slot<'b, 'd, ID>, consumer::Tag>,
 }
 
 impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
@@ -24,34 +24,18 @@ impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
     ) -> Result<Self, alloc::Error> {
         Ok(Self {
             wakes: store::Store::new(driver),
-            registry: Registry::try_new(plan)?,
+            slots: runtime::Registry::try_new(plan.resident)?,
         })
     }
 
-    pub(crate) fn drain<'r, 'c>(&mut self, store: &'r Store<'c, 'b, 'd>) -> channel::Freed {
-        self.registry.clear(store)
-    }
-
     pub(crate) fn close(&mut self) {
-        for index in 0..self.registry.slots.capacity() {
-            let Some(entry) = self.registry.slots.entry_at(index) else {
+        for index in 0..self.slots.capacity() {
+            let Some(entry) = self.slots.entry_at(index) else {
                 continue;
             };
             self.wakes.wake_once(&entry.get().waker);
             entry.discard();
         }
-    }
-
-    #[must_use = "consumer retirement can free a blocked route"]
-    pub(crate) fn retire<'r, 'c>(
-        &mut self,
-        key: consumer::Key,
-        store: &'r Store<'c, 'b, 'd>,
-        replay: impl FnOnce() -> bool,
-    ) -> Option<channel::Freed> {
-        let (slot, freed) = self.registry.begin_retire(key, store, replay)?;
-        slot.waker.clear();
-        Some(freed)
     }
 
     #[must_use = "consumer removal can free a blocked route"]
@@ -60,44 +44,12 @@ impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
         key: consumer::Key,
         store: &'r Store<'c, 'b, 'd>,
     ) -> channel::Freed {
-        let Some(entry) = self.registry.slots.entry(key.raw()) else {
+        let Some(mut entry) = self.slots.entry(key.raw()) else {
             return channel::Freed::Available;
         };
-        let mut slot = entry.remove();
-        store.drain(&mut slot.queue)
-    }
-
-    pub(crate) fn cancel<'r, 'c>(
-        &mut self,
-        tag: &str,
-        store: &'r Store<'c, 'b, 'd>,
-    ) -> channel::Freed {
-        let Some((slot, freed)) = self.registry.cancel(tag, store) else {
-            return channel::Freed::Available;
-        };
-        self.wakes.wake_once(&slot.waker);
+        let freed = store.drain(&mut entry.get_mut().queue);
+        entry.discard();
         freed
-    }
-
-    pub(crate) fn next<'r, 'c>(
-        &mut self,
-        key: consumer::Key,
-        wake: wake::Waker<'d>,
-        store: &'r Store<'c, 'b, 'd>,
-    ) -> Next<'c, 'b, 'd> {
-        self.registry.next(store, self.wakes, key, wake)
-    }
-
-    pub(crate) fn reserve<'r, 'c>(
-        &mut self,
-        tag: &str,
-        store: &'r Store<'c, 'b, 'd>,
-    ) -> Option<Route<'r, 'c, 'b, 'd>> {
-        self.registry.reserve(store, tag)
-    }
-
-    pub(crate) fn route<'r, 'c>(&mut self, claim: Claim<'r, 'c, 'b, 'd>) {
-        self.registry.route(claim, self.wakes);
     }
 
     pub(crate) fn rollback(&mut self, undo: Option<consumer::Rollback>) {
@@ -106,7 +58,7 @@ impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
         };
         match undo {
             consumer::Rollback::New(key) => {
-                let Some(entry) = self.registry.slots.entry(key.raw()) else {
+                let Some(entry) = self.slots.entry(key.raw()) else {
                     return;
                 };
                 if entry.get().status == Consumer::Pending {
@@ -114,7 +66,7 @@ impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
                 }
             }
             consumer::Rollback::Replay(key) => {
-                let Some(mut entry) = self.registry.slots.entry(key.raw()) else {
+                let Some(mut entry) = self.slots.entry(key.raw()) else {
                     return;
                 };
                 if entry.get().status == Consumer::Replaying {
@@ -129,7 +81,7 @@ impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
         queue: Option<queue::Key<'d, ID>>,
         name: short::Short<'_>,
     ) {
-        forget_if(&mut self.registry, |spec| match (spec.key(), queue) {
+        forget_if(&mut self.slots, |spec| match (spec.key(), queue) {
             (Some(left), Some(right)) => left == right,
             (None, _) => spec.name().value() == name.value(),
             _ => false,
@@ -137,12 +89,12 @@ impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
     }
 
     pub(crate) fn forget_key(&mut self, queue: queue::Key<'d, ID>) {
-        forget_if(&mut self.registry, |spec| spec.key() == Some(queue));
+        forget_if(&mut self.slots, |spec| spec.key() == Some(queue));
     }
 
     pub(crate) fn disconnect(&mut self) {
-        for index in 0..self.registry.slots.capacity() {
-            let Some(mut entry) = self.registry.slots.entry_at(index) else {
+        for index in 0..self.slots.capacity() {
+            let Some(mut entry) = self.slots.entry_at(index) else {
                 continue;
             };
             match entry.get().status {
@@ -164,22 +116,14 @@ impl<'b, 'd, const ID: u8> Set<'b, 'd, ID> {
             self.wakes.wake_once(&entry.get_mut().waker);
         }
     }
-
-    pub(crate) const fn read(&self) -> Read<'_, 'b, 'd, ID> {
-        Read::new(&self.registry)
-    }
-
-    pub(crate) fn write(&mut self) -> Write<'_, 'b, 'd, ID> {
-        Write::new(&mut self.registry)
-    }
 }
 
 fn forget_if<'b, 'd, const ID: u8>(
-    set: &mut Registry<'b, 'd, ID>,
+    set: &mut runtime::Registry<Slot<'b, 'd, ID>, consumer::Tag>,
     mut pick: impl FnMut(&Record<'b, 'd, ID>) -> bool,
 ) {
-    for index in 0..set.slots.capacity() {
-        let Some(mut entry) = set.slots.entry_at(index) else {
+    for index in 0..set.capacity() {
+        let Some(mut entry) = set.entry_at(index) else {
             continue;
         };
         if !pick(&entry.get().spec) {

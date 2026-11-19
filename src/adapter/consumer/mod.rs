@@ -217,8 +217,7 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8> Consumers<'o, 'r, 'c, 'b,
             state
                 .routes
                 .project(lease.raw(), |route| {
-                    let Some((record, queued)) =
-                        route.channel.consumers().read().snapshot(key.raw())
+                    let Some((record, queued)) = route.channel.consumers().snapshot(key.raw())
                     else {
                         return Ok(None);
                     };
