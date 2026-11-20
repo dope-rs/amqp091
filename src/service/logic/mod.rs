@@ -1,5 +1,3 @@
-use core::convert::Infallible;
-
 use dope::core::Errno;
 use dope::core::driver::route::KeyTag;
 use dope::core::driver::{self};
@@ -314,17 +312,13 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
 impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
     policy::Output<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, KeyTag<ID>, 1> for Logic<'o, 'd, ID>
 {
-    fn sent() -> impl for<'a, 'x> Call<(
-        &'a mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
-        Id<'d, KeyTag<ID>>,
-        egress::Pending,
-        &'x mut region::Token<region::Identity<'d, 1>>,
-    )> {
-        output::Sent::<_>::Ready(
-            |owner: &mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>| {
-                service::Admission::new(owner.root().domain()).sync();
-            },
-        )
+    fn sent(
+        owner: &mut State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        _: Id<'d, KeyTag<ID>>,
+        _: egress::Pending,
+        _: &mut region::Token<region::Identity<'d, 1>>,
+    ) {
+        service::Admission::new(owner.root().domain()).sync();
     }
 
     fn flush<'w, W: dope::net::wire::Spec + 'w>(
@@ -383,20 +377,13 @@ impl<'o, 'r: 'o, 'c: 'r, 'b: 'c, 'd: 'b, const ID: u8>
         )
     }
 
-    fn cancel() -> impl for<'a, 'x> Call<(
-        &'a State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
-        Self::Send,
-        &'x mut region::Token<region::Identity<'d, 1>>,
-    )> {
-        output::Cancel::<Infallible, _>::Owner(
-            |(owner, payload): (
-                &State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
-                Self::Send,
-            )| {
-                drop(payload);
-                service::Admission::new(owner.root().domain()).sync();
-            },
-        )
+    fn cancel(
+        owner: &State<'o, 'd, Port<'r, 'c, 'b, 'd, ID>, Self, KeyTag<ID>, 1>,
+        payload: Self::Send,
+        _: &mut region::Token<region::Identity<'d, 1>>,
+    ) {
+        drop(payload);
+        service::Admission::new(owner.root().domain()).sync();
     }
 }
 
